@@ -259,6 +259,57 @@ def deploy_and_verify(release_tag, remote_release_dir):
     print(f"\n[SUCCESS] Release {release_tag} successfully deployed and verified!")
 
 
+def diff_remote():
+    import difflib
+    print("[*] Comparing local vds_bot/ with remote VDS production...")
+    has_diff = False
+    for filename in MANIFEST_FILES:
+        local_path = LOCAL_DIR / filename
+        local_bytes = local_path.read_bytes() if local_path.exists() else b""
+        local_hash = hashlib.sha256(local_bytes).hexdigest()
+
+        res_hash = run_ssh(f"sha256sum {REMOTE_BASE}/{filename} 2>/dev/null || echo ''", check=False)
+        parts = res_hash.stdout.strip().split()
+        remote_hash = parts[0] if parts else ""
+
+        if local_hash != remote_hash:
+            has_diff = True
+            print(f"\n[DIFF] Differences detected in {filename} (local: {local_hash[:8]}, remote: {remote_hash[:8] or 'missing'}):")
+            res_content = run_ssh(f"cat {REMOTE_BASE}/{filename} 2>/dev/null || echo ''", check=False)
+            remote_text = res_content.stdout.replace("\r\n", "\n")
+            local_text = local_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+            diff = list(difflib.unified_diff(
+                remote_text.splitlines(keepends=True),
+                local_text.splitlines(keepends=True),
+                fromfile=f"remote:{REMOTE_BASE}/{filename}",
+                tofile=f"local:{filename}",
+                n=3,
+            ))
+            sys.stdout.writelines(diff)
+    if not has_diff:
+        print("[✓] All files are 100% in sync with VDS production!")
+
+
+def pull_remote():
+    print("[*] Pulling latest code from VDS production into local vds_bot/...")
+    for filename in MANIFEST_FILES:
+        res = run_ssh(f"cat {REMOTE_BASE}/{filename} 2>/dev/null", check=False)
+        if res.returncode == 0 and res.stdout:
+            local_path = LOCAL_DIR / filename
+            local_path.write_text(res.stdout, encoding="utf-8")
+            print(f"  -> Updated local {filename}")
+    print("[✓] Local vds_bot/ successfully updated from VDS.")
+
+
+def service_status():
+    print("[*] Checking VDS pc-control-bot service status...")
+    status_res = run_ssh("systemctl status pc-control-bot.service --no-pager", check=False)
+    print(status_res.stdout)
+    logs_res = run_ssh("journalctl -u pc-control-bot.service -n 25 --no-pager", check=False)
+    print("\n--- Recent Journal Logs ---")
+    print(logs_res.stdout)
+
+
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else "check"
     manifest = compute_manifest()
@@ -267,6 +318,15 @@ if __name__ == "__main__":
         print("Release Manifest (local):")
         print(json.dumps(manifest, indent=2))
         print("\nAll local release files exist and are valid.")
+
+    elif action == "diff":
+        diff_remote()
+
+    elif action == "pull":
+        pull_remote()
+
+    elif action == "status":
+        service_status()
 
     elif action == "rollback":
         rollback_to_previous()
@@ -282,3 +342,8 @@ if __name__ == "__main__":
         verify_remote_hashes(remote_dir, m)
         run_preflight(remote_dir)
         deploy_and_verify(release_tag, remote_dir)
+
+    else:
+        print(f"Unknown action: {action}")
+        print("Supported actions: check, diff, pull, status, stage, deploy, rollback")
+        sys.exit(1)

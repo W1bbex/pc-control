@@ -17,6 +17,8 @@ data/*
 logs/
 *.log
 backups/*.zip
+backups/.backup_state.json
+backups/*.tmp.zip
 state.json
 boot-state.json
 app_icon_cache.json
