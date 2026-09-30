@@ -7,11 +7,15 @@ import time
 from pathlib import Path
 import requests
 
-from icon_extractor import extract_app_icon_png
+try:
+    from .icon_extractor import extract_app_icon_png
+except ImportError:
+    from icon_extractor import extract_app_icon_png
 
 LOG = logging.getLogger("app_emoji_manager")
 
-BASE_DIR = Path(__file__).resolve().parent
+_parent = Path(__file__).resolve().parent
+BASE_DIR = _parent.parent if _parent.name == "core" else _parent
 DATA_DIR = BASE_DIR / "data"
 _data_cache = DATA_DIR / "app_icon_cache.json"
 _root_cache = BASE_DIR / "app_icon_cache.json"

@@ -14,11 +14,13 @@ from typing import Any, Dict, List, Optional
 
 LOG = logging.getLogger("activity_db")
 
-BASE_DIR = Path(__file__).resolve().parent
+_parent = Path(__file__).resolve().parent
+BASE_DIR = _parent.parent if _parent.name == "core" else _parent
 DATA_DIR = BASE_DIR / "data"
 _data_db = DATA_DIR / "activity.db"
 _root_db = BASE_DIR / "activity.db"
 DB_PATH = _data_db if _data_db.exists() or not _root_db.exists() else _root_db
+
 
 
 class ActivityDB:

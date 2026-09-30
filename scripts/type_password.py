@@ -6,7 +6,8 @@ import subprocess
 import sys
 import time
 
-BASE_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+BASE_DIR = SCRIPT_DIR.parent if SCRIPT_DIR.name == "scripts" else SCRIPT_DIR
 LOG_DIR = BASE_DIR / "logs"
 LOG_PATH = LOG_DIR / "type_password.log"
 CONFIG_PATH = BASE_DIR / "config.json"

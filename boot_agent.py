@@ -1200,6 +1200,7 @@ class SystemAgent:
 
                     script_candidates = [
                         unlock_cfg.get("script_path"),
+                        str(BASE_DIR / "scripts" / "type_password.py"),
                         str(BASE_DIR / "type_password.py"),
                     ]
                     script = next((p for p in script_candidates if p and Path(p).is_file()), None)

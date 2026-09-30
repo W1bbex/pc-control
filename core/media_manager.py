@@ -20,7 +20,8 @@ import winrt.windows.media.control as wmc
 
 LOG = logging.getLogger("media_manager")
 
-BASE_DIR = Path(__file__).resolve().parent
+_parent = Path(__file__).resolve().parent
+BASE_DIR = _parent.parent if _parent.name == "core" else _parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
 try:

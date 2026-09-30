@@ -25,13 +25,17 @@ import paho.mqtt.client as mqtt
 from PIL import ImageGrab
 import psutil
 
-from activity_logger import ActivityTracker
-from app_emoji_manager import AppEmojiManager
+BASE_DIR = Path(__file__).resolve().parent
+CORE_DIR = BASE_DIR / "core"
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
+
+from core.activity_logger import ActivityTracker
+from core.app_emoji_manager import AppEmojiManager
 
 AGENT_VERSION = "2.0"
 AGENT_BOOT_ID = f"desktop-{uuid.uuid4().hex[:12]}"
 
-BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = BASE_DIR / "config.json"
 _data_state = DATA_DIR / "state.json"
@@ -346,7 +350,7 @@ class PCControlAgent:
         self.current_session_start = None
         self.current_session_emoji_id = None
 
-        from media_manager import MediaManager
+        from core.media_manager import MediaManager
         self.media_manager = MediaManager(
             token=telegram_token,
             user_id=telegram_user_id,
@@ -498,7 +502,7 @@ class PCControlAgent:
                 req = json.loads(payload_str)
                 qtype = req.get("type", "summary")
                 qval = req.get("val", "")
-                from activity_db import get_activity_db
+                from core.activity_db import get_activity_db
                 db = get_activity_db()
                 if qtype == "summary":
                     res = db.get_day_summary(qval)
@@ -1689,8 +1693,8 @@ class PCControlAgent:
             LOG.exception("Failed to publish instant active app telemetry")
 
     def _handle_active_app_change(self, exe_path, exe_name, title):
-        from app_emoji_manager import IGNORED_PROCESSES
-        from activity_db import get_activity_db
+        from core.app_emoji_manager import IGNORED_PROCESSES
+        from core.activity_db import get_activity_db
         key = exe_name.lower()
         if key in IGNORED_PROCESSES:
             return
@@ -1980,7 +1984,7 @@ class PCControlAgent:
             # Flush final active app session to SQLite
             if self.current_session_app and self.current_session_start:
                 try:
-                    from activity_db import get_activity_db
+                    from core.activity_db import get_activity_db
                     get_activity_db().record_session(
                         app_name=self.current_session_app,
                         window_title=self.current_session_title,
