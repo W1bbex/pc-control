@@ -12,7 +12,10 @@ from icon_extractor import extract_app_icon_png
 LOG = logging.getLogger("app_emoji_manager")
 
 BASE_DIR = Path(__file__).resolve().parent
-CACHE_FILE = BASE_DIR / "app_icon_cache.json"
+DATA_DIR = BASE_DIR / "data"
+_data_cache = DATA_DIR / "app_icon_cache.json"
+_root_cache = BASE_DIR / "app_icon_cache.json"
+CACHE_FILE = _data_cache if _data_cache.exists() or not _root_cache.exists() else _root_cache
 
 try:
     from dotenv import load_dotenv

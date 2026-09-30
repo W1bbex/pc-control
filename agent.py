@@ -32,8 +32,11 @@ AGENT_VERSION = "2.0"
 AGENT_BOOT_ID = f"desktop-{uuid.uuid4().hex[:12]}"
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = BASE_DIR / "config.json"
-STATE_PATH = BASE_DIR / "state.json"
+_data_state = DATA_DIR / "state.json"
+_root_state = BASE_DIR / "state.json"
+STATE_PATH = _data_state if _data_state.exists() or not _root_state.exists() else _root_state
 LOG_DIR = BASE_DIR / "logs"
 
 def _load_env_file(path: Path):

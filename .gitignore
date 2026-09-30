@@ -8,10 +8,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.cache/
+data/*
+!data/.gitkeep
+
 
 # Runtime and local state
 logs/
 *.log
+backups/*.zip
 state.json
 boot-state.json
 app_icon_cache.json

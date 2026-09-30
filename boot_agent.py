@@ -27,8 +27,11 @@ AGENT_VERSION = "2.0"
 AGENT_BOOT_ID = f"sys-{uuid.uuid4().hex[:12]}"
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = BASE_DIR / "config.json"
-STATE_PATH = BASE_DIR / "boot-state.json"
+_data_state = DATA_DIR / "boot-state.json"
+_root_state = BASE_DIR / "boot-state.json"
+STATE_PATH = _data_state if _data_state.exists() or not _root_state.exists() else _root_state
 SENSOR_SNAPSHOT = BASE_DIR / "hardware" / "admin-sensors.json"
 LOG_DIR = BASE_DIR / "logs"
 

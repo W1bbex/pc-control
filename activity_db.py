@@ -14,12 +14,17 @@ from typing import Any, Dict, List, Optional
 
 LOG = logging.getLogger("activity_db")
 
-DB_PATH = Path(__file__).resolve().parent / "activity.db"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+_data_db = DATA_DIR / "activity.db"
+_root_db = BASE_DIR / "activity.db"
+DB_PATH = _data_db if _data_db.exists() or not _root_db.exists() else _root_db
 
 
 class ActivityDB:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path) if db_path else DB_PATH
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
