@@ -5,8 +5,32 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from activity_logger import ActivityRecorder
-from activity_report import load_events, parse_local
+from core.activity_logger import ActivityRecorder
+
+
+def parse_local(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed
+
+
+def load_events(log_dir: Path, start: datetime, end: datetime) -> list[dict]:
+    events = []
+    for path in sorted(log_dir.glob("activity.jsonl*")):
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                        timestamp = datetime.fromisoformat(event["ts"])
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+                    if start <= timestamp <= end:
+                        events.append(event)
+        except OSError:
+            continue
+    return sorted(events, key=lambda item: item.get("epoch", 0))
 
 
 class TestActivityLogging(unittest.TestCase):
