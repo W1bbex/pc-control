@@ -1,0 +1,31 @@
+# Secrets and Environment Variables
+.env
+*.env
+!vds_bot/pc-control-bot.env.example
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Runtime and local state
+logs/
+*.log
+state.json
+boot-state.json
+app_icon_cache.json
+media_cover_cache.json
+activity.db*
+activity_history.db
+*.tmp
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Scratch and subagents
+.agents/
+scratch/
+

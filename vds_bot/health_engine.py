@@ -1,0 +1,299 @@
+import time
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+LOG = logging.getLogger("pc-control-bot.health_engine")
+
+
+class PCState:
+    READY = "READY"
+    LOCKED = "LOCKED"
+    BOOTING = "BOOTING"
+    DEGRADED = "DEGRADED"
+    SHUTDOWN_OBSERVED = "SHUTDOWN_OBSERVED"
+    UNREACHABLE = "UNREACHABLE"
+
+
+@dataclass
+class PCStateInfo:
+    state: str
+    label: str
+    reason: str
+    telemetry_age: Optional[float]
+    system_status: str
+    desktop_status: str
+    session_status: str
+    esp_status: str
+    mqtt_online: bool
+
+
+class ComponentState:
+    def __init__(self, name, stale_threshold=120.0):
+        self.name = name
+        self.status = "unknown"
+        self.boot_id = None
+        self.last_ts = 0.0
+        self.local_updated_at = 0.0
+        self.stale_threshold = stale_threshold
+
+    def update(self, status, boot_id=None, ts=None, is_retained=False):
+        now = time.time()
+        
+        # Protect against empty status
+        if not status:
+            status = "unknown"
+
+        # Check reboot / boot_id transition before sequence check
+        if boot_id is not None:
+            if self.boot_id is not None and boot_id != self.boot_id:
+                LOG.info(
+                    "Component %s rebooted (boot_id changed: %s -> %s). Resetting timestamp sequence.",
+                    self.name, self.boot_id, boot_id
+                )
+                self.last_ts = 0.0
+            self.boot_id = boot_id
+            
+        # Safely coerce ts to float to prevent TypeError '<' not supported between str and float
+        if ts is not None:
+            try:
+                ts = float(ts)
+            except (ValueError, TypeError):
+                LOG.warning("Invalid non-numeric ts received for %s: %r", self.name, ts)
+                ts = None
+
+        # Pre-NTP timestamps (e.g. ESP8266 boots before NTP sync and reports ts=0)
+        if ts is not None and ts <= 0:
+            if not is_retained:
+                LOG.debug("Component %s reported ts=%.2f (pre-NTP live packet), mapping to local time %.2f", self.name, ts, now)
+                ts = now
+            else:
+                LOG.debug("Component %s reported retained ts=%.2f (pre-NTP), ignoring timestamp", self.name, ts)
+                ts = None
+
+        # Check timestamp sequence: ignore out-of-order / older packets
+        if ts is not None and self.last_ts is not None and self.last_ts > 0.0:
+            if ts < self.last_ts:
+                LOG.debug("Ignoring out-of-order packet for %s (ts=%.2f < last_ts=%.2f)", self.name, ts, self.last_ts)
+                return
+
+        # Strict TS check for all components (except mqtt_broker/telegram which don't have TS)
+        if self.name not in ("mqtt_broker", "telegram"):
+            if ts is None:
+                # Without TS, we cannot trust freshness, EXCEPT for offline (LWT)
+                if status != "offline":
+                    status = "unknown"
+            else:
+                age = now - ts
+                # If older than threshold, or impossibly far in the future (> 60s drift)
+                if age > self.stale_threshold or age < -60.0:
+                    if status in ("online", "locked", "unlocked", "fresh"):
+                        status = "stale"
+                        
+        self.status = status
+        if ts is not None:
+            self.last_ts = ts
+        self.local_updated_at = now
+
+    def check_stale(self):
+        if self.status in ("online", "unlocked", "locked", "fresh"):
+            if time.time() - self.local_updated_at > self.stale_threshold:
+                self.status = "stale"
+                return True
+        return False
+
+
+class HealthEngine:
+    def __init__(self):
+        self.components = {
+            "telegram": ComponentState("telegram", 60.0),
+            "mqtt_broker": ComponentState("mqtt_broker", 30.0),
+            "esp": ComponentState("esp", 120.0),
+            "windows_system": ComponentState("windows_system", 45.0),
+            "windows_session": ComponentState("windows_session", 45.0),
+            "windows_desktop": ComponentState("windows_desktop", 45.0),
+            "telemetry": ComponentState("telemetry", 45.0),
+        }
+        self.shutdown_observed_until = 0.0
+        self.shutdown_observed_at = 0.0
+        
+    def update(self, component, status, boot_id=None, ts=None, is_retained=False):
+        if component in self.components:
+            self.components[component].update(status, boot_id, ts, is_retained)
+            # An active online heartbeat cancels shutdown_observed ONLY IF
+            # it is strictly newer than the shutdown observation timestamp!
+            if status in ("online", "unlocked", "locked", "fresh"):
+                msg_ts = ts if ts is not None else time.time()
+                if msg_ts > self.shutdown_observed_at:
+                    self.clear_shutdown_observed()
+                else:
+                    LOG.info(
+                        "Ignored pre-shutdown heartbeat from %s (ts=%.2f <= shutdown_observed_at=%.2f)",
+                        component,
+                        msg_ts,
+                        self.shutdown_observed_at,
+                    )
+            
+    def get_status(self, component):
+        return self.components[component].status if component in self.components else "unknown"
+
+    def set_shutdown_observed(self, ttl=3600.0, now=None):
+        ts = time.time() if now is None else float(now)
+        self.shutdown_observed_at = ts
+        self.shutdown_observed_until = ts + ttl
+        LOG.info("Shutdown observed until %s", self.shutdown_observed_until)
+
+    def clear_shutdown_observed(self):
+        if self.shutdown_observed_until > 0.0:
+            LOG.info("Clearing shutdown observed state")
+            self.shutdown_observed_until = 0.0
+            self.shutdown_observed_at = 0.0
+        
+    def check_all_stale(self):
+        changed = []
+        for name, comp in self.components.items():
+            if name == "mqtt_broker":
+                continue
+            if comp.check_stale():
+                changed.append(name)
+        return changed
+        
+    def set_all_unknown(self, exclude=None):
+        exclude = exclude or []
+        for name, comp in self.components.items():
+            if name not in exclude:
+                comp.status = "unknown"
+        # When broker drops, shutdown_observed is also unprovable
+        self.clear_shutdown_observed()
+
+    def evaluate_pc_state(self, telemetry_age=None, now=None) -> PCStateInfo:
+        now = time.time() if now is None else float(now)
+        mqtt_status = self.get_status("mqtt_broker")
+        mqtt_online = (mqtt_status == "online")
+        sys_status = self.get_status("windows_system")
+        desk_status = self.get_status("windows_desktop")
+        sess_status = self.get_status("windows_session")
+        esp_status = self.get_status("esp")
+        telem_status = self.get_status("telemetry")
+
+        # 1. If MQTT is not online:
+        if not mqtt_online:
+            return PCStateInfo(
+                state=PCState.UNREACHABLE,
+                label="⚪ Нет связи с системой",
+                reason="Бот потерял связь с MQTT-брокером",
+                telemetry_age=telemetry_age,
+                system_status=sys_status,
+                desktop_status=desk_status,
+                session_status=sess_status,
+                esp_status=esp_status,
+                mqtt_online=False,
+            )
+
+        # 2. Check if SHUTDOWN_OBSERVED is active within TTL
+        if now < self.shutdown_observed_until:
+            if sys_status in ("offline", "unknown") and desk_status in ("offline", "unknown"):
+                return PCStateInfo(
+                    state=PCState.SHUTDOWN_OBSERVED,
+                    label="🔴 Выключен (наблюдается)",
+                    reason="ПК перестал отвечать после принятой команды выключения",
+                    telemetry_age=telemetry_age,
+                    system_status=sys_status,
+                    desktop_status=desk_status,
+                    session_status=sess_status,
+                    esp_status=esp_status,
+                    mqtt_online=True,
+                )
+            else:
+                self.clear_shutdown_observed()
+
+        # 3. If system agent is online:
+        if sys_status == "online":
+            if sess_status in ("locked", "login_screen"):
+                return PCStateInfo(
+                    state=PCState.LOCKED,
+                    label="🟡 Экран входа",
+                    reason="Экран Windows заблокирован или ожидает входа",
+                    telemetry_age=telemetry_age,
+                    system_status=sys_status,
+                    desktop_status=desk_status,
+                    session_status=sess_status,
+                    esp_status=esp_status,
+                    mqtt_online=True,
+                )
+            elif sess_status == "unlocked":
+                telem_fresh = (telem_status == "fresh" and (telemetry_age is not None and telemetry_age <= 90.0))
+                if desk_status == "online" and telem_fresh:
+                    return PCStateInfo(
+                        state=PCState.READY,
+                        label="🟢 Готов к работе",
+                        reason="Сеанс разблокирован, desktop-агент онлайн, телеметрия свежая",
+                        telemetry_age=telemetry_age,
+                        system_status=sys_status,
+                        desktop_status=desk_status,
+                        session_status=sess_status,
+                        esp_status=esp_status,
+                        mqtt_online=True,
+                    )
+                else:
+                    reasons = []
+                    if desk_status != "online":
+                        reasons.append(f"desktop-агент {desk_status}")
+                    if telemetry_age is None:
+                        reasons.append("телеметрия ещё не получена")
+                    elif telemetry_age > 90.0 or telem_status != "fresh":
+                        reasons.append(f"телеметрия устарела ({int(telemetry_age)}с)")
+                    return PCStateInfo(
+                        state=PCState.DEGRADED,
+                        label="🟡 Ограниченная работа",
+                        reason="Сеанс разблокирован, но " + ", ".join(reasons),
+                        telemetry_age=telemetry_age,
+                        system_status=sys_status,
+                        desktop_status=desk_status,
+                        session_status=sess_status,
+                        esp_status=esp_status,
+                        mqtt_online=True,
+                    )
+            else:
+                # sess_status is no_console or unknown or booting
+                return PCStateInfo(
+                    state=PCState.BOOTING,
+                    label="🟡 Загружается",
+                    reason=f"Система отвечает, сессия: {sess_status}",
+                    telemetry_age=telemetry_age,
+                    system_status=sys_status,
+                    desktop_status=desk_status,
+                    session_status=sess_status,
+                    esp_status=esp_status,
+                    mqtt_online=True,
+                )
+
+        # 4. If system agent is NOT online (offline, stale, unknown),
+        # but desktop agent is online or fresh telemetry is arriving:
+        telem_fresh = (telem_status == "fresh" and (telemetry_age is not None and telemetry_age <= 90.0))
+        if desk_status == "online" or telem_fresh:
+            return PCStateInfo(
+                state=PCState.DEGRADED,
+                label="🟡 Ограниченная работа",
+                reason=f"ПК включён (desktop: {desk_status}), но системный агент {sys_status}",
+                telemetry_age=telemetry_age,
+                system_status=sys_status,
+                desktop_status=desk_status,
+                session_status=sess_status,
+                esp_status=esp_status,
+                mqtt_online=True,
+            )
+
+        # 5. Otherwise, connection lost without confirmed shutdown:
+        return PCStateInfo(
+            state=PCState.UNREACHABLE,
+            label="⚪ Связь потеряна",
+            reason="Связь потеряна, состояние ПК неизвестно (нет подтверждения выключения)",
+            telemetry_age=telemetry_age,
+            system_status=sys_status,
+            desktop_status=desk_status,
+            session_status=sess_status,
+            esp_status=esp_status,
+            mqtt_online=True,
+        )
+

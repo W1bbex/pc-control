@@ -1,0 +1,30 @@
+[Unit]
+Description=Telegram PC Control Bot
+After=network-online.target mosquitto.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=pccontrol
+Group=pccontrol
+EnvironmentFile=/etc/pc-control-bot.env
+WorkingDirectory=/opt/pc-control-bot
+ExecStart=/opt/pc-control-bot/venv/bin/python /opt/pc-control-bot/bot.py
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/var/lib/pc-control-bot
+
+[Install]
+WantedBy=multi-user.target

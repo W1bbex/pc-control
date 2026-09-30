@@ -1,0 +1,356 @@
+"""Small regression checks for the dashboard telemetry contract."""
+
+import json
+import time
+
+from health_engine import HealthEngine
+from monitoring import MonitoringManager
+from mqtt_gateway import MqttGateway, TOPIC_TELEMETRY
+
+
+class FakeMqtt:
+    system_status = "online"
+    system_session = "unlocked"
+    desktop_status = "online"
+    esp_status = "online"
+    mqtt_online = True
+
+    def __init__(self):
+        self.health = HealthEngine()
+        self.health.update("mqtt_broker", "online")
+        self.health.update("windows_system", "online", ts=time.time())
+        self.health.update("windows_desktop", "online", ts=time.time())
+        self.health.update("windows_session", "unlocked", ts=time.time())
+        self.health.update("telemetry", "fresh", ts=time.time())
+
+
+class FakeHistory:
+    def insert(self, payload):
+        self.payload = payload
+
+
+def test_dashboard_uses_real_nested_agent_schema():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    manager.mqtt = FakeMqtt()
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+    manager.process_telemetry(
+        {
+            "timestamp": 1_700_000_000,
+            "uptime_seconds": 2820,
+            "session_seconds": 2760,
+            "user_active": True,
+            "active_application": "Google Chrome",
+            "cpu": {"load_percent": 9, "temp_c": 47},
+            "gpu": {"load_percent": 14, "temp_c": 37, "power_w": 9.7},
+            "memory": {"used_percent": 51, "used_gb": 8.7, "total_gb": 17.1},
+            "disks": [
+                {"drive": "C:", "used_percent": 87.5, "free_gb": 63.9},
+                {"drive": "E:", "used_percent": 55.4, "free_gb": 114.1},
+            ],
+        }
+    )
+    text = manager.dashboard_text()
+    for expected in ("Google Chrome", "CPU: 9% · 47°C", "GPU: 14% · 37°C · 9.7 Вт", "[C:] 87.5%", "[E:] 55.4%"):
+        assert expected in text, text
+
+
+def test_gateway_accepts_legacy_telemetry_timestamp():
+    gateway = MqttGateway.__new__(MqttGateway)
+    gateway.health = HealthEngine()
+    events = []
+    gateway._emit_health_state = lambda: None
+    gateway._emit = lambda name, data: events.append((name, data))
+
+    message = type(
+        "Message",
+        (),
+        {
+            "topic": TOPIC_TELEMETRY,
+            "payload": json.dumps({"timestamp": int(time.time())}).encode(),
+            "retain": False,
+        },
+    )()
+    gateway._on_message(None, None, message)
+
+    assert gateway.health.get_status("telemetry") == "fresh"
+    assert events and events[-1][0] == "telemetry"
+
+
+def test_dashboard_renders_media_playback_when_active():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    fake_mqtt = FakeMqtt()
+    fake_mqtt.last_media_state = {
+        "active": True,
+        "title": "ZAN PREPORAN",
+        "artist": "home4circus",
+        "is_playing": True,
+        "is_liked": True,
+    }
+    manager.mqtt = fake_mqtt
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+    manager.latest_desktop_at = 0.0
+    manager.process_telemetry({"active_application": "Visual Studio Code"})
+    text = manager.dashboard_text()
+    assert "Музыка: <tg-emoji emoji-id=\"5251372554798539686\">▶️</tg-emoji> ZAN PREPORAN — home4circus <tg-emoji emoji-id=\"5249190011332502742\">❤️</tg-emoji>" in text
+    assert "├ Открыт: <tg-emoji emoji-id=\"5251242026447446579\">🪟</tg-emoji> Visual Studio Code" in text
+
+
+def test_dashboard_omits_media_when_inactive():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    fake_mqtt = FakeMqtt()
+    fake_mqtt.last_media_state = {"active": False}
+    manager.mqtt = fake_mqtt
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+    manager.latest_desktop_at = 0.0
+    manager.process_telemetry({"active_application": "Visual Studio Code"})
+    text = manager.dashboard_text()
+    assert "Музыка:" not in text
+    assert "└ Открыт: <tg-emoji emoji-id=\"5251242026447446579\">🪟</tg-emoji> Visual Studio Code" in text
+
+
+def test_main_menu_markup_excludes_player_and_activity():
+    from telegram_ui import TelegramBotApi
+    ui = TelegramBotApi("dummy_token")
+    markup = ui.main_menu_markup()
+    callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
+    assert "menu_player" not in callbacks
+    assert "menu_activity" not in callbacks
+
+
+def test_main_menu_markup_structure_and_custom_emojis():
+    from telegram_ui import TelegramBotApi
+    ui = TelegramBotApi("dummy_token")
+    markup = ui.main_menu_markup()
+    rows = markup["inline_keyboard"]
+    assert len(rows) == 4
+
+    # Row 1: Питание
+    assert rows[0][0]["text"] == "Питание"
+    assert rows[0][0]["callback_data"] == "power_menu"
+    assert rows[0][0]["icon_custom_emoji_id"] == "5843553939672274145"
+
+    # Row 2: Скриншот, Программы
+    assert rows[1][0]["text"] == "Скриншот"
+    assert rows[1][0]["callback_data"] == "screenshot"
+    assert rows[1][0]["icon_custom_emoji_id"] == "5890744068203352126"
+    assert rows[1][1]["text"] == "Программы"
+    assert rows[1][1]["callback_data"] == "apps_menu"
+    assert rows[1][1]["icon_custom_emoji_id"] == "5316728625465146646"
+
+    # Row 3: Звук, Настройки
+    assert rows[2][0]["text"] == "Звук"
+    assert rows[2][0]["callback_data"] == "sound_menu"
+    assert rows[2][0]["icon_custom_emoji_id"] == "5890997763331591703"
+    assert rows[2][1]["text"] == "Настройки"
+    assert rows[2][1]["callback_data"] == "settings_menu"
+    assert rows[2][1]["icon_custom_emoji_id"] == "5260696263078212024"
+
+    # Row 4: Adaptive power/lock button
+    assert rows[3][0]["callback_data"] in ("shutdown_pc", "unlock_windows_manual", "power_on")
+
+
+def test_settings_menu_markup():
+    from telegram_ui import TelegramBotApi
+    ui = TelegramBotApi("dummy_token")
+    markup = ui.settings_menu_markup()
+    callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
+    assert "monitoring_menu" in callbacks
+    assert "history_menu" in callbacks
+    assert "physical_button" in callbacks
+    assert "menu" in callbacks
+
+
+def test_is_user_in_telegram_on_pc():
+    from unittest.mock import MagicMock
+    from bot import PcControlBotApp
+    import time
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.mqtt = MagicMock()
+    app.monitoring = MagicMock()
+
+    # Case 1: Active in Telegram.exe, unlocked
+    app.mqtt.system_session = "unlocked"
+    app.monitoring.telemetry_age.return_value = 5.0
+    app.monitoring.latest_telemetry = {
+        "active_application": "Telegram.exe",
+        "idle_seconds": 10,
+    }
+    assert app._is_user_in_telegram_on_pc() is True
+
+    # Case 2: In Telegram.exe, unlocked
+    app.monitoring.latest_telemetry["active_application"] = "telegram.exe"
+    assert app._is_user_in_telegram_on_pc() is True
+
+    # Case 3: In Chrome (not in Telegram)
+    app.monitoring.latest_telemetry["active_application"] = "chrome.exe"
+    assert app._is_user_in_telegram_on_pc() is False
+
+    # Case 4: In AyuGram, but PC is locked
+    app.monitoring.latest_telemetry["active_application"] = "Telegram.exe"
+    app.mqtt.system_session = "locked"
+    assert app._is_user_in_telegram_on_pc() is False
+
+    # Case 5: In AyuGram, unlocked, but idle for 10 minutes (away)
+    app.mqtt.system_session = "unlocked"
+    app.monitoring.latest_telemetry["idle_seconds"] = 600
+    assert app._is_user_in_telegram_on_pc() is False
+
+    # Case 6: Telemetry stale (>30s)
+    app.monitoring.latest_telemetry["idle_seconds"] = 10
+    app.monitoring.telemetry_age.return_value = 45.0
+    assert app._is_user_in_telegram_on_pc() is False
+
+
+def test_dashboard_auto_refresh_every_10s():
+    from unittest.mock import MagicMock
+    from bot import PcControlBotApp
+    import time
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.mqtt = MagicMock()
+    app.monitoring = MagicMock()
+    app.ui = MagicMock()
+    app._main_menu_markup = MagicMock(return_value={"inline_keyboard": []})
+    app.latest_media_state = {}
+
+    app.active_main_menu_message_id = 999
+    app.current_menu_view = "main"
+    app.last_dashboard_auto_refresh = 100.0
+
+    # Mock user active in Telegram
+    app._is_user_in_telegram_on_pc = MagicMock(return_value=True)
+    app.monitoring.dashboard_text.return_value = "Dashboard Updated"
+
+    # Tick at 105s (<10s elapsed) -> should not refresh
+    app._check_dashboard_auto_refresh(105.0)
+    assert app.ui.send_message.call_count == 0
+
+    # Tick at 110.1s (>=10s elapsed) -> should refresh
+    app._check_dashboard_auto_refresh(110.1)
+    assert app.ui.send_message.call_count == 1
+    assert app.last_dashboard_auto_refresh == 110.1
+
+    # If user leaves Telegram (_is_user_in_telegram_on_pc is False) -> should not refresh
+    app._is_user_in_telegram_on_pc.return_value = False
+    app._check_dashboard_auto_refresh(125.0)
+    assert app.ui.send_message.call_count == 1  # Still 1, no new call!
+
+    # If user navigates to settings_menu submenu -> should not refresh
+    app._is_user_in_telegram_on_pc.return_value = True
+    app.current_menu_view = "settings_menu"
+    app._check_dashboard_auto_refresh(135.0)
+    assert app.ui.send_message.call_count == 1  # Still 1, no new call!
+
+
+def test_system_telemetry_does_not_wipe_desktop_session_fields():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    manager.mqtt = FakeMqtt()
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+    manager.latest_desktop_at = 0.0
+
+    # 1. Desktop telemetry arrives
+    desktop_data = {
+        "agent_mode": "desktop",
+        "session_seconds": 3600,
+        "active_application": "Happ.exe",
+        "active_application_emoji_id": "5251339414830880848",
+        "user_active": True,
+        "cpu": {"load_percent": 10, "temp_c": 45},
+    }
+    manager.process_telemetry(desktop_data)
+    assert manager.latest_telemetry["session_seconds"] == 3600
+    assert manager.latest_telemetry["active_application"] == "Happ.exe"
+    assert manager.latest_telemetry["user_active"] is True
+
+    # 2. System telemetry arrives 2 seconds later (Session 0 service, no GUI info)
+    system_data = {
+        "agent_mode": "system",
+        "cpu": {"load_percent": 15, "temp_c": 48},
+        "uptime_seconds": 7200,
+    }
+    manager.process_telemetry(system_data)
+
+    # Must preserve desktop session & GUI fields!
+    assert manager.latest_telemetry["session_seconds"] == 3600
+    assert manager.latest_telemetry["active_application"] == "Happ.exe"
+    assert manager.latest_telemetry["active_application_emoji_id"] == "5251339414830880848"
+    assert manager.latest_telemetry["user_active"] is True
+    # Hardware updated
+    assert manager.latest_telemetry["cpu"]["load_percent"] == 15
+    assert manager.latest_telemetry["uptime_seconds"] == 7200
+
+
+def test_dashboard_formats_telegram_chat_title():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    manager.mqtt = FakeMqtt()
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+    manager.latest_desktop_at = 0.0
+
+    manager.process_telemetry({
+        "agent_mode": "desktop",
+        "active_application": "Telegram.exe",
+        "active_window_title": "(1) PC Control @ W1bbex! (2029400)",
+        "active_application_emoji_id": "5251740431632344455",
+    })
+    text = manager.dashboard_text()
+    assert "Telegram — PC Control" in text
+
+
+def test_dashboard_auto_refresh_every_5s_when_in_pc_control():
+    from unittest.mock import MagicMock
+    from bot import PcControlBotApp
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.mqtt = MagicMock()
+    app.monitoring = MagicMock()
+    app.ui = MagicMock()
+    app._main_menu_markup = MagicMock(return_value={"inline_keyboard": []})
+    app.latest_media_state = {}
+
+    app.active_main_menu_message_id = 999
+    app.current_menu_view = "main"
+    app.last_dashboard_auto_refresh = 100.0
+
+    app._is_user_in_telegram_on_pc = MagicMock(return_value=True)
+    app.monitoring.latest_telemetry = {"in_pc_control_chat": True}
+    app.monitoring.dashboard_text.return_value = "Dashboard Fast"
+
+    # Tick at 104s (<5s elapsed) -> should not refresh
+    app._check_dashboard_auto_refresh(104.0)
+    assert app.ui.send_message.call_count == 0
+
+    # Tick at 105.1s (>=5s elapsed) -> should refresh!
+    app._check_dashboard_auto_refresh(105.1)
+    assert app.ui.send_message.call_count == 1
+    assert app.last_dashboard_auto_refresh == 105.1
+
+
+if __name__ == "__main__":
+    test_dashboard_uses_real_nested_agent_schema()
+    test_dashboard_renders_media_playback_when_active()
+    test_dashboard_omits_media_when_inactive()
+    test_dashboard_formats_telegram_chat_title()
+    test_system_telemetry_does_not_wipe_desktop_session_fields()
+    test_main_menu_markup_excludes_player_and_activity()
+    test_main_menu_markup_structure_and_custom_emojis()
+    test_settings_menu_markup()
+    test_is_user_in_telegram_on_pc()
+    test_dashboard_auto_refresh_every_10s()
+    test_dashboard_auto_refresh_every_5s_when_in_pc_control()
+    print("All UI and monitoring tests passed")
+
