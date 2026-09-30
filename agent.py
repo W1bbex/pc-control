@@ -277,12 +277,23 @@ class SensorHelper:
         for line in self.process.stderr:
             LOG.warning("Sensor helper: %s", line.rstrip())
 
+    def _find_admin_snapshot(self) -> Path:
+        for candidate in (
+            BASE_DIR / "data" / "admin-sensors.json",
+            self.executable.parent / "admin-sensors.json",
+            BASE_DIR / "hardware" / "admin-sensors.json",
+        ):
+            if candidate.exists():
+                return candidate
+        return BASE_DIR / "data" / "admin-sensors.json"
+
     def snapshot(self):
+        target = self._find_admin_snapshot()
         try:
-            age = time.time() - self.admin_snapshot.stat().st_mtime
+            age = time.time() - target.stat().st_mtime
             if age < 15:
                 data = json.loads(
-                    self.admin_snapshot.read_text(encoding="utf-8")
+                    target.read_text(encoding="utf-8")
                 )
                 if isinstance(data, list):
                     return data
@@ -340,7 +351,11 @@ class PCControlAgent:
 
         self.load_state()
 
-        helper_path = BASE_DIR / "hardware" / "SensorHelper.exe"
+        helper_candidates = [
+            BASE_DIR / "hardware" / "sensors" / "SensorHelper.exe",
+            BASE_DIR / "hardware" / "SensorHelper.exe",
+        ]
+        helper_path = next((p for p in helper_candidates if p.exists()), helper_candidates[0])
         self.sensor_helper = SensorHelper(helper_path)
 
         self._last_reconnect_attempt = 0.0

@@ -31,8 +31,10 @@ DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = BASE_DIR / "config.json"
 _data_state = DATA_DIR / "boot-state.json"
 _root_state = BASE_DIR / "boot-state.json"
-STATE_PATH = _data_state if _data_state.exists() or not _root_state.exists() else _root_state
-SENSOR_SNAPSHOT = BASE_DIR / "hardware" / "admin-sensors.json"
+_data_snapshot = DATA_DIR / "admin-sensors.json"
+_hw_sensors_snapshot = BASE_DIR / "hardware" / "sensors" / "admin-sensors.json"
+_hw_snapshot = BASE_DIR / "hardware" / "admin-sensors.json"
+SENSOR_SNAPSHOT = _data_snapshot if _data_snapshot.exists() else (_hw_sensors_snapshot if _hw_sensors_snapshot.exists() else _hw_snapshot)
 LOG_DIR = BASE_DIR / "logs"
 
 def _load_env_file(path: Path):
@@ -731,12 +733,24 @@ class SystemAgent:
             return "unknown"
 
     @staticmethod
-    def read_sensors():
+    def _find_sensor_snapshot() -> Path:
+        for candidate in (
+            DATA_DIR / "admin-sensors.json",
+            BASE_DIR / "hardware" / "sensors" / "admin-sensors.json",
+            BASE_DIR / "hardware" / "admin-sensors.json",
+        ):
+            if candidate.exists():
+                return candidate
+        return DATA_DIR / "admin-sensors.json"
+
+    @classmethod
+    def read_sensors(cls):
+        target = cls._find_sensor_snapshot()
         for attempt in range(3):
             try:
-                if time.time() - SENSOR_SNAPSHOT.stat().st_mtime > 20:
+                if time.time() - target.stat().st_mtime > 20:
                     return []
-                sensors = json.loads(SENSOR_SNAPSHOT.read_text(encoding="utf-8"))
+                sensors = json.loads(target.read_text(encoding="utf-8"))
                 return sensors if isinstance(sensors, list) else []
             except FileNotFoundError:
                 return []

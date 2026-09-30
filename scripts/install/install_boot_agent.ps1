@@ -5,8 +5,8 @@ $hardwareDir = Join-Path $installDir "hardware"
 $python = Join-Path $installDir ".venv\Scripts\pythonw.exe"
 $desktopAgent = Join-Path $installDir "agent.py"
 $systemAgent = Join-Path $installDir "boot_agent.py"
-$collector = Join-Path $hardwareDir "AdminSensorCollector.exe"
-$snapshot = Join-Path $hardwareDir "admin-sensors.json"
+$collector = if (Test-Path "$hardwareDir\sensors\AdminSensorCollector.exe") { "$hardwareDir\sensors\AdminSensorCollector.exe" } else { "$hardwareDir\AdminSensorCollector.exe" }
+$snapshot = Join-Path $installDir "data\admin-sensors.json"
 $logPath = Join-Path $installDir "logs\boot-install.log"
 
 New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null

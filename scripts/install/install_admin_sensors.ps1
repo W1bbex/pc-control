@@ -1,9 +1,9 @@
 $ErrorActionPreference = "Stop"
 
-$installDir = Join-Path $env:LOCALAPPDATA "PCControlAgent"
+$installDir = if (Test-Path "C:\Projects\PCControlAgent") { "C:\Projects\PCControlAgent" } else { Join-Path $env:LOCALAPPDATA "PCControlAgent" }
 $hardwareDir = Join-Path $installDir "hardware"
-$collector = Join-Path $hardwareDir "AdminSensorCollector.exe"
-$snapshot = Join-Path $hardwareDir "admin-sensors.json"
+$collector = if (Test-Path "$hardwareDir\sensors\AdminSensorCollector.exe") { "$hardwareDir\sensors\AdminSensorCollector.exe" } else { "$hardwareDir\AdminSensorCollector.exe" }
+$snapshot = Join-Path $installDir "data\admin-sensors.json"
 $taskName = "PC Control Hardware Sensors"
 $identity = "$env:USERDOMAIN\$env:USERNAME"
 
