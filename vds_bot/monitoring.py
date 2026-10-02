@@ -137,14 +137,26 @@ class MonitoringManager:
             return "⏳", "Выключение..."
 
         session = self.mqtt.system_session
-        if session == "unlocked":
+        if session in {"locked", "login_screen"}:
+            return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji>', "н/д"
+
+        desk_status = getattr(self.mqtt, "desktop_status", None)
+        age = self.telemetry_age()
+        is_desk_fresh = (age is not None and age <= 90.0)
+        has_desk_activity = bool(telemetry and (telemetry.get("session_seconds") is not None or telemetry.get("active_application")))
+
+        is_unlocked = (session == "unlocked") or (
+            session in ("unknown", None, "") and (desk_status == "online" or (is_desk_fresh and has_desk_activity))
+        )
+
+        if is_unlocked:
             if telemetry and telemetry.get("user_active", False):
                 status_icon = f'<tg-emoji emoji-id="{EMOJI_STATUS_ACTIVE}">🟢</tg-emoji>'
             else:
                 status_icon = "🟡"
-            return status_icon, format_duration(telemetry.get("session_seconds"))
-        if session in {"locked", "login_screen"}:
-            return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji>', "н/д"
+            dur = telemetry.get("session_seconds") if telemetry else None
+            return status_icon, format_duration(dur)
+
         return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji>', "н/д"
 
     def dashboard_text(self, media_state=None):

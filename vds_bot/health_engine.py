@@ -272,6 +272,7 @@ class HealthEngine:
         # but desktop agent is online or fresh telemetry is arriving:
         telem_fresh = (telem_status == "fresh" and (telemetry_age is not None and telemetry_age <= 90.0))
         if desk_status == "online" or telem_fresh:
+            effective_sess = "unlocked" if sess_status in ("unknown", "", None) else sess_status
             return PCStateInfo(
                 state=PCState.DEGRADED,
                 label="🟡 Ограниченная работа",
@@ -279,7 +280,7 @@ class HealthEngine:
                 telemetry_age=telemetry_age,
                 system_status=sys_status,
                 desktop_status=desk_status,
-                session_status=sess_status,
+                session_status=effective_sess,
                 esp_status=esp_status,
                 mqtt_online=True,
             )

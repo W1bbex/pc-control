@@ -22,6 +22,7 @@ from mqtt_gateway import MqttGateway
 from power_flow import PowerFlowManager, PowerFlowStage
 from physical_button import PhysicalButtonManager
 from monitoring import MonitoringManager
+from health_engine import PCState
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -1227,7 +1228,7 @@ class PcControlBotApp:
 
         if data == "workspace_start_direct":
             pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
-            if pc_state.session_status == "unlocked":
+            if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
                 self.ui.answer_callback(callback_id)
                 text = "<b>🚀 Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
                 markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
@@ -2161,7 +2162,12 @@ class PcControlBotApp:
 
     def _is_user_in_telegram_on_pc(self):
         # PC session must be unlocked
-        if getattr(self.mqtt, "system_session", "") != "unlocked":
+        session = getattr(self.mqtt, "system_session", "")
+        if session in ("locked", "login_screen"):
+            return False
+
+        desk_status = getattr(self.mqtt, "desktop_status", None)
+        if session != "unlocked" and desk_status != "online":
             return False
 
         # Telemetry must be fresh (<= 30s)

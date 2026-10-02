@@ -211,6 +211,12 @@ def test_is_user_in_telegram_on_pc():
     app.monitoring.telemetry_age.return_value = 45.0
     assert app._is_user_in_telegram_on_pc() is False
 
+    # Case 7: system_session unknown, but desktop_status online and fresh
+    app.mqtt.system_session = "unknown"
+    app.mqtt.desktop_status = "online"
+    app.monitoring.telemetry_age.return_value = 5.0
+    assert app._is_user_in_telegram_on_pc() is True
+
 
 def test_dashboard_auto_refresh_every_10s():
     from unittest.mock import MagicMock
@@ -339,6 +345,47 @@ def test_dashboard_auto_refresh_every_5s_when_in_pc_control():
     app._check_dashboard_auto_refresh(105.1)
     assert app.ui.send_message.call_count == 1
     assert app.last_dashboard_auto_refresh == 105.1
+
+
+def test_session_lines_states():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    fake_mqtt = FakeMqtt()
+    manager.mqtt = fake_mqtt
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_received_at = time.time()
+
+    # Case 1: system_session unlocked, user active
+    fake_mqtt.system_session = "unlocked"
+    icon, dur = manager._session_lines({"user_active": True, "session_seconds": 3600})
+    assert "🟢" in icon
+    assert dur == "1 ч"
+
+    # Case 2: system_session unknown, but desktop_status is online and fresh
+    fake_mqtt.system_session = "unknown"
+    fake_mqtt.desktop_status = "online"
+    icon, dur = manager._session_lines({"user_active": True, "session_seconds": 120})
+    assert "🟢" in icon
+    assert dur == "2 мин"
+
+    # Case 3: system_session unknown, desktop_status online, user idle
+    icon, dur = manager._session_lines({"user_active": False, "session_seconds": 60})
+    assert "🟡" in icon
+    assert dur == "1 мин"
+
+    # Case 4: system_session locked
+    fake_mqtt.system_session = "locked"
+    icon, dur = manager._session_lines({"user_active": True, "session_seconds": 120})
+    assert "❌" in icon
+    assert dur == "н/д"
+
+    # Case 5: system_session unknown and desktop offline
+    fake_mqtt.system_session = "unknown"
+    fake_mqtt.desktop_status = "offline"
+    manager.latest_received_at = 0.0
+    icon, dur = manager._session_lines({})
+    assert "❌" in icon
+    assert dur == "н/д"
 
 
 if __name__ == "__main__":
