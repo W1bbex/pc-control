@@ -82,7 +82,8 @@ class AppEmojiManager:
 
     def _save_cache(self):
         try:
-            temp = CACHE_FILE.with_suffix(".tmp")
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temp = CACHE_FILE.with_suffix(f".tmp.{os.getpid()}")
             with open(temp, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f, indent=2, ensure_ascii=False)
             temp.replace(CACHE_FILE)
