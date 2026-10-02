@@ -3,34 +3,52 @@
 import html
 import json
 import logging
+import threading
 import time
 import requests
+from requests.adapters import HTTPAdapter
 
 LOG = logging.getLogger("pc-control-bot.telegram_ui")
 
-DEFAULT_PLAYER_ICONS = {
-    "btn_play": "5251372554798539686",
-    "btn_pause": "5251752543440119050",
-    "btn_next": "5251687758153423658",
-    "btn_prev": "5251293527400291945",
-    "btn_fwd10": "5251438890568425035",
-    "btn_back10": "5251409985438522351",
-    "btn_wave": "5251393273720776324",
-    "tag_note": "5251570222078401376",
-    "tag_artist": "5251415160874116452",
-    "tag_status_play": "5251372554798539686",
-    "tag_status_pause": "5251752543440119050",
-    "tag_clock": "5251754463290498132",
-    "tag_slider_dot": "5249027614324074999",
-    "tag_heart_liked": "5249190011332502742",
-    "tag_heart_unliked": "5251547334197684560",
-}
+def _load_canonical_icons():
+    from pathlib import Path
+    for candidate in [
+        Path(__file__).resolve().parent / "resources" / "icons.json",
+        Path(__file__).resolve().parent.parent / "resources" / "icons.json",
+    ]:
+        if candidate.exists():
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
 
-EMOJI_BTN_POWER = "5843553939672274145"
-EMOJI_BTN_SCREENSHOT = "5890744068203352126"
-EMOJI_BTN_APPS = "5316728625465146646"
-EMOJI_BTN_SOUND = "5890997763331591703"
-EMOJI_BTN_SETTINGS = "5260696263078212024"
+ICONS = _load_canonical_icons()
+
+EMOJI_BTN_POWER = ICONS.get("power", "5330077297921795474")
+EMOJI_BTN_SCREENSHOT = ICONS.get("screenshot", "5330238646958204875")
+EMOJI_BTN_APPS = ICONS.get("apps", "5330130731609929749")
+EMOJI_BTN_SOUND = ICONS.get("sound", "5330140476890718558")
+EMOJI_BTN_SETTINGS = ICONS.get("gear", "5330260680140431237")
+
+DEFAULT_PLAYER_ICONS = {
+    "btn_play": ICONS.get("play", "5330015871299527534"),
+    "btn_pause": ICONS.get("pause", "5330570905628222348"),
+    "btn_next": ICONS.get("next", "5330255053733276330"),
+    "btn_prev": ICONS.get("prev", "5330363570376977789"),
+    "btn_fwd10": ICONS.get("fwd10", "5330317725896059016"),
+    "btn_back10": ICONS.get("back10", "5330294859490179153"),
+    "btn_wave": ICONS.get("wave", "5330448799707998190"),
+    "tag_note": ICONS.get("music", "5330477356945551054"),
+    "tag_artist": ICONS.get("headphones", "5330526830673831881"),
+    "tag_status_play": ICONS.get("play", "5330015871299527534"),
+    "tag_status_pause": ICONS.get("pause", "5330570905628222348"),
+    "tag_clock": ICONS.get("clock", "5330473500064912704"),
+    "tag_slider_dot": ICONS.get("dot", "5330193051585391352"),
+    "tag_heart_liked": ICONS.get("heart", "5330276670303674347"),
+    "tag_heart_unliked": ICONS.get("heart", "5330276670303674347"),
+}
 
 
 class TelegramBotApi:
@@ -38,29 +56,37 @@ class TelegramBotApi:
         self.token = token
         self.api_url = f"https://api.telegram.org/bot{token}"
         self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=3)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        self._lock = threading.Lock()
+
+    def sanitize_error(self, err):
+        s = str(err)
+        if self.token:
+            s = s.replace(self.token, "[REDACTED_BOT_TOKEN]")
+        return s
 
     def call_raw(self, method, payload=None, timeout=25):
         url = f"{self.api_url}/{method}"
         try:
-            response = self.session.post(url, json=payload or {}, timeout=timeout)
+            with self._lock:
+                response = self.session.post(url, json=payload or {}, timeout=timeout)
             try:
                 data = response.json()
                 return data
             except Exception:
                 return {"ok": False, "description": f"HTTP {response.status_code}"}
         except Exception as e:
-            raw_err = str(e)
-            if self.token:
-                raw_err = raw_err.replace(self.token, "[REDACTED_BOT_TOKEN]")
-            return {"ok": False, "description": raw_err}
+            return {"ok": False, "description": self.sanitize_error(e)}
 
     def call(self, method, payload=None, timeout=25):
         data = self.call_raw(method, payload, timeout=timeout)
         if data.get("ok"):
             return data.get("result")
         safe_data = dict(data)
-        if "description" in safe_data and self.token:
-            safe_data["description"] = str(safe_data["description"]).replace(self.token, "[REDACTED_BOT_TOKEN]")
+        if "description" in safe_data:
+            safe_data["description"] = self.sanitize_error(safe_data["description"])
         LOG.warning("Telegram API %s error: %s", method, safe_data)
         return None
 
@@ -144,7 +170,7 @@ class TelegramBotApi:
                 res.raise_for_status()
                 return res.json().get("result")
             except Exception as e:
-                LOG.error("send_photo URL failed: %s", e)
+                LOG.error("send_photo URL failed: %s", self.sanitize_error(e))
                 return None
         else:
             content_type = "image/jpeg" if filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
@@ -154,7 +180,7 @@ class TelegramBotApi:
                 res.raise_for_status()
                 return res.json().get("result")
             except Exception as e:
-                LOG.error("send_photo bytes failed: %s", e)
+                LOG.error("send_photo bytes failed: %s", self.sanitize_error(e))
                 return None
 
     def send_document(
@@ -185,7 +211,7 @@ class TelegramBotApi:
             res.raise_for_status()
             return res.json().get("result")
         except Exception as e:
-            LOG.error("send_document failed: %s", e)
+            LOG.error("send_document failed: %s", self.sanitize_error(e))
             return None
 
     def edit_message_caption(
@@ -251,7 +277,7 @@ class TelegramBotApi:
                 res.raise_for_status()
                 return res.json().get("result")
             except Exception as e:
-                LOG.warning("editMessageMedia URL failed: %s", e)
+                LOG.warning("editMessageMedia URL failed: %s", self.sanitize_error(e))
                 return None
         else:
             media_dict["media"] = "attach://photo"
@@ -263,7 +289,7 @@ class TelegramBotApi:
                 res.raise_for_status()
                 return res.json().get("result")
             except Exception as e:
-                LOG.warning("editMessageMedia bytes failed: %s", e)
+                LOG.warning("editMessageMedia bytes failed: %s", self.sanitize_error(e))
                 return None
 
     def answer_callback(self, callback_id, text=None, alert=False):
@@ -277,7 +303,10 @@ class TelegramBotApi:
 
     @staticmethod
     def back_button(target="menu"):
-        return [{"text": "↩ Назад", "callback_data": target}]
+        btn = {"text": "↩ Назад", "callback_data": target}
+        if ICONS.get("back"):
+            btn["icon_custom_emoji_id"] = ICONS.get("back")
+        return [btn]
 
     def main_menu_markup(self, pc_state=None, session=None, system_status=None):
         state_val = ""
@@ -326,16 +355,16 @@ class TelegramBotApi:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "📊 Мониторинг", "style": "primary", "callback_data": "monitoring_menu"},
-                    {"text": "📈 Графики", "style": "primary", "callback_data": "history_menu"},
+                    {"text": "Мониторинг", "style": "primary", "icon_custom_emoji_id": ICONS.get("cpu"), "callback_data": "monitoring_menu"},
+                    {"text": "Графики", "style": "primary", "icon_custom_emoji_id": ICONS.get("chart"), "callback_data": "history_menu"},
                 ],
                 [
-                    {"text": "🕹 Физическая кнопка", "style": "primary", "callback_data": "physical_button"},
-                    {"text": "⏱ Активность", "style": "primary", "callback_data": "menu_activity"},
+                    {"text": "Физическая кнопка", "style": "primary", "icon_custom_emoji_id": ICONS.get("game"), "callback_data": "physical_button"},
+                    {"text": "Активность", "style": "primary", "icon_custom_emoji_id": ICONS.get("apps"), "callback_data": "menu_activity"},
                 ],
                 [
-                    {"text": "💡 Подсветка кулера (ARGB)", "style": "primary", "callback_data": "led_menu"},
-                    {"text": "💻 Консоль", "style": "primary", "callback_data": "console_open"},
+                    {"text": "Подсветка (ARGB)", "style": "primary", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_menu"},
+                    {"text": "Консоль", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
                 ],
                 self.back_button("menu"),
             ]
@@ -345,8 +374,8 @@ class TelegramBotApi:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "👁 Для глаз (Идеал)", "style": "success", "callback_data": "led_action:preset:eye"},
-                    {"text": "📸 Для фото (Камера)", "style": "primary", "callback_data": "led_action:preset:photo"},
+                    {"text": "Для глаз (Идеал)", "style": "success", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_action:preset:eye"},
+                    {"text": "Для фото (Камера)", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "led_action:preset:photo"},
                 ],
                 [
                     {"text": "1", "style": "primary", "callback_data": "led_action:preset:1"},
@@ -364,18 +393,18 @@ class TelegramBotApi:
                     {"text": "9", "style": "primary", "callback_data": "led_action:preset:9"},
                 ],
                 [
-                    {"text": "⭐️ 10", "style": "primary", "callback_data": "led_action:preset:10"},
+                    {"text": "10 (Идеал)", "style": "primary", "callback_data": "led_action:preset:10"},
                     {"text": "11", "style": "primary", "callback_data": "led_action:preset:11"},
                     {"text": "12", "style": "primary", "callback_data": "led_action:preset:12"},
                 ],
                 [
-                    {"text": "💡 Вкл", "style": "success", "callback_data": "led_action:on"},
-                    {"text": "🌑 Выкл", "style": "danger", "callback_data": "led_action:off"},
+                    {"text": "Включить", "style": "success", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_action:on"},
+                    {"text": "Выключить", "style": "danger", "callback_data": "led_action:off"},
                 ],
                 [
-                    {"text": "🔆 30%", "style": "primary", "callback_data": "led_action:bright:80"},
-                    {"text": "🔆 60%", "style": "primary", "callback_data": "led_action:bright:160"},
-                    {"text": "🔆 100%", "style": "primary", "callback_data": "led_action:bright:255"},
+                    {"text": "30%", "style": "primary", "callback_data": "led_action:bright:80"},
+                    {"text": "60%", "style": "primary", "callback_data": "led_action:bright:160"},
+                    {"text": "100%", "style": "primary", "callback_data": "led_action:bright:255"},
                 ],
                 self.back_button("settings_menu"),
             ]
@@ -384,7 +413,7 @@ class TelegramBotApi:
     def sound_menu_markup(self):
         return {
             "inline_keyboard": [
-                [{"text": "🔇 Включить / выключить звук", "style": "primary", "callback_data": "volume:toggle"}],
+                [{"text": "Вкл / Выкл звук", "style": "primary", "icon_custom_emoji_id": ICONS.get("sound"), "callback_data": "volume:toggle"}],
                 [
                     {"text": "25%", "style": "primary", "callback_data": "volume:25"},
                     {"text": "50%", "style": "primary", "callback_data": "volume:50"},
@@ -430,18 +459,32 @@ class TelegramBotApi:
             lock_btn = {"text": "Заблокировать Windows", "style": "danger", "callback_data": "lock_windows"}
         else:
             lock_btn = {"text": "Разблокировать Windows", "style": "success", "callback_data": "unlock_windows_manual"}
+        if ICONS.get("lock"):
+            lock_btn["icon_custom_emoji_id"] = ICONS.get("lock")
+
+        shutdown_btn = {"text": "Выключить ПК", "style": "danger", "callback_data": "shutdown_pc"}
+        if ICONS.get("power"):
+            shutdown_btn["icon_custom_emoji_id"] = ICONS.get("power")
+
+        screen_btn = {"text": "Выключить экран", "style": "primary", "callback_data": "toggle_screen"}
+        if ICONS.get("screen"):
+            screen_btn["icon_custom_emoji_id"] = ICONS.get("screen")
+
+        reboot_btn = {"text": "Перезагрузить", "style": "primary", "callback_data": "reboot_pc"}
+        if ICONS.get("refresh"):
+            reboot_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
 
         return {
             "inline_keyboard": [
-                [{"text": "Выключить ПК", "style": "danger", "callback_data": "shutdown_pc"}],
+                [shutdown_btn],
                 [lock_btn],
                 [
-                    {"text": "Выключить экран", "style": "primary", "callback_data": "toggle_screen"},
+                    screen_btn,
                     {"text": "Свернуть окна", "style": "primary", "callback_data": "minimize_windows"},
                 ],
                 [
                     {"text": "Сон", "style": "primary", "callback_data": "sleep_pc"},
-                    {"text": "Перезагрузить", "style": "primary", "callback_data": "reboot_pc"},
+                    reboot_btn,
                 ],
                 self.back_button("menu"),
             ]
@@ -467,30 +510,54 @@ class TelegramBotApi:
             "inline_keyboard": [
                 [{"text": "🚀 Запустить рабочий сетап", "style": "success", "callback_data": "workspace_start_direct"}],
                 [
-                    {"text": "💬 Telegram", "style": "primary", "callback_data": "app:Telegram"},
-                    {"text": "🎵 Музыка", "style": "primary", "callback_data": "app:Музыка"},
+                    {"text": "Telegram", "style": "primary", "icon_custom_emoji_id": ICONS.get("telegram"), "callback_data": "app:Telegram"},
+                    {"text": "Музыка", "style": "primary", "icon_custom_emoji_id": ICONS.get("music"), "callback_data": "app:Музыка"},
                 ],
                 [
                     {"text": "🐬 Dolphin", "style": "primary", "callback_data": "app:Dolphin"},
-                    {"text": "🌐 Chrome", "style": "primary", "callback_data": "app:Chrome"},
+                    {"text": "Chrome", "style": "primary", "icon_custom_emoji_id": ICONS.get("chrome"), "callback_data": "app:Chrome"},
                 ],
                 [
-                    {"text": "⚡ Happ", "style": "primary", "callback_data": "app:Happ"},
+                    {"text": "Happ", "style": "primary", "icon_custom_emoji_id": ICONS.get("network"), "callback_data": "app:Happ"},
+                    {"text": "INCY", "style": "primary", "icon_custom_emoji_id": ICONS.get("network"), "callback_data": "app:INCY"},
+                ],
+                [
                     {"text": "🚀 Antigravity", "style": "primary", "callback_data": "app:Antigravity"},
-                ],
-                [
-                    {"text": "💻 Консоль (Терминал)", "style": "primary", "callback_data": "console_open"},
+                    {"text": "Консоль (Терминал)", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
                 ],
                 self.back_button("menu"),
+            ]
+        }
+
+    def workspace_vpn_choice_markup(self, active_vpn="incy"):
+        happ_label = "⚡ Happ (VPN) ✅" if active_vpn == "happ" else "⚡ Happ (VPN)"
+        incy_label = "🛡️ INCY (VPN) ✅" if active_vpn == "incy" else "🛡️ INCY (VPN)"
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": incy_label,
+                        "style": "success" if active_vpn == "incy" else "primary",
+                        "icon_custom_emoji_id": ICONS.get("network"),
+                        "callback_data": "workspace_vpn:incy",
+                    },
+                    {
+                        "text": happ_label,
+                        "style": "success" if active_vpn == "happ" else "primary",
+                        "icon_custom_emoji_id": ICONS.get("network"),
+                        "callback_data": "workspace_vpn:happ",
+                    },
+                ],
+                [{"text": "✖ Отмена", "style": "danger", "callback_data": "menu"}],
             ]
         }
 
     def monitoring_menu_markup(self):
         return {
             "inline_keyboard": [
-                [{"text": "🔄 Обновить состояние", "style": "primary", "callback_data": "telemetry_now"}],
-                [{"text": "🖼️ Скриншот", "style": "primary", "callback_data": "screenshot"}],
-                [{"text": "📈 Графики", "style": "primary", "callback_data": "history_menu"}],
+                [{"text": "Обновить состояние", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "telemetry_now"}],
+                [{"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"}],
+                [{"text": "Графики", "style": "primary", "icon_custom_emoji_id": ICONS.get("chart"), "callback_data": "history_menu"}],
                 self.back_button("settings_menu"),
             ]
         }
@@ -517,8 +584,8 @@ class TelegramBotApi:
 
         title = media_state.get("title") or "Неизвестный трек"
         artist = media_state.get("artist") or "Неизвестный исполнитель"
-        pos = float(media_state.get("position", 0.0))
-        dur = float(media_state.get("duration", 0.0))
+        pos = float(media_state.get("position") or 0.0)
+        dur = float(media_state.get("duration") or 0.0)
         is_playing = media_state.get("is_playing", False)
         icons = dict(DEFAULT_PLAYER_ICONS)
         if media_state and media_state.get("ui_icons"):
@@ -556,7 +623,7 @@ class TelegramBotApi:
         pos_str = format_time(display_pos)
         dur_str = format_time(display_dur) if display_dur > 0 else "--:--"
 
-        tag_dot = icons.get("tag_slider_dot") or "5249027614324074999"
+        tag_dot = icons.get("tag_slider_dot") or ICONS.get("dot", "5330193051585391352")
         dot = f'<tg-emoji emoji-id="{tag_dot}">⚪</tg-emoji>'
 
         bar_len = 12
@@ -567,9 +634,9 @@ class TelegramBotApi:
         else:
             bar = "━" * (bar_len // 2) + dot + "━" * (bar_len // 2)
 
-        # White play/pause status icon matching the minimalist white button style
-        btn_play = icons.get("btn_play") or "5251372554798539686"
-        btn_pause = icons.get("btn_pause") or "5251752543440119050"
+        # Vector play/pause status icon matching the minimalist button style
+        btn_play = icons.get("btn_play") or ICONS.get("play", "5330015871299527534")
+        btn_pause = icons.get("btn_pause") or ICONS.get("pause", "5330570905628222348")
         status_eid = (btn_play if is_playing else btn_pause) or icons.get("tag_status_play" if is_playing else "tag_status_pause")
         if status_eid:
             status_badge = f'<tg-emoji emoji-id="{status_eid}">{"▶️" if is_playing else "⏸"}</tg-emoji>'
@@ -590,8 +657,8 @@ class TelegramBotApi:
 
         title = media_state.get("title") or "Неизвестный трек"
         artist = media_state.get("artist") or "Неизвестный исполнитель"
-        pos = float(media_state.get("position", 0.0))
-        dur = float(media_state.get("duration", 0.0))
+        pos = float(media_state.get("position") or 0.0)
+        dur = float(media_state.get("duration") or 0.0)
         is_playing = media_state.get("is_playing", False)
         icons = dict(DEFAULT_PLAYER_ICONS)
         if media_state and media_state.get("ui_icons"):
@@ -625,7 +692,7 @@ class TelegramBotApi:
         pos_str = format_time(display_pos)
         dur_str = format_time(display_dur) if display_dur > 0 else "--:--"
 
-        tag_dot = icons.get("tag_slider_dot") or "5249027614324074999"
+        tag_dot = icons.get("tag_slider_dot") or ICONS.get("dot", "5330193051585391352")
         dot = f'<tg-emoji emoji-id="{tag_dot}">⚪</tg-emoji>'
 
         bar_len = 12
@@ -636,8 +703,8 @@ class TelegramBotApi:
         else:
             bar = "━" * (bar_len // 2) + dot + "━" * (bar_len // 2)
 
-        btn_play = icons.get("btn_play") or "5251372554798539686"
-        btn_pause = icons.get("btn_pause") or "5251752543440119050"
+        btn_play = icons.get("btn_play") or ICONS.get("play", "5330015871299527534")
+        btn_pause = icons.get("btn_pause") or ICONS.get("pause", "5330570905628222348")
         status_eid = (btn_play if is_playing else btn_pause) or icons.get("tag_status_play" if is_playing else "tag_status_pause")
         if status_eid:
             status_badge = f'<tg-emoji emoji-id="{status_eid}">{"▶️" if is_playing else "⏸"}</tg-emoji>'
@@ -708,7 +775,7 @@ class TelegramBotApi:
         lines = [f"📊 <b>Активность за {date_str}</b>:\n"]
         for i, item in enumerate(summary_data[:12], 1):
             app = item.get("app_name", "unknown")
-            dur = float(item.get("total_duration", 0))
+            dur = float(item.get("total_duration") or 0.0)
             eid = item.get("emoji_id")
             emoji_tag = f'<tg-emoji emoji-id="{eid}">🪟</tg-emoji> ' if eid else "📱 "
             m = int(dur) // 60
@@ -721,10 +788,20 @@ class TelegramBotApi:
     def console_card_text(self, target="desktop", shell="powershell", last_cmd=None, is_executing=False):
         shell_name = "PowerShell" if (shell or "").lower() == "powershell" else "CMD"
         target_name = "Desktop (User)" if (target or "").lower() == "desktop" else "SYSTEM (Admin)"
-        status_icon = "⏳ Выполняется..." if is_executing else "🟢 Готова к вводу"
+        
+        status_act_id = ICONS.get("status_active") or ICONS.get("check")
+        status_clock_id = ICONS.get("clock")
+        
+        if is_executing:
+            status_icon = f'<tg-emoji emoji-id="{status_clock_id}">🕒</tg-emoji> Выполняется...' if status_clock_id else "⏳ Выполняется..."
+        else:
+            status_icon = f'<tg-emoji emoji-id="{status_act_id}">✔️</tg-emoji> Готова к вводу' if status_act_id else "🟢 Готова к вводу"
+
+        term_id = ICONS.get("terminal")
+        header_icon = f'<tg-emoji emoji-id="{term_id}">⌨️</tg-emoji> ' if term_id else "💻 "
 
         text = (
-            "💻 <b>Консоль Windows</b>\n\n"
+            f"{header_icon}<b>Консоль Windows</b>\n\n"
             f"• <b>Окружение:</b> <code>{target_name}</code>\n"
             f"• <b>Оболочка:</b> <code>{shell_name}</code>\n"
             f"• <b>Статус:</b> {status_icon}\n\n"
@@ -742,8 +819,11 @@ class TelegramBotApi:
         return text
 
     def console_menu_markup(self, target="desktop", shell="powershell"):
-        shell_btn_text = "🐚 Shell: PowerShell" if (shell or "").lower() == "powershell" else "🐚 Shell: CMD"
-        target_btn_text = "🎯 Цель: Desktop" if (target or "").lower() == "desktop" else "🎯 Цель: SYSTEM"
+        shell_btn_text = "Shell: PowerShell" if (shell or "").lower() == "powershell" else "Shell: CMD"
+        target_btn_text = "Цель: Desktop" if (target or "").lower() == "desktop" else "Цель: SYSTEM"
+        close_btn = {"text": "Закрыть консоль", "callback_data": "console_close"}
+        if ICONS.get("cross") or ICONS.get("back"):
+            close_btn["icon_custom_emoji_id"] = ICONS.get("cross") or ICONS.get("back")
         return {
             "inline_keyboard": [
                 [
@@ -757,7 +837,7 @@ class TelegramBotApi:
                     {"text": "dir", "callback_data": "console_quick:dir"},
                 ],
                 [
-                    {"text": "↩ Закрыть консоль", "callback_data": "console_close"},
+                    close_btn,
                 ],
             ]
         }

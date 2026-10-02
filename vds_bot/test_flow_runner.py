@@ -147,7 +147,9 @@ def test_1_progress_ack_driven_workspace():
     assert len(mqtt.published_messages) == 1
     target, action, args, cmd_id = mqtt.published_messages[0]
     assert action == "launch_app"
-    assert args == {"app": "Рабочий сетап", "workspace_id": ws_id}
+    assert args["app"] == "Рабочий сетап"
+    assert args["workspace_id"] == ws_id
+    assert args.get("vpn") in {"happ", "incy"}
     print("[OK] launch_app command sent to desktop agent with workspace_id.")
 
     # Emit progress ACKs from agent.py using step_id

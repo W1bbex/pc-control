@@ -2,6 +2,7 @@
 
 import json
 import logging
+import queue
 import time
 import secrets
 import threading
@@ -55,6 +56,9 @@ class MqttGateway:
         self.last_media_state = {}
         self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
 
+        self._event_queue = queue.Queue(maxsize=1000)
+        self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True, name="mqtt-event-dispatcher")
+
         self.client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=f"pc-control-bot-{secrets.token_hex(4)}",
@@ -71,6 +75,7 @@ class MqttGateway:
             self.client.connect_async(self.host, self.port, keepalive=30)
             self.client.loop_start()
             self.health_thread.start()
+            self._dispatch_thread.start()
             LOG.info("MQTT gateway thread started")
         except Exception:
             LOG.exception("MQTT gateway connect failed")
@@ -275,11 +280,33 @@ class MqttGateway:
         })
 
     def _emit(self, event_name, data):
-        if self.on_event_callback:
+        if not self.on_event_callback:
+            return
+        q = getattr(self, "_event_queue", None)
+        if q is not None:
+            try:
+                q.put_nowait((event_name, data))
+            except queue.Full:
+                LOG.warning("Event queue full, dropping event: %s", event_name)
+        else:
             try:
                 self.on_event_callback(event_name, data)
             except Exception:
                 LOG.exception("Error in event callback for %s", event_name)
+
+    def _dispatch_loop(self):
+        while True:
+            try:
+                event_name, data = self._event_queue.get()
+                try:
+                    if self.on_event_callback:
+                        self.on_event_callback(event_name, data)
+                except Exception:
+                    LOG.exception("Error in event callback for %s", event_name)
+                finally:
+                    self._event_queue.task_done()
+            except Exception:
+                LOG.exception("Unhandled error in mqtt dispatch loop")
 
     def publish(self, topic, payload, qos=1):
         if not self.mqtt_online:

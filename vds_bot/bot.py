@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 
-import base64
 import html
 import json
 import logging
 import os
-import queue
-import secrets
-import signal
+import requests
 import sys
 import threading
 import time
@@ -58,13 +55,22 @@ def unpack_screenshot_payload(payload):
     return header_data, jpeg_bytes
 
 
-WORKSPACE_STEPS = [
-    {"id": "telegram", "label": "💬 Telegram"},
-    {"id": "yandex_music", "label": "🎵 Yandex Music"},
-    {"id": "happ_vpn", "label": "⚡ Happ (VPN)"},
-    {"id": "chrome", "label": "🌐 Google Chrome"},
-    {"id": "antigravity", "label": "🚀 Antigravity"},
-]
+def get_workspace_steps(vpn="incy"):
+    vpn_item = (
+        {"id": "happ_vpn", "label": "Happ (VPN)", "icon_key": "network"}
+        if str(vpn).lower() == "happ"
+        else {"id": "incy_vpn", "label": "INCY (VPN)", "icon_key": "network"}
+    )
+    return [
+        {"id": "telegram", "label": "Telegram", "icon_key": "telegram"},
+        {"id": "yandex_music", "label": "Yandex Music", "icon_key": "music"},
+        vpn_item,
+        {"id": "chrome", "label": "Google Chrome", "icon_key": "chrome"},
+        {"id": "antigravity", "label": "Antigravity", "icon_key": "terminal"},
+    ]
+
+
+WORKSPACE_STEPS = get_workspace_steps("happ")
 
 LED_WHITE_PRESETS = {
     "1": ("255,150,165", "Холодный снежный"),
@@ -76,14 +82,14 @@ LED_WHITE_PRESETS = {
     "7": ("255,130,130", "Сбалансированный белый"),
     "8": ("255,115,115", "Мягкий белый"),
     "9": ("255,165,140", "Светлый нейтральный"),
-    "10": ("255,150,125", "Идеальный белый ⭐️"),
+    "10": ("255,150,125", "Идеальный белый"),
     "11": ("255,135,100", "Естественный дневной"),
     "12": ("255,120,75", "Тёплый ламповый"),
-    "eye": ("255,150,125", "Для глаз (Идеал) 👁"),
-    "photo": ("228,245,255", "Для фото и видео 📸"),
-    "глаз": ("255,150,125", "Для глаз (Идеал) 👁"),
-    "фото": ("228,245,255", "Для фото и видео 📸"),
-    "камера": ("228,245,255", "Для фото и видео 📸"),
+    "eye": ("255,150,125", "Для глаз (Идеал)"),
+    "photo": ("228,245,255", "Для фото и видео"),
+    "глаз": ("255,150,125", "Для глаз (Идеал)"),
+    "фото": ("228,245,255", "Для фото и видео"),
+    "камера": ("228,245,255", "Для фото и видео"),
 }
 
 
@@ -94,6 +100,10 @@ class PcControlBotApp:
             sys.exit(1)
 
         self.ui = TelegramBotApi(TELEGRAM_TOKEN)
+        self.polling_session = requests.Session()
+        polling_adapter = requests.adapters.HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=3)
+        self.polling_session.mount("https://", polling_adapter)
+        self.polling_session.mount("http://", polling_adapter)
         self.mqtt = MqttGateway(
             username=MQTT_USERNAME,
             password=MQTT_PASSWORD,
@@ -115,6 +125,9 @@ class PcControlBotApp:
         self.running = True
         self.workspace_cancel_event = threading.Event()
         self.happ_ready_event = threading.Event()
+        self.vpn_ready_event = self.happ_ready_event
+        self.chosen_vpn = "incy"
+        self.current_workspace_steps = WORKSPACE_STEPS
         self.workspace_executed_event = threading.Event()
         self.minimize_ack_event = threading.Event()
         self.workspace_execution_result = None
@@ -248,6 +261,7 @@ class PcControlBotApp:
                         self.physical_btn.saved_unlock_pattern = unlock_pat
                     self.physical_btn.last_physical_morse_success_at = data.get("last_physical_morse_success_at")
                     self.physical_btn.physical_morse_unlock_eligible = bool(data.get("physical_morse_unlock_eligible", False))
+                    self.physical_btn.esp_locked = bool(data.get("esp_locked", False))
                     scheduled = data.get("scheduled_shutdown_ts")
                     if scheduled:
                         self.scheduled_shutdown_ts = float(scheduled)
@@ -273,7 +287,7 @@ class PcControlBotApp:
         with getattr(self, "state_lock", threading.RLock()):
             try:
                 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                temp = STATE_PATH.with_suffix(".tmp")
+                temp = STATE_PATH.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
                 phys_btn = getattr(self, "physical_btn", None)
                 data = {
                     "telegram_offset": getattr(self, "offset", 0),
@@ -281,6 +295,7 @@ class PcControlBotApp:
                     "physical_unlock_pattern": getattr(phys_btn, "saved_unlock_pattern", "CC"),
                     "last_physical_morse_success_at": getattr(phys_btn, "last_physical_morse_success_at", 0.0),
                     "physical_morse_unlock_eligible": getattr(phys_btn, "physical_morse_unlock_eligible", False),
+                    "esp_locked": getattr(phys_btn, "esp_locked", False),
                     "scheduled_shutdown_ts": getattr(self, "scheduled_shutdown_ts", None),
                     "pending_shutdown": {
                         "id": getattr(self, "pending_shutdown_cmd_id", None),
@@ -377,9 +392,10 @@ class PcControlBotApp:
         if self.workspace_cancel_event.is_set():
             return
 
+        steps = getattr(self, "current_workspace_steps", WORKSPACE_STEPS)
         lines = [
             f"{step['label']} — {self.app_statuses.get(step['id'], '⏳ В очереди')}"
-            for step in WORKSPACE_STEPS
+            for step in steps
         ]
         text = "<b>🚀 Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
         markup = {"inline_keyboard": [[{"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}]]}
@@ -475,6 +491,7 @@ class PcControlBotApp:
             pending = getattr(self, "pending_screenshots", {}).pop(cmd_id, None)
             if pending:
                 self.ui.send_message(pending["chat_id"], "❌ Desktop-агент не прислал скриншот за 30 секунд.")
+            getattr(self, "pending_telemetry_cmd_ids", {}).pop(cmd_id, None)
             if cmd_id == getattr(self, "pending_shutdown_cmd_id", None):
                 self.ui.send_message(
                     ALLOWED_USER_ID,
@@ -549,14 +566,21 @@ class PcControlBotApp:
                             step_id = "chrome"
                         elif "happ" in an:
                             step_id = "happ_vpn"
+                        elif "incy" in an:
+                            step_id = "incy_vpn"
                         elif "antigravity" in an:
                             step_id = "antigravity"
 
                     if step_id:
                         if state_val in {"verified", "already_running_verified", "ready", "vpn_connected"}:
                             self.app_statuses[step_id] = "✅"
-                            if step_id == "happ_vpn":
-                                self.happ_ready_event.set()
+                            if step_id in {"happ_vpn", "incy_vpn"}:
+                                vpn_ev = getattr(self, "vpn_ready_event", None)
+                                if vpn_ev:
+                                    vpn_ev.set()
+                                happ_ev = getattr(self, "happ_ready_event", None)
+                                if happ_ev:
+                                    happ_ev.set()
                         elif state_val == "connecting":
                             self.app_statuses[step_id] = "⏳ Подключение VPN..."
                         elif state_val == "starting":
@@ -869,14 +893,14 @@ class PcControlBotApp:
             elif action == "seek_fwd_10":
                 self.mqtt.send_media_command("seek", delta=10)
                 if media_state:
-                    dur = float(media_state.get("duration", 0.0))
-                    cur_pos = float(media_state.get("position", 0.0))
+                    dur = float(media_state.get("duration") or 0.0)
+                    cur_pos = float(media_state.get("position") or 0.0)
                     media_state["position"] = min(dur, cur_pos + 10.0) if dur > 0 else cur_pos + 10.0
                     optimistic_changed = True
             elif action == "seek_back_10":
                 self.mqtt.send_media_command("seek", delta=-10)
                 if media_state:
-                    cur_pos = float(media_state.get("position", 0.0))
+                    cur_pos = float(media_state.get("position") or 0.0)
                     media_state["position"] = max(0.0, cur_pos - 10.0)
                     optimistic_changed = True
             elif action == "next":
@@ -994,6 +1018,9 @@ class PcControlBotApp:
 
         if data == "physical_button":
             self.ui.answer_callback(callback_id)
+            self.physical_btn.mode = None
+            self.physical_btn.active_message_id = None
+            self.physical_btn.input_message_id = None
             text = self.physical_btn.physical_control_text()
             markup = self.physical_btn.physical_control_markup()
             self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
@@ -1091,24 +1118,28 @@ class PcControlBotApp:
                 return
             seconds, title = periods[period]
             self.ui.answer_callback(callback_id, "Строю график...")
-            try:
-                chart_bytes, count = self.monitoring.history.render_chart(seconds, title)
-            except ValueError:
-                self.ui.send_message(
-                    chat_id,
-                    "<b>📈 Графики</b>\n\nНедостаточно данных: подожди, пока агент соберёт хотя бы две точки телеметрии.",
-                    reply_markup=self.ui.history_menu_markup(),
-                )
-                return
-            except Exception:
-                LOG.exception("Could not render telemetry chart")
-                self.ui.send_message(
-                    chat_id,
-                    "<b>📈 Графики</b>\n\nНе удалось построить график. Состояние ПК продолжает работать.",
-                    reply_markup=self.ui.history_menu_markup(),
-                )
-                return
-            self.ui.send_photo(chat_id, chart_bytes, caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
+
+            def _build_and_send_chart():
+                try:
+                    chart_bytes, count = self.monitoring.history.render_chart(seconds, title)
+                except ValueError:
+                    self.ui.send_message(
+                        chat_id,
+                        "<b>📈 Графики</b>\n\nНедостаточно данных: подожди, пока агент соберёт хотя бы две точки телеметрии.",
+                        reply_markup=self.ui.history_menu_markup(),
+                    )
+                    return
+                except Exception:
+                    LOG.exception("Could not render telemetry chart")
+                    self.ui.send_message(
+                        chat_id,
+                        "<b>📈 Графики</b>\n\nНе удалось построить график. Состояние ПК продолжает работать.",
+                        reply_markup=self.ui.history_menu_markup(),
+                    )
+                    return
+                self.ui.send_photo(chat_id, chart_bytes, caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
+
+            threading.Thread(target=_build_and_send_chart, daemon=True, name="chart-renderer").start()
             return
 
         if data == "telemetry_now":
@@ -1167,19 +1198,40 @@ class PcControlBotApp:
 
         # 3. Workspace Flow Callbacks
         if data in {"flow_workspace_yes", "flow_workspace_no"}:
+            if data == "flow_workspace_yes":
+                self.ui.answer_callback(callback_id)
+                text = "<b>🚀 Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+                markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
+                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+                return
             self.ui.answer_callback(callback_id)
             self.power_flow.handle_workspace_decision(data, chat_id, self.start_async_workspace_setup)
+            return
+
+        if data in {"workspace_vpn:incy", "workspace_vpn:happ"}:
+            selected_vpn = data.split(":", 1)[1]
+            self.chosen_vpn = selected_vpn
+            vpn_name = "INCY" if selected_vpn == "incy" else "Happ"
+            self.ui.answer_callback(callback_id, f"Выбран {vpn_name} VPN! Запускаю...")
+            self.power_flow.stage = PowerFlowStage.WORKSPACE_RUNNING
+            self.power_flow.workspace_cancelled = False
+            self.power_flow.active_workspace_id = f"ws-{int(time.time())}"
+            self.power_flow.save_state()
+            self.start_async_workspace_setup(
+                chat_id,
+                card_message_id=message_id,
+                workspace_id=self.power_flow.active_workspace_id,
+                vpn=selected_vpn,
+            )
             return
 
         if data == "workspace_start_direct":
             pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
             if pc_state.session_status == "unlocked":
-                self.ui.answer_callback(callback_id, "Запускаю рабочий сетап...")
-                self.power_flow.stage = PowerFlowStage.WORKSPACE_RUNNING
-                self.power_flow.workspace_cancelled = False
-                self.power_flow.active_workspace_id = f"ws-{int(time.time())}"
-                self.power_flow.save_state()
-                self.start_async_workspace_setup(chat_id, card_message_id=message_id, workspace_id=self.power_flow.active_workspace_id)
+                self.ui.answer_callback(callback_id)
+                text = "<b>🚀 Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+                markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
+                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
             elif pc_state.state == "LOCKED":
                 self.ui.answer_callback(callback_id)
                 text = "<b>🔒 Windows не разблокирована.</b>\n\nРазблокировать сейчас?"
@@ -1378,37 +1430,34 @@ class PcControlBotApp:
         # 5. Physical Button Management Callbacks
         if data == "physical_test":
             self.ui.answer_callback(callback_id)
+            self.physical_btn.mode = "test"
             self.physical_btn.input_entries = ["Ожидаю нажатия на кнопку..."]
             text = "<b>🕹 Физическая кнопка — диагностика</b>\n\nОжидаю нажатия..."
-            res = self.ui.send_message(chat_id, text, reply_markup={"inline_keyboard": [self.ui.back_button("physical_button")]})
+            res = self.ui.send_message(chat_id, text, reply_markup={"inline_keyboard": [self.ui.back_button("physical_button")]}, message_id=message_id)
             if res and res.get("message_id"):
                 self.physical_btn.input_message_id = res["message_id"]
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
-        if data == "physical_record_begin":
+        if data in ("physical_record_begin", "physical_password_begin"):
             self.ui.answer_callback(callback_id)
             self.mqtt.publish_esp_action("START_PHYSICAL_RECORDING")
-            text = (
-                "<b>🎙 Записываю пароль</b>\n\n"
-                "Натискай от 4 до 12 шагов.\n"
-                "CLICK — короче 500 мс, HOLD — от 500 мс.\n"
-                "После 3 секунд тишины покажу комбинацию для сохранения."
-            )
-            self.ui.send_message(chat_id, text, reply_markup={"inline_keyboard": [[{"text": "✖ Отмена", "callback_data": "physical_button"}]]})
+            self.physical_btn.mode = "record_password"
+            self.physical_btn.password_draft = []
+            self.physical_btn.last_press_info = None
+            text = self.physical_btn.password_record_text()
+            markup = self.physical_btn.password_record_markup()
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data.startswith("physical_record_save:"):
             seq = data.split(":", 1)[1]
             self.ui.answer_callback(callback_id, "Сохраняю...")
+            self.physical_btn.mode = None
+            self.physical_btn.active_message_id = None
             self.physical_btn.start_save_password(seq, chat_id, self.save_state)
-            return
-
-        if data == "physical_password_begin":
-            self.ui.answer_callback(callback_id)
-            self.physical_btn.password_draft = []
-            text = self.physical_btn.physical_builder_text()
-            markup = self.physical_btn.physical_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup)
             return
 
         if data.startswith("physical_add:"):
@@ -1416,24 +1465,53 @@ class PcControlBotApp:
             symbol = data.split(":", 1)[1]
             if len(self.physical_btn.password_draft) < 12:
                 self.physical_btn.password_draft.append(symbol)
-            text = self.physical_btn.physical_builder_text()
-            markup = self.physical_btn.physical_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=callback["message"]["message_id"])
+                self.physical_btn.last_press_info = "Введено в боте"
+            text = self.physical_btn.password_record_text()
+            markup = self.physical_btn.password_record_markup()
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data == "physical_back":
             self.ui.answer_callback(callback_id)
             if self.physical_btn.password_draft:
                 self.physical_btn.password_draft.pop()
-            text = self.physical_btn.physical_builder_text()
-            markup = self.physical_btn.physical_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=callback["message"]["message_id"])
+            text = self.physical_btn.password_record_text()
+            markup = self.physical_btn.password_record_markup()
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
+            return
+
+        if data == "physical_clear":
+            self.ui.answer_callback(callback_id, "Очищено")
+            self.physical_btn.password_draft = []
+            self.physical_btn.last_press_info = None
+            text = self.physical_btn.password_record_text()
+            markup = self.physical_btn.password_record_markup()
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data == "physical_save":
             self.ui.answer_callback(callback_id, "Сохраняю...")
+            self.physical_btn.mode = None
+            self.physical_btn.active_message_id = None
             seq = "".join(self.physical_btn.password_draft)
             self.physical_btn.start_save_password(seq, chat_id, self.save_state)
+            return
+
+        if data == "physical_cancel_record":
+            self.ui.answer_callback(callback_id, "Отменено")
+            self.physical_btn.mode = None
+            self.physical_btn.active_message_id = None
+            self.physical_btn.password_draft = []
+            self.physical_btn.last_press_info = None
+            text = self.physical_btn.physical_control_text()
+            markup = self.physical_btn.physical_control_markup()
+            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
             return
 
         if data == "physical_password_delete":
@@ -1448,10 +1526,14 @@ class PcControlBotApp:
 
         if data == "physical_unlock_pattern_begin":
             self.ui.answer_callback(callback_id)
+            self.physical_btn.mode = "record_unlock_pattern"
             self.physical_btn.unlock_draft = list(self.physical_btn.saved_unlock_pattern or "CC")
+            self.physical_btn.last_press_info = None
             text = self.physical_btn.unlock_builder_text()
             markup = self.physical_btn.unlock_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data.startswith("unlock_pat_add:"):
@@ -1459,9 +1541,12 @@ class PcControlBotApp:
             symbol = data.split(":", 1)[1]
             if len(self.physical_btn.unlock_draft) < 8:
                 self.physical_btn.unlock_draft.append(symbol)
+                self.physical_btn.last_press_info = "Введено в боте"
             text = self.physical_btn.unlock_builder_text()
             markup = self.physical_btn.unlock_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data == "unlock_pat_back":
@@ -1470,19 +1555,26 @@ class PcControlBotApp:
                 self.physical_btn.unlock_draft.pop()
             text = self.physical_btn.unlock_builder_text()
             markup = self.physical_btn.unlock_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data == "unlock_pat_reset":
             self.ui.answer_callback(callback_id)
             self.physical_btn.unlock_draft = ["C", "C"]
+            self.physical_btn.last_press_info = "Сброс"
             text = self.physical_btn.unlock_builder_text()
             markup = self.physical_btn.unlock_builder_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+            if res and res.get("message_id"):
+                self.physical_btn.active_message_id = res["message_id"]
             return
 
         if data == "unlock_pat_save":
             self.ui.answer_callback(callback_id, "Сохраняю...")
+            self.physical_btn.mode = None
+            self.physical_btn.active_message_id = None
             seq = "".join(self.physical_btn.unlock_draft)
             self.physical_btn.saved_unlock_pattern = seq
             self.save_state()
@@ -1496,7 +1588,7 @@ class PcControlBotApp:
 
         self.ui.answer_callback(callback_id)
 
-    def start_async_workspace_setup(self, chat_id, card_message_id=None, workspace_id=None):
+    def start_async_workspace_setup(self, chat_id, card_message_id=None, workspace_id=None, vpn=None):
         if not hasattr(self, "_workspace_start_lock"):
             self._workspace_start_lock = threading.Lock()
         with self._workspace_start_lock:
@@ -1505,9 +1597,16 @@ class PcControlBotApp:
                 return
             self._workspace_running = True
 
+        selected_vpn = vpn or getattr(self, "chosen_vpn", None) or "incy"
+
         def _runner():
             try:
-                self.run_workspace_setup_steps(chat_id, card_message_id, workspace_id)
+                import inspect
+                sig = inspect.signature(self.run_workspace_setup_steps)
+                if "vpn" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+                    self.run_workspace_setup_steps(chat_id, card_message_id, workspace_id, vpn=selected_vpn)
+                else:
+                    self.run_workspace_setup_steps(chat_id, card_message_id, workspace_id)
             finally:
                 self._workspace_running = False
 
@@ -1517,19 +1616,35 @@ class PcControlBotApp:
             daemon=True,
         ).start()
 
-    def run_workspace_setup_steps(self, chat_id, card_message_id=None, workspace_id=None):
+    def run_workspace_setup_steps(self, chat_id, card_message_id=None, workspace_id=None, vpn=None):
         """
         Asynchronous workspace setup steps driven entirely by real progress ACKs from agent.py:
-        - Issue launch_app command with workspace_id.
+        - Issue launch_app command with workspace_id and selected vpn.
         - Checklist card updates dynamically as progress ACKs arrive with step_id.
-        - Strict Happ/VPN check: verifies Happ ready ACK. Halts & renders error if VPN fails/times out.
+        - Strict VPN check: verifies VPN ready ACK. Halts & renders error if VPN fails/times out.
         - Strict full execution ACK check: verifies launch_app executed ACK.
         - Strict verification check: every step must be verified (no queued/unverified checkmarks).
         - Strict minimize_all ACK check: verifies minimize_all executed ACK before rendering final success!
         """
-        self.app_statuses = {step["id"]: "⏳ В очереди" for step in WORKSPACE_STEPS}
+        active_vpn = vpn or getattr(self, "chosen_vpn", None)
+        if not active_vpn:
+            if hasattr(self, "happ_ready_event") and not hasattr(self, "vpn_ready_event"):
+                active_vpn = "happ"
+            else:
+                active_vpn = "incy"
+        self.chosen_vpn = active_vpn
+        steps = get_workspace_steps(active_vpn)
+        self.current_workspace_steps = steps
+        self.app_statuses = {step["id"]: "⏳ В очереди" for step in steps}
         self.workspace_cancel_event.clear()
-        self.happ_ready_event.clear()
+
+        vpn_ev = getattr(self, "vpn_ready_event", None)
+        if vpn_ev:
+            vpn_ev.clear()
+        happ_ev = getattr(self, "happ_ready_event", None)
+        if happ_ev:
+            happ_ev.clear()
+
         self.workspace_executed_event.clear()
         self.minimize_ack_event.clear()
         self.workspace_execution_result = None
@@ -1538,7 +1653,7 @@ class PcControlBotApp:
         def render_checklist():
             lines = [
                 f"{step['label']} — {self.app_statuses.get(step['id'], '⏳ В очереди')}"
-                for step in WORKSPACE_STEPS
+                for step in self.current_workspace_steps
             ]
             return "<b>🚀 Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
 
@@ -1574,22 +1689,30 @@ class PcControlBotApp:
 
         # Issue launch_app command to agent.py
         ws_id = workspace_id or f"desk-ws-{int(time.time())}"
-        cmd_id = self.mqtt.publish_desktop_action("launch_app", {"app": "Рабочий сетап", "workspace_id": ws_id}, timeout=60)
+        cmd_id = self.mqtt.publish_desktop_action(
+            "launch_app",
+            {"app": "Рабочий сетап", "workspace_id": ws_id, "vpn": active_vpn},
+            timeout=60,
+        )
         self.active_workspace_cmd_id = cmd_id
 
-        # 1. Wait for Happ / VPN readiness (up to 35 seconds)
-        vpn_ready = self._wait_event_or_cancel(self.happ_ready_event, 35.0)
+        # 1. Wait for Happ / INCY VPN readiness (up to 35 seconds)
+        vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
+        vpn_ready = self._wait_event_or_cancel(vpn_event, 35.0) if vpn_event else True
 
         if self.workspace_cancel_event.is_set():
-            LOG.info("Runner thread detected cancellation during Happ wait. Halting.")
+            LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
             self.power_flow.reset_flow()
             return
 
-        if not vpn_ready and not self.happ_ready_event.is_set():
+        vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
+        vpn_name = "INCY" if active_vpn == "incy" else "Happ"
+
+        if not vpn_ready and (vpn_event and not vpn_event.is_set()):
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.app_statuses["happ_vpn"] = "❌ Ошибка VPN"
-            error_text = render_checklist() + "\n\n<b>❌ Не удалось подтвердить подключение Happ (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
+            self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
+            error_text = render_checklist() + f"\n\n<b>❌ Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
             error_markup = {
                 "inline_keyboard": [
                     [{"text": "🔁 Повторить сетап", "callback_data": "workspace_start_direct"}],
@@ -1623,7 +1746,7 @@ class PcControlBotApp:
             return
 
         # 3. Strict verification check: every step must be strictly verified
-        unverified = [s["label"] for s in WORKSPACE_STEPS if self.app_statuses.get(s["id"]) != "✅"]
+        unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
         if unverified:
             notice_text = render_checklist() + f"\n\n<b>⚠️ Рабочий сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
             notice_markup = {
@@ -1803,6 +1926,8 @@ class PcControlBotApp:
 
         # Group chats support: only allow player command if user is authorized
         if chat_type != "private":
+            if from_id != ALLOWED_USER_ID:
+                return
             if text.lower().startswith(("/player", "!player", "плеер", "музыка")):
                 incoming_msg_id = message.get("message_id")
                 if incoming_msg_id:
@@ -2157,6 +2282,11 @@ class PcControlBotApp:
 
         if not self.scheduled_shutdown_ts or now < self.scheduled_shutdown_ts:
             return
+        if now - self.scheduled_shutdown_ts > 600.0:
+            LOG.info("Discarding stale scheduled shutdown (scheduled_at=%s, now=%s)", self.scheduled_shutdown_ts, now)
+            self.scheduled_shutdown_ts = None
+            self.save_state()
+            return
         if now - self.last_schedule_attempt_at < 15:
             return
         self.last_schedule_attempt_at = now
@@ -2236,7 +2366,7 @@ class PcControlBotApp:
             "allowed_updates": ["message", "callback_query", "business_connection", "business_message", "edited_business_message"],
         }
         try:
-            res = self.ui.session.post(url, json=payload, timeout=25)
+            res = self.polling_session.post(url, json=payload, timeout=25)
             if res.status_code != 200:
                 time.sleep(2)
                 return

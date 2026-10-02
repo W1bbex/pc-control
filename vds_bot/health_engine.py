@@ -86,7 +86,7 @@ class ComponentState:
             else:
                 age = now - ts
                 # If older than threshold, or impossibly far in the future (> 60s drift)
-                if age > self.stale_threshold or age < -60.0:
+                if age > self.stale_threshold or age < -600.0:
                     if status in ("online", "locked", "unlocked", "fresh"):
                         status = "stale"
                         
@@ -192,7 +192,7 @@ class HealthEngine:
 
         # 2. Check if SHUTDOWN_OBSERVED is active within TTL
         if now < self.shutdown_observed_until:
-            if sys_status in ("offline", "unknown") and desk_status in ("offline", "unknown"):
+            if sys_status in ("offline", "unknown", "stale") and desk_status in ("offline", "unknown", "stale"):
                 return PCStateInfo(
                     state=PCState.SHUTDOWN_OBSERVED,
                     label="🔴 Выключен (наблюдается)",

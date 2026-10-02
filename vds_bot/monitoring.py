@@ -11,16 +11,32 @@ from history import TelemetryHistory
 
 LOG = logging.getLogger("pc-control-bot.monitoring")
 
-EMOJI_HEADER_PC = "5967816500415827773"        # 💻 PC Control
-EMOJI_SECTION_SESSION = "5886412370347036129"  # 👤 Сессия
-EMOJI_STATUS_ACTIVE = "5325945307454789973"    # 🟢 Active
-EMOJI_STATUS_INACTIVE = "5326056199215406977"  # ❌ Inactive
-EMOJI_DEFAULT_APP = "5251242026447446579"      # 🪟 Windows Explorer / Window icon
-EMOJI_PLAYER_PLAY = "5251372554798539686"      # ▶️ Minimalist white play
-EMOJI_PLAYER_PAUSE = "5251752543440119050"     # ⏸️ Minimalist white pause (2 bars)
-EMOJI_PLAYER_HEART = "5249190011332502742"     # ❤️ Heart liked
-EMOJI_SECTION_HARDWARE = "5843553939672274145" # ⚡️ Железо
-EMOJI_SECTION_DISKS = "5877332341331857066"    # 📁 Накопители
+def _load_icons():
+    import json
+    for p in [
+        Path(__file__).resolve().parent / "resources" / "icons.json",
+        Path(__file__).resolve().parent.parent / "resources" / "icons.json",
+    ]:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+ICONS = _load_icons()
+
+EMOJI_HEADER_PC = ICONS.get("pc", "5330499003580721030")        # 💻 PC Control
+EMOJI_SECTION_SESSION = ICONS.get("user", "5330478284658488376")  # 👤 Сессия
+EMOJI_STATUS_ACTIVE = ICONS.get("status_active", "5330273230034871570")    # ✔️ Active
+EMOJI_STATUS_INACTIVE = ICONS.get("status_inactive", "5330015179809794606")  # ❌ Inactive
+EMOJI_DEFAULT_APP = ICONS.get("apps", "5330130731609929749")      # 🪟 Windows Explorer / Window icon
+EMOJI_PLAYER_PLAY = ICONS.get("play", "5330015871299527534")      # ▶️ Minimalist play
+EMOJI_PLAYER_PAUSE = ICONS.get("pause", "5330570905628222348")     # ⏸️ Minimalist pause
+EMOJI_PLAYER_HEART = ICONS.get("heart", "5330276670303674347")     # ❤️ Heart liked
+EMOJI_SECTION_HARDWARE = ICONS.get("power", "5330077297921795474") # ⚡️ Железо
+EMOJI_SECTION_DISKS = ICONS.get("folder", "5330394360997517972")    # 📁 Накопители
 
 
 def format_duration(seconds):

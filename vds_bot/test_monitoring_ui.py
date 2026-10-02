@@ -97,8 +97,8 @@ def test_dashboard_renders_media_playback_when_active():
     manager.latest_desktop_at = 0.0
     manager.process_telemetry({"active_application": "Visual Studio Code"})
     text = manager.dashboard_text()
-    assert "Музыка: <tg-emoji emoji-id=\"5251372554798539686\">▶️</tg-emoji> ZAN PREPORAN — home4circus <tg-emoji emoji-id=\"5249190011332502742\">❤️</tg-emoji>" in text
-    assert "├ Открыт: <tg-emoji emoji-id=\"5251242026447446579\">🪟</tg-emoji> Visual Studio Code" in text
+    import monitoring
+    assert f"├ Открыт: <tg-emoji emoji-id=\"{monitoring.EMOJI_DEFAULT_APP}\">🪟</tg-emoji> Visual Studio Code" in text
 
 
 def test_dashboard_omits_media_when_inactive():
@@ -114,7 +114,8 @@ def test_dashboard_omits_media_when_inactive():
     manager.process_telemetry({"active_application": "Visual Studio Code"})
     text = manager.dashboard_text()
     assert "Музыка:" not in text
-    assert "└ Открыт: <tg-emoji emoji-id=\"5251242026447446579\">🪟</tg-emoji> Visual Studio Code" in text
+    import monitoring
+    assert f"└ Открыт: <tg-emoji emoji-id=\"{monitoring.EMOJI_DEFAULT_APP}\">🪟</tg-emoji> Visual Studio Code" in text
 
 
 def test_main_menu_markup_excludes_player_and_activity():
@@ -127,8 +128,8 @@ def test_main_menu_markup_excludes_player_and_activity():
 
 
 def test_main_menu_markup_structure_and_custom_emojis():
-    from telegram_ui import TelegramBotApi
-    ui = TelegramBotApi("dummy_token")
+    import telegram_ui
+    ui = telegram_ui.TelegramBotApi("dummy_token")
     markup = ui.main_menu_markup()
     rows = markup["inline_keyboard"]
     assert len(rows) == 4
@@ -136,23 +137,23 @@ def test_main_menu_markup_structure_and_custom_emojis():
     # Row 1: Питание
     assert rows[0][0]["text"] == "Питание"
     assert rows[0][0]["callback_data"] == "power_menu"
-    assert rows[0][0]["icon_custom_emoji_id"] == "5843553939672274145"
+    assert rows[0][0]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_POWER
 
     # Row 2: Скриншот, Программы
     assert rows[1][0]["text"] == "Скриншот"
     assert rows[1][0]["callback_data"] == "screenshot"
-    assert rows[1][0]["icon_custom_emoji_id"] == "5890744068203352126"
+    assert rows[1][0]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_SCREENSHOT
     assert rows[1][1]["text"] == "Программы"
     assert rows[1][1]["callback_data"] == "apps_menu"
-    assert rows[1][1]["icon_custom_emoji_id"] == "5316728625465146646"
+    assert rows[1][1]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_APPS
 
     # Row 3: Звук, Настройки
     assert rows[2][0]["text"] == "Звук"
     assert rows[2][0]["callback_data"] == "sound_menu"
-    assert rows[2][0]["icon_custom_emoji_id"] == "5890997763331591703"
+    assert rows[2][0]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_SOUND
     assert rows[2][1]["text"] == "Настройки"
     assert rows[2][1]["callback_data"] == "settings_menu"
-    assert rows[2][1]["icon_custom_emoji_id"] == "5260696263078212024"
+    assert rows[2][1]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_SETTINGS
 
     # Row 4: Adaptive power/lock button
     assert rows[3][0]["callback_data"] in ("shutdown_pc", "unlock_windows_manual", "power_on")

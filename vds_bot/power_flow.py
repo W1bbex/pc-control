@@ -40,6 +40,7 @@ class PowerFlowManager:
         self.workspace_cancelled = False
         self.auto_launch_workspace = False
         self.on_workspace_start_cb = None
+        self._lock = threading.Lock()
 
         self.load_state()
 
@@ -78,25 +79,29 @@ class PowerFlowManager:
             self.reset_flow()
 
     def save_state(self):
-        try:
-            FLOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            temp = FLOW_STATE_PATH.with_suffix(".tmp")
-            data = {
-                "flow_id": self.flow_id,
-                "chat_id": self.chat_id,
-                "stage": self.stage,
-                "message_id": self.message_id,
-                "created_at": self.created_at,
-                "expires_at": self.expires_at,
-                "unlock_attempts": self.unlock_attempts,
-                "active_workspace_id": self.active_workspace_id,
-                "auto_launch_workspace": self.auto_launch_workspace,
-            }
-            temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            os.chmod(temp, 0o600)
-            os.replace(temp, FLOW_STATE_PATH)
-        except Exception:
-            LOG.exception("Could not save flow_state.json")
+        with self._lock:
+            try:
+                FLOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                temp = FLOW_STATE_PATH.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+                data = {
+                    "flow_id": self.flow_id,
+                    "chat_id": self.chat_id,
+                    "stage": self.stage,
+                    "message_id": self.message_id,
+                    "created_at": self.created_at,
+                    "expires_at": self.expires_at,
+                    "unlock_attempts": self.unlock_attempts,
+                    "active_workspace_id": self.active_workspace_id,
+                    "auto_launch_workspace": self.auto_launch_workspace,
+                }
+                temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                try:
+                    os.chmod(temp, 0o600)
+                except Exception:
+                    pass
+                os.replace(temp, FLOW_STATE_PATH)
+            except Exception:
+                LOG.exception("Could not save flow_state.json")
 
     def reset_flow(self):
         self.flow_id = None
@@ -406,12 +411,15 @@ class PowerFlowManager:
 
         text = (
             f"{status_title}\n\n"
-            "Запустить рабочий сетап?"
+            "Запустить рабочий сетап? Выберите VPN:"
         )
         markup = {
             "inline_keyboard": [
                 [
-                    {"text": "🚀 Запустить рабочий сетап", "style": "success", "callback_data": "flow_workspace_yes"},
+                    {"text": "🛡️ Сетап с INCY", "style": "success", "callback_data": "workspace_vpn:incy"},
+                    {"text": "⚡ Сетап с Happ", "style": "primary", "callback_data": "workspace_vpn:happ"},
+                ],
+                [
                     {"text": "✖ Не сейчас", "callback_data": "flow_workspace_no"},
                 ]
             ]
