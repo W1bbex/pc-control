@@ -31,6 +31,7 @@ DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = BASE_DIR / "config.json"
 _data_state = DATA_DIR / "boot-state.json"
 _root_state = BASE_DIR / "boot-state.json"
+STATE_PATH = _data_state if (DATA_DIR.exists() or not _root_state.exists()) else _root_state
 _data_snapshot = DATA_DIR / "admin-sensors.json"
 _hw_sensors_snapshot = BASE_DIR / "hardware" / "sensors" / "admin-sensors.json"
 _hw_snapshot = BASE_DIR / "hardware" / "admin-sensors.json"
@@ -471,7 +472,7 @@ def find_active_interactive_session_id():
     if sess_id != 0xFFFFFFFF and sess_id != 0:
         return sess_id
 
-    # 2. Secondary: enumerate sessions for state 0 (WTSActive)
+    # 2. Secondary: enumerate sessions for state 0 (WTSActive) or any non-zero user session
     class _WTS_SESSION_INFOW(ctypes.Structure):
         _fields_ = [
             ("SessionId", wintypes.DWORD),
@@ -481,12 +482,17 @@ def find_active_interactive_session_id():
 
     p_info = ctypes.POINTER(_WTS_SESSION_INFOW)()
     count = wintypes.DWORD()
+    fallback_sid = None
     if wtsapi32.WTSEnumerateSessionsW(None, 0, 1, ctypes.byref(p_info), ctypes.byref(count)):
         try:
             for i in range(count.value):
                 entry = p_info[i]
-                if entry.State == 0 and entry.SessionId != 0:  # 0 = WTSActive
-                    return int(entry.SessionId)
+                sid_val = int(entry.SessionId)
+                if sid_val != 0:
+                    if entry.State == 0:  # 0 = WTSActive
+                        return sid_val
+                    if fallback_sid is None:
+                        fallback_sid = sid_val
         finally:
             wtsapi32.WTSFreeMemory(p_info)
 
@@ -499,7 +505,10 @@ def find_active_interactive_session_id():
     except Exception:
         pass
 
-    return 2 if (sess_id == 0xFFFFFFFF or sess_id == 0) else sess_id
+    if fallback_sid is not None:
+        return fallback_sid
+
+    return 1 if (sess_id == 0xFFFFFFFF or sess_id == 0) else sess_id
 
 
 class SystemAgent:
@@ -596,12 +605,16 @@ class SystemAgent:
             LOG.exception("Could not load system-agent state")
 
     def save_state(self):
-        temporary = STATE_PATH.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps({"processed_ids": self.processed_ids[-50:]}),
-            encoding="utf-8",
-        )
-        os.replace(temporary, STATE_PATH)
+        try:
+            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary = STATE_PATH.with_suffix(f".tmp.{os.getpid()}")
+            temporary.write_text(
+                json.dumps({"processed_ids": self.processed_ids[-50:]}),
+                encoding="utf-8",
+            )
+            os.replace(temporary, STATE_PATH)
+        except Exception:
+            LOG.exception("Could not save system-agent state")
 
     def remember_command(self, command_id):
         with self.state_lock:
@@ -813,6 +826,16 @@ class SystemAgent:
     def network_rates(self):
         now = time.time()
         current = psutil.net_io_counters()
+        if current is None or self.previous_net is None:
+            if current is not None:
+                self.previous_net = current
+                self.previous_net_time = now
+            return {
+                "download_mbps": 0.0,
+                "upload_mbps": 0.0,
+                "received_gb": 0.0,
+                "sent_gb": 0.0,
+            }
         elapsed = max(0.1, now - self.previous_net_time)
         received = max(0, current.bytes_recv - self.previous_net.bytes_recv)
         sent = max(0, current.bytes_sent - self.previous_net.bytes_sent)
@@ -1422,12 +1445,12 @@ class SystemAgent:
                 if len(parts) >= 2 and parts[1] == target_domain:
                     found = True
                     if parts[0] != target_ip:
-                        lines[i] = f"{target_ip} {target_domain} # PCControlAgent direct"
+                        lines[i] = f"{target_ip} {target_domain} # pc-control direct"
                         updated = True
                     break
 
             if not found:
-                lines.append(f"{target_ip} {target_domain} # PCControlAgent direct")
+                lines.append(f"{target_ip} {target_domain} # pc-control direct")
                 updated = True
 
             if updated:

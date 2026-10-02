@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$installDir = if (Test-Path "C:\Projects\PCControlAgent") { "C:\Projects\PCControlAgent" } else { Join-Path $env:LOCALAPPDATA "PCControlAgent" }
+$installDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $hardwareDir = Join-Path $installDir "hardware"
 $collector = if (Test-Path "$hardwareDir\sensors\AdminSensorCollector.exe") { "$hardwareDir\sensors\AdminSensorCollector.exe" } else { "$hardwareDir\AdminSensorCollector.exe" }
 $snapshot = Join-Path $installDir "data\admin-sensors.json"

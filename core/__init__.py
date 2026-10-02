@@ -1,4 +1,4 @@
-﻿"""PCControlAgent core modules."""
+"""PCControlAgent core modules."""
 from .activity_db import ActivityDB, get_activity_db
 from .activity_logger import ActivityTracker
 from .app_emoji_manager import AppEmojiManager

@@ -11,16 +11,13 @@ Log-Msg "Stopping scheduled tasks..."
 Stop-ScheduledTask -TaskName "PC Control System Agent" -ErrorAction SilentlyContinue
 Stop-ScheduledTask -TaskName "PC Control Desktop Agent" -ErrorAction SilentlyContinue
 
-Log-Msg "Killing known Session 0 zombie PIDs (2660, 6332)..."
-& cmd.exe /c "taskkill /F /PID 2660 /T 2>&1" | Out-Null
-& cmd.exe /c "taskkill /F /PID 6332 /T 2>&1" | Out-Null
-
 Log-Msg "Finding all python processes running PC Control agents..."
 $procs = Get-CimInstance Win32_Process | Where-Object {
     ($_.Name -in @("python.exe", "pythonw.exe")) -and (
         $_.CommandLine -like "*boot_agent.py*" -or
         $_.CommandLine -like "*agent.py*" -or
-        $_.CommandLine -like "*PCControlAgent*"
+        $_.CommandLine -like "*PCControlAgent*" -or
+        $_.CommandLine -like "*pc-control*"
     )
 }
 

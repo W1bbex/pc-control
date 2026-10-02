@@ -71,6 +71,18 @@ DEFAULT_USER_ID = int(os.getenv("TELEGRAM_USER_ID", "0"))
 
 AGENT_START_TIME = time.time()
 
+def _load_canonical_icons():
+    candidate = BASE_DIR / "resources" / "icons.json"
+    if candidate.exists():
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+ICONS = _load_canonical_icons()
+
 
 def get_real_boot_time():
     """Returns actual boot timestamp using Windows Kernel-Boot event log or psutil fallback."""
@@ -648,7 +660,7 @@ class PCControlAgent:
             return None
 
     def get_active_application_info(self):
-        desktop_emoji = "5251242026447446579"
+        desktop_emoji = ICONS.get("screen") or ICONS.get("apps", "5330015235644368681")
         try:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
@@ -659,14 +671,17 @@ class PCControlAgent:
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if not pid.value:
                 return "Рабочий стол", desktop_emoji, None
+            kernel32.OpenProcess.restype = wintypes.HANDLE
             hproc = kernel32.OpenProcess(0x1000, False, pid.value)
             name = None
             if hproc:
-                buf = ctypes.create_unicode_buffer(1024)
-                size = wintypes.DWORD(1024)
-                if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                    name = os.path.basename(buf.value)
-                kernel32.CloseHandle(hproc)
+                try:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(1024)
+                    if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                        name = os.path.basename(buf.value)
+                finally:
+                    kernel32.CloseHandle(hproc)
 
             title = None
             tlen = user32.GetWindowTextLengthW(hwnd)
@@ -992,41 +1007,302 @@ class PCControlAgent:
         }
 
     @staticmethod
-    def check_happ_vpn_active():
-        """
-        Verify that Happ process is running in the system.
-        """
+    def _run_network_probe(timeout=2.0):
         try:
-            for p in psutil.process_iter(["name"]):
-                name = (p.info["name"] or "").lower()
-                if name in ("happ.exe", "flyfrogllc.happ.exe"):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect(("1.1.1.1", 53))
+            s.close()
+            return True
+        except Exception:
+            pass
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "http://www.google.com/generate_204",
+                headers={"User-Agent": "PCControlAgent/2.0"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.getcode() in (200, 204):
                     return True
         except Exception:
             pass
         return False
 
-    def connect_happ_vpn(self, cancel_event=None):
+    @classmethod
+    def check_happ_vpn_active(cls):
         """
-        Verify that Happ process has started and is running.
-        If already running -> skips and returns immediately.
-        Otherwise polls up to 12s for process appearance.
+        Verify that Happ VPN is actively running and connected:
+        1. Process happ.exe is running.
+        2. Interface 'happ-tun' or 'Happ' exists, is up, and has an IPv4 address.
+        3. Network probe succeeds.
         """
-        LOG.info("Verifying Happ process presence")
-        if self.check_happ_vpn_active():
-            LOG.info("Happ process is active and running")
+        try:
+            has_proc = any(
+                (p.info["name"] or "").lower() in ("happ.exe", "flyfrogllc.happ.exe")
+                for p in psutil.process_iter(["name"])
+            )
+            if not has_proc:
+                return False
+
+            addrs = psutil.net_if_addrs()
+            stats = psutil.net_if_stats()
+            has_tun = False
+            for iface, if_addrs in addrs.items():
+                if "happ" in iface.lower():
+                    if_stat = stats.get(iface)
+                    if if_stat and not if_stat.isup:
+                        continue
+                    if any(
+                        a.family == socket.AF_INET
+                        and a.address
+                        and not a.address.startswith("169.254")
+                        for a in if_addrs
+                    ):
+                        has_tun = True
+                        break
+            if not has_tun:
+                return False
+
+            return cls._run_network_probe(timeout=2.5)
+        except Exception as e:
+            LOG.warning("Error checking Happ VPN active status: %s", e)
+            return False
+
+    @classmethod
+    def check_incy_vpn_active(cls):
+        """
+        Verify that INCY VPN is actively running and connected:
+        1. Process incy.exe is running.
+        2. Interface 'wwan99' / 'wintun' exists, is up, and has an IPv4 address.
+        3. Network probe succeeds.
+        """
+        try:
+            has_proc = any(
+                (p.info["name"] or "").lower() == "incy.exe"
+                for p in psutil.process_iter(["name"])
+            )
+            if not has_proc:
+                return False
+
+            addrs = psutil.net_if_addrs()
+            stats = psutil.net_if_stats()
+            has_tun = False
+            for iface, if_addrs in addrs.items():
+                if any(k in iface.lower() for k in ("wwan99", "wintun", "incy")):
+                    if_stat = stats.get(iface)
+                    if if_stat and not if_stat.isup:
+                        continue
+                    if any(
+                        a.family == socket.AF_INET
+                        and a.address
+                        and not a.address.startswith("169.254")
+                        for a in if_addrs
+                    ):
+                        has_tun = True
+                        break
+            if not has_tun:
+                return False
+
+            return cls._run_network_probe(timeout=2.5)
+        except Exception as e:
+            LOG.warning("Error checking INCY VPN active status: %s", e)
+            return False
+
+    def connect_incy_vpn(self, cancel_event=None, timeout=None):
+        """
+        Ensure INCY VPN is connected and verified.
+        Ensures autoConnect is set in preferences.json, launches incy.exe if not running,
+        and polls up to timeout for network readiness.
+        """
+        LOG.info("Verifying INCY VPN connection")
+        if self.check_incy_vpn_active():
+            LOG.info("INCY VPN is already active and verified")
             return {"verified": True, "already_connected": True}
 
-        deadline = time.monotonic() + 12.0
+        # Ensure autoConnect: true in preferences.json
+        try:
+            pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
+            if pref_path.exists():
+                with open(pref_path, "r", encoding="utf-8") as f:
+                    prefs = json.load(f)
+                if not prefs.get("autoConnect"):
+                    prefs["autoConnect"] = True
+                    with open(pref_path, "w", encoding="utf-8") as f:
+                        json.dump(prefs, f, indent=2)
+                    LOG.info("Enabled autoConnect in INCY preferences.json")
+        except Exception as e:
+            LOG.warning("Could not update INCY preferences: %s", e)
+
+        # Launch incy.exe if not running
+        is_running = any(
+            (p.info["name"] or "").lower() == "incy.exe"
+            for p in psutil.process_iter(["name"])
+        )
+        if not is_running:
+            incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
+            resolved_exe = os.path.expandvars(str(incy_cmd))
+            if Path(resolved_exe).exists():
+                LOG.info("Launching INCY: %s", resolved_exe)
+                subprocess.Popen(
+                    [resolved_exe],
+                    cwd=str(Path(resolved_exe).parent),
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+
+        if timeout is None:
+            timeout = max(15, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 12))))
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
                 return {"cancelled": True}
-            if self.check_happ_vpn_active():
-                LOG.info("Happ process detected and verified")
+            if self.check_incy_vpn_active():
+                LOG.info("INCY VPN connection successfully verified via network probe")
                 return {"verified": True}
             time.sleep(0.5)
 
-        LOG.warning("Happ process was not detected within timeout")
-        return {"verified": False, "reason": "process_not_found"}
+        if self.check_incy_vpn_active():
+            LOG.info("INCY VPN connection verified at deadline")
+            return {"verified": True}
+
+        LOG.warning("INCY VPN verification timed out after %ds", timeout)
+        return {"verified": False, "reason": "vpn_verification_timeout"}
+
+    def connect_happ_vpn(self, cancel_event=None, timeout=None):
+        """
+        Verify Happ VPN connection.
+        If already connected -> skips clicking and returns immediately.
+        Otherwise restores window, clicks connect button, and awaits real verification.
+        """
+        LOG.info("Automating HAPP VPN connection")
+        if self.check_happ_vpn_active():
+            LOG.info("HAPP VPN is already active and verified; skipping button click")
+            return {"verified": True, "already_connected": True}
+
+        # Attach to active input desktop if possible
+        hdesk = None
+        hdesk_orig = None
+        try:
+            hdesk_orig = ctypes.windll.user32.GetThreadDesktop(ctypes.windll.kernel32.GetCurrentThreadId())
+            hdesk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x01FF)
+            if hdesk:
+                ctypes.windll.user32.SetThreadDesktop(hdesk)
+        except Exception:
+            pass
+
+        try:
+            deadline = time.monotonic() + 15.0
+            clicked = False
+            window_title = None
+
+            while time.monotonic() < deadline:
+                if cancel_event and cancel_event.is_set():
+                    return {"cancelled": True}
+                if self.check_happ_vpn_active():
+                    LOG.info("HAPP VPN became active during window check; skipping click")
+                    return {"verified": True, "already_connected": True}
+
+                # Find Happ windows via ctypes EnumWindows
+                happ_windows = []
+                def _enum_cb(hwnd, _):
+                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+                        if "happ" in buff.value.lower():
+                            rect = wintypes.RECT()
+                            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                            happ_windows.append((hwnd, buff.value, rect))
+                    return True
+
+                EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+                ctypes.windll.user32.EnumWindows(EnumWindowsProc(_enum_cb), 0)
+
+                if not happ_windows:
+                    time.sleep(0.5)
+                    continue
+
+                for hwnd, title, rect in happ_windows:
+                    try:
+                        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+
+                time.sleep(0.4)
+
+                # Re-query
+                happ_windows.clear()
+                ctypes.windll.user32.EnumWindows(EnumWindowsProc(_enum_cb), 0)
+                if not happ_windows:
+                    time.sleep(0.5)
+                    continue
+
+                target_hwnd, target_title, target_rect = max(
+                    happ_windows,
+                    key=lambda item: (item[2].right - item[2].left) * (item[2].bottom - item[2].top),
+                )
+                w_width = target_rect.right - target_rect.left
+                w_height = target_rect.bottom - target_rect.top
+                if w_width < 300 or w_height < 200:
+                    time.sleep(0.5)
+                    continue
+
+                # In Happ 4.3.0, the connect power button is at ~0.77 * width, ~0.35 * height
+                button_x = target_rect.left + round(w_width * 0.77)
+                button_y = target_rect.top + round(w_height * 0.35)
+
+                try:
+                    import pyautogui
+                    pyautogui.click(button_x, button_y)
+                    clicked = True
+                    window_title = target_title
+                    LOG.info("Clicked HAPP connect button at (%s, %s) in window %r", button_x, button_y, target_title)
+                    break
+                except Exception as click_err:
+                    LOG.warning("Failed clicking HAPP button with pyautogui: %s", click_err)
+                    # Fallback to mouse_event
+                    ctypes.windll.user32.SetCursorPos(button_x, button_y)
+                    time.sleep(0.1)
+                    ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0)  # LEFTDOWN
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0)  # LEFTUP
+                    clicked = True
+                    window_title = target_title
+                    LOG.info("Clicked HAPP connect button via mouse_event at (%s, %s)", button_x, button_y)
+                    break
+
+            if not clicked:
+                if self.check_happ_vpn_active():
+                    LOG.info("HAPP VPN active despite window click skipped; verified")
+                    return {"verified": True, "already_connected": True}
+                LOG.warning("HAPP window was not ready after 15s")
+                return {"verified": False, "reason": "window_not_found"}
+
+            verify_timeout = max(15, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 12))))
+            verify_deadline = time.monotonic() + verify_timeout
+            while time.monotonic() < verify_deadline:
+                if cancel_event and cancel_event.is_set():
+                    return {"cancelled": True}
+                if self.check_happ_vpn_active():
+                    LOG.info("HAPP VPN connection successfully verified via network probe")
+                    return {"verified": True, "window": window_title}
+                time.sleep(0.5)
+
+            if self.check_happ_vpn_active():
+                LOG.info("HAPP VPN connection verified at deadline")
+                return {"verified": True, "window": window_title}
+
+            LOG.warning("HAPP VPN connection verification timed out after %ds", verify_timeout)
+            return {"verified": False, "reason": "vpn_verification_timeout"}
+        finally:
+            if hdesk:
+                try:
+                    if hdesk_orig:
+                        ctypes.windll.user32.SetThreadDesktop(hdesk_orig)
+                    ctypes.windll.user32.CloseDesktop(hdesk)
+                except Exception:
+                    pass
 
     @staticmethod
     def minimize_all_windows():
@@ -1091,7 +1367,7 @@ class PCControlAgent:
         LOG.info("Requested display power-off")
         return {"displays": "off"}
 
-    def launch_app(self, app_key, workspace_id=None, progress_callback=None):
+    def launch_app(self, app_key, workspace_id=None, progress_callback=None, vpn=None):
         app_config = self.config.get("apps", {}).get(app_key)
         if not app_config:
             raise ValueError("Application is not configured")
@@ -1100,6 +1376,7 @@ class PCControlAgent:
         minimize_after = bool(scenario.get("minimize_after", False))
         inter_app_delay = max(0.0, float(scenario.get("inter_app_delay_seconds", 1.5)))
         raw_steps = scenario.get("steps") if scenario else app_config
+        selected_vpn = str(vpn or self.config.get("default_vpn", "incy")).lower().strip()
 
         cancel_event = None
         if scenario and workspace_id:
@@ -1171,11 +1448,43 @@ class PCControlAgent:
                 elif not Path(executable).exists():
                     raise FileNotFoundError(executable)
 
-                is_happ = (ver_type == "happ_vpn") or ("happ.exe" in str(executable).lower())
+                is_vpn = (
+                    step_id in ("happ_vpn", "incy_vpn", "vpn")
+                    or ver_type in ("happ_vpn", "incy_vpn", "vpn")
+                    or any(k in str(executable).lower() for k in ("happ.exe", "incy.exe"))
+                )
+
+                if is_vpn:
+                    if selected_vpn == "happ":
+                        step_id = "happ_vpn"
+                        label = "⚡ Happ (VPN)"
+                        configured_path = self.config.get("apps", {}).get("Happ", r"C:\Program Files\FlyFrogLLC\Happ\Happ.exe")
+                        executable = str(configured_path)
+                        cmd = [os.path.expandvars(executable)]
+                        is_happ = True
+                        is_incy = False
+                    else:
+                        step_id = "incy_vpn"
+                        label = "🛡️ INCY (VPN)"
+                        configured_path = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
+                        executable = str(configured_path)
+                        cmd = [os.path.expandvars(executable)]
+                        is_happ = False
+                        is_incy = True
+                else:
+                    is_happ = (ver_type == "happ_vpn") or ("happ.exe" in str(executable).lower())
+                    is_incy = (ver_type == "incy_vpn") or ("incy.exe" in str(executable).lower())
+
+                resolved_exe = shutil.which(executable)
+                if resolved_exe:
+                    executable = resolved_exe
+                elif not Path(executable).exists():
+                    raise FileNotFoundError(executable)
 
                 # Check if already running and verified
-                if is_happ:
-                    if self.check_happ_vpn_active():
+                if is_happ or is_incy:
+                    is_active = self.check_happ_vpn_active() if is_happ else self.check_incy_vpn_active()
+                    if is_active:
                         LOG.info("Step %s (%s) is already running and VPN is verified", step_id, label)
                         launched.append(f"{label} (already running verified)")
                         verified_steps.append(step_id)
@@ -1241,15 +1550,19 @@ class PCControlAgent:
                     raise RuntimeError(f"Application exited immediately: {executable}")
                 launched.append(label)
 
-                # Verification for HAPP VPN
-                if is_happ:
+                # Verification for VPN (HAPP or INCY)
+                if is_happ or is_incy:
                     if progress_callback:
                         progress_callback({
                             "step_id": step_id,
                             "app": label,
                             "state": "connecting",
                         })
-                    vpn_res = self.connect_happ_vpn(cancel_event=cancel_event)
+                    vpn_res = (
+                        self.connect_happ_vpn(cancel_event=cancel_event)
+                        if is_happ
+                        else self.connect_incy_vpn(cancel_event=cancel_event)
+                    )
                     if vpn_res.get("cancelled"):
                         return {
                             "app": app_key,
@@ -1411,15 +1724,6 @@ class PCControlAgent:
                 )
                 return
 
-
-            if action == "top_processes":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    {"processes": self.top_processes()},
-                )
-                return
-
             if action == "screenshot":
                 data = self.make_screenshot(command_id)
                 self.acknowledge(command_id, "executed", data)
@@ -1497,6 +1801,7 @@ class PCControlAgent:
                     args.get("app"),
                     workspace_id=ws_id,
                     progress_callback=report_progress,
+                    vpn=args.get("vpn"),
                 )
                 if isinstance(res, dict) and res.get("success") is False:
                     self.acknowledge(command_id, "failed", res)
@@ -1667,8 +1972,9 @@ class PCControlAgent:
         ).start()
 
     def publish_telemetry(self):
-        telemetry = self.collect_telemetry()
-        payload = json.dumps(telemetry, ensure_ascii=False)
+        with self.state_lock:
+            telemetry = self.collect_telemetry()
+            payload = json.dumps(telemetry, ensure_ascii=False)
         self.mqtt.publish(
             TOPIC_TELEMETRY,
             payload=payload,
@@ -1714,34 +2020,35 @@ class PCControlAgent:
         if key in IGNORED_PROCESSES:
             return
 
-        if self.current_session_app and key == self.current_session_app.lower():
+        with self.state_lock:
+            if self.current_session_app and key == self.current_session_app.lower():
+                self.current_session_title = title
+                return
+
+            now = time.time()
+            # 1. Close and record previous app session to SQLite
+            if self.current_session_app and self.current_session_start:
+                try:
+                    get_activity_db().record_session(
+                        app_name=self.current_session_app,
+                        window_title=self.current_session_title,
+                        exe_path=self.current_session_exe,
+                        started_at=self.current_session_start,
+                        ended_at=now,
+                        emoji_id=self.current_session_emoji_id
+                    )
+                except Exception:
+                    LOG.exception("Failed to record session to SQLite")
+
+            # 2. Instant lookup from cache (0.01 ms)
+            emoji_id = self.emoji_manager.cache.get(key, {}).get("emoji_id")
+
+            # 3. Open new session in memory
+            self.current_session_app = exe_name
             self.current_session_title = title
-            return
-
-        now = time.time()
-        # 1. Close and record previous app session to SQLite
-        if self.current_session_app and self.current_session_start:
-            try:
-                get_activity_db().record_session(
-                    app_name=self.current_session_app,
-                    window_title=self.current_session_title,
-                    exe_path=self.current_session_exe,
-                    started_at=self.current_session_start,
-                    ended_at=now,
-                    emoji_id=self.current_session_emoji_id
-                )
-            except Exception:
-                LOG.exception("Failed to record session to SQLite")
-
-        # 2. Instant lookup from cache (0.01 ms)
-        emoji_id = self.emoji_manager.cache.get(key, {}).get("emoji_id")
-
-        # 3. Open new session in memory
-        self.current_session_app = exe_name
-        self.current_session_title = title
-        self.current_session_exe = exe_path
-        self.current_session_start = now
-        self.current_session_emoji_id = emoji_id
+            self.current_session_exe = exe_path
+            self.current_session_start = now
+            self.current_session_emoji_id = emoji_id
 
         # 4. INSTANT MQTT push to VDS (2-5 ms) so bot dashboard updates in real time!
         self.publish_active_app_update(exe_name, emoji_id, title)

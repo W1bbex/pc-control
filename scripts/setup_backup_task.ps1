@@ -28,7 +28,7 @@ $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 # Register task under current user
 try {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "Weekly source code backup for PCControlAgent (PC, ESP8266, and VDS)." | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "Weekly source code backup for pc-control (PC, ESP8266, and VDS)." | Out-Null
     Write-Host "[OK] Scheduled task '$TaskName' registered successfully!" -ForegroundColor Green
     Write-Host "    Trigger: Weekly on Sunday at 04:00 AM (Runs when available if missed)"
     Write-Host "    Action : $PythonExe `"$BackupScript`" --scheduled"

@@ -1,4 +1,5 @@
 import ctypes
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,24 @@ LOG_DIR = BASE_DIR / "logs"
 LOG_PATH = LOG_DIR / "type_password.log"
 CONFIG_PATH = BASE_DIR / "config.json"
 ENV_PATH = BASE_DIR / ".env"
+
+kernel32 = ctypes.windll.kernel32
+user32 = ctypes.windll.user32
+
+user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+user32.GetThreadDesktop.restype = wintypes.HANDLE
+
+user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+user32.OpenInputDesktop.restype = wintypes.HANDLE
+
+user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+user32.SetThreadDesktop.restype = wintypes.BOOL
+
+user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+user32.CloseDesktop.restype = wintypes.BOOL
+
+user32.GetKeyState.argtypes = [ctypes.c_int]
+user32.GetKeyState.restype = ctypes.c_short
 
 def _load_env_file(path: Path):
     if not path.exists():
@@ -49,8 +68,6 @@ def run_unlock():
     hdesk_orig = None
     mutex = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        user32 = ctypes.windll.user32
         try:
             hdesk_orig = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
         except Exception:
@@ -61,9 +78,12 @@ def run_unlock():
         kernel32.ProcessIdToSessionId(pid, ctypes.byref(session_id))
         
         # OS-level global mutex to prevent concurrent type_password execution
-        mutex = kernel32.CreateMutexW(None, False, "Global\\W1bbexPCControlTypePasswordMutex")
+        mutex = kernel32.CreateMutexW(None, True, "Global\\W1bbexPCControlTypePasswordMutex")
         if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
             log(f"Another type_password process is already active. PID {pid} exiting immediately.")
+            if mutex:
+                kernel32.CloseHandle(mutex)
+                mutex = None
             return
 
         def send_key(vk, delay=0.08):
@@ -187,6 +207,13 @@ def run_unlock():
         except Exception:
             pass
 
+        # Ensure CapsLock is off to avoid password case inversion and account lockout
+        VK_CAPITAL = 0x14
+        if user32.GetKeyState(VK_CAPITAL) & 1:
+            log("CapsLock is active! Disabling CapsLock to prevent password case inversion...")
+            send_key(VK_CAPITAL, 0.04)
+            time.sleep(0.05)
+
         time.sleep(0.1)
         log("Typing password...")
         VK_SHIFT = 0x10
@@ -229,11 +256,6 @@ def run_unlock():
         try:
             if hdesk_orig:
                 user32.SetThreadDesktop(hdesk_orig)
-            else:
-                try:
-                    user32.SetThreadDesktop(user32.GetDesktopWindow())
-                except Exception:
-                    pass
             if hdesk_in:
                 user32.CloseDesktop(hdesk_in)
         except Exception as e:

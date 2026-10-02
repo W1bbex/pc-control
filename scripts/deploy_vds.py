@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-VDS_HOST = os.getenv("VDS_HOST", "root@203.0.113.10")
+VDS_HOST = os.getenv("VDS_HOST", "vds")
 LOCAL_DIR = Path(__file__).resolve().parent.parent / "vds_bot"
 REMOTE_BASE = "/opt/pc-control-bot"
 

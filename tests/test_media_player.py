@@ -30,7 +30,7 @@ class TestMediaPlayerUI(unittest.TestCase):
         self.assertIn("<i>Virtuals</i>", text)
         # Check timeline formatted (+2s latency compensation: 75s+2s=77s -> 01:17)
         self.assertIn("01:17", text)
-        self.assertIn('<tg-emoji emoji-id="5249027614324074999">⚪</tg-emoji>', text)
+        self.assertIn('<tg-emoji emoji-id="5330193051585391352">⚪</tg-emoji>', text)
 
     def test_player_card_with_artist_avatar_and_white_icon(self):
         state = {

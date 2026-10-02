@@ -7,6 +7,7 @@ and hardware playback control (play, pause, next, prev, seek).
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -48,45 +49,45 @@ _ym_cfg = _cfg.get("yandex_music", {})
 DEFAULT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or _tg_cfg.get("token") or _tg_cfg.get("bot_token") or ""
 _def_user_id = os.getenv("TELEGRAM_USER_ID") or _tg_cfg.get("user_id") or 0
 DEFAULT_USER_ID = int(_def_user_id) if _def_user_id else 0
-PACK_NAME = "pc_music_pack"
 
-# Pre-uploaded white minimalist UI icons & tags in pc_music_pack
+def _load_canonical_icons():
+    from pathlib import Path
+    for candidate in [
+        Path(__file__).resolve().parent.parent / "resources" / "icons.json",
+        Path(__file__).resolve().parent / "resources" / "icons.json",
+    ]:
+        if candidate.exists():
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+_CANONICAL_ICONS = _load_canonical_icons()
+
+# Pre-uploaded vector UI icons & tags in pc_icons_pack
 UI_ICONS = {
-    "btn_play": "5251372554798539686",
-    "btn_pause": "5251752543440119050",
-    "btn_next": "5251687758153423658",
-    "btn_prev": "5251293527400291945",
-    "btn_fwd10": "5251438890568425035",
-    "btn_back10": "5251409985438522351",
-    "btn_wave": "5251393273720776324",
-    "tag_note": "5251570222078401376",
-    "tag_artist": "5251415160874116452",
-    "tag_status_play": "5251372554798539686",  # Pure white minimalist play
-    "tag_status_pause": "5251752543440119050",  # Pure white minimalist pause
-    "tag_clock": "5251754463290498132",
-    "tag_slider_dot": "5249027614324074999",  # Custom white glowing slider bead
-    "tag_heart_liked": "5249190011332502742",
-    "tag_heart_unliked": "5251547334197684560",
+    "btn_play": _CANONICAL_ICONS.get("play", "5330015871299527534"),
+    "btn_pause": _CANONICAL_ICONS.get("pause", "5330570905628222348"),
+    "btn_next": _CANONICAL_ICONS.get("next", "5330255053733276330"),
+    "btn_prev": _CANONICAL_ICONS.get("prev", "5330363570376977789"),
+    "btn_fwd10": _CANONICAL_ICONS.get("fwd10", "5330317725896059016"),
+    "btn_back10": _CANONICAL_ICONS.get("back10", "5330294859490179153"),
+    "btn_wave": _CANONICAL_ICONS.get("wave", "5330448799707998190"),
+    "tag_note": _CANONICAL_ICONS.get("music", "5330477356945551054"),
+    "tag_artist": _CANONICAL_ICONS.get("headphones", "5330526830673831881"),
+    "tag_status_play": _CANONICAL_ICONS.get("play", "5330015871299527534"),
+    "tag_status_pause": _CANONICAL_ICONS.get("pause", "5330570905628222348"),
+    "tag_clock": _CANONICAL_ICONS.get("clock", "5330473500064912704"),
+    "tag_slider_dot": _CANONICAL_ICONS.get("dot", "5330193051585391352"),
+    "tag_heart_liked": _CANONICAL_ICONS.get("heart", "5330276670303674347"),
+    "tag_heart_unliked": _CANONICAL_ICONS.get("heart", "5330276670303674347"),
 }
 
 YANDEX_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN") or _ym_cfg.get("token") or ""
 _def_yuid = os.getenv("YANDEX_MUSIC_UID") or _ym_cfg.get("uid") or 0
 YANDEX_UID = int(_def_yuid) if _def_yuid else 0
-
-PROTECTED_STICKER_IDS = {
-    "5251372554798539686",
-    "5251752543440119050",
-    "5251687758153423658",
-    "5251293527400291945",
-    "5251438890568425035",
-    "5251409985438522351",
-    "5251393273720776324",
-    "5251570222078401376",
-    "5251415160874116452",
-    "5249027614324074999",
-    "5249190011332502742",
-    "5251547334197684560",
-}
 
 
 class MediaManager:

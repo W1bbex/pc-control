@@ -347,8 +347,8 @@ def test_kill_process_desktop_agent_allowed_and_boot_agent_protected():
     fake_proc = MagicMock()
     fake_proc.pid = 99999
     fake_proc.name.return_value = "pythonw.exe"
-    fake_proc.cmdline.return_value = ["pythonw.exe", "C:\\PCControlAgent\\agent.py"]
-    fake_proc.info = {"pid": 99999, "name": "pythonw.exe", "cmdline": ["pythonw.exe", "C:\\PCControlAgent\\agent.py"]}
+    fake_proc.cmdline.return_value = ["pythonw.exe", "C:\\pc-control\\agent.py"]
+    fake_proc.info = {"pid": 99999, "name": "pythonw.exe", "cmdline": ["pythonw.exe", "C:\\pc-control\\agent.py"]}
     with patch("psutil.process_iter", return_value=[fake_proc]):
         res = boot_agent.SystemAgent.kill_process("desktop_agent")
         assert isinstance(res, dict)

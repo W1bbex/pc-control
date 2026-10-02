@@ -65,15 +65,18 @@ class TestConsoleUI(unittest.TestCase):
         # Row 3: Close button
         r3 = buttons[2]
         self.assertEqual(r3[0]["callback_data"], "console_close")
+        self.assertIn("icon_custom_emoji_id", r3[0])
 
     def test_apps_menu_markup_contains_console(self):
         markup = self.ui.apps_menu_markup()
-        all_cbs = [
-            btn["callback_data"]
+        console_btns = [
+            btn
             for row in markup["inline_keyboard"]
             for btn in row
+            if btn["callback_data"] == "console_open"
         ]
-        self.assertIn("console_open", all_cbs)
+        self.assertEqual(len(console_btns), 1)
+        self.assertIn("icon_custom_emoji_id", console_btns[0])
 
     def test_settings_menu_markup_contains_console(self):
         markup = self.ui.settings_menu_markup()

@@ -35,4 +35,6 @@ env/
 # Scratch and subagents
 .agents/
 scratch/
+AUDIT_REPORT*.md
+CRITIQUE_REPORT*.md
 

@@ -78,6 +78,12 @@ class ActivityDB:
                         emoji_id TEXT
                     );
                 """)
+                # Auto-migrate schema for legacy databases missing emoji_id
+                cursor = conn.execute("PRAGMA table_info(app_sessions);")
+                columns = [row["name"] for row in cursor.fetchall()]
+                if "emoji_id" not in columns:
+                    conn.execute("ALTER TABLE app_sessions ADD COLUMN emoji_id TEXT;")
+
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_date ON app_sessions(date_str);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_time_range ON app_sessions(started_at, ended_at);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_app ON app_sessions(app_name);")

@@ -45,7 +45,7 @@ REMOTE_VDS_DIR = "/opt/pc-control-bot"
 
 # Extensions considered "source code"
 CODE_EXTENSIONS = {
-    ".py", ".json", ".env", ".example", ".txt", ".ini", ".cfg",
+    ".py", ".json", ".example", ".txt", ".ini", ".cfg",
     ".cs", ".csproj", ".sln", ".config",
     ".ino", ".h", ".hpp", ".c", ".cpp",
     ".bat", ".ps1", ".sh", ".service", ".yaml", ".yml", ".md"
@@ -63,7 +63,8 @@ EXCLUDE_FILES = {
     "*.exe", "*.dll", "*.pdb", "*.obj", "*.bin", "*.zip",
     "*.tar", "*.gz", "*.7z", "*.iso", "*.pyc", "*.pyo",
     "*.png", "*.jpg", "*.jpeg", "*.ico", "*.svg", "*.webp",
-    "*.mp3", "*.wav", "*.flac", "*.log"
+    "*.mp3", "*.wav", "*.flac", "*.log",
+    ".env", "*.env"
 }
 
 VDS_MANIFEST_FILES = [
@@ -76,7 +77,7 @@ VDS_MANIFEST_FILES = [
     "power_flow.py",
     "telegram_ui.py",
     "requirements.txt",
-    "pc-control-bot.env",
+    "pc-control-bot.env.example",
     "pc-control-bot.service",
 ]
 
@@ -113,7 +114,7 @@ def is_excluded_file(path: Path) -> bool:
     for pat in EXCLUDE_FILES:
         if fnmatch.fnmatch(name, pat):
             return True
-    if path.suffix.lower() not in CODE_EXTENSIONS and name not in {".env", ".gitignore"}:
+    if path.suffix.lower() not in CODE_EXTENSIONS and name not in {".gitignore"}:
         return True
     return False
 
