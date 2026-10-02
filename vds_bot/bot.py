@@ -1311,14 +1311,20 @@ class PcControlBotApp:
 
         if data == "sleep_confirm":
             self.ui.answer_callback(callback_id, "Отправляю в сон...")
-            self.mqtt.publish_system_action("sleep")
+            if self.mqtt.system_status == "online":
+                self.mqtt.publish_system_action("sleep")
+            elif getattr(self.mqtt, "desktop_status", None) == "online":
+                self.mqtt.publish_desktop_action("sleep")
             if hasattr(self.mqtt, "publish_esp_action"):
                 self.mqtt.publish_esp_action("LED_OFF")
             return
 
         if data == "hibernate_pc":
             self.ui.answer_callback(callback_id, "Перевожу в гибернацию...")
-            self.mqtt.publish_desktop_action("hibernate")
+            if self.mqtt.system_status == "online":
+                self.mqtt.publish_system_action("hibernate")
+            elif getattr(self.mqtt, "desktop_status", None) == "online":
+                self.mqtt.publish_desktop_action("hibernate")
             if hasattr(self.mqtt, "publish_esp_action"):
                 self.mqtt.publish_esp_action("LED_OFF")
             return
@@ -1356,7 +1362,10 @@ class PcControlBotApp:
 
         if data == "reboot_confirm":
             self.ui.answer_callback(callback_id, "Перезагружаю...")
-            self.mqtt.publish_system_action("restart")
+            if self.mqtt.system_status == "online":
+                self.mqtt.publish_system_action("restart")
+            elif getattr(self.mqtt, "desktop_status", None) == "online":
+                self.mqtt.publish_desktop_action("restart")
             if hasattr(self.mqtt, "publish_esp_action"):
                 self.mqtt.publish_esp_action("LED_OFF")
             return
@@ -2131,14 +2140,17 @@ class PcControlBotApp:
         if not getattr(self.mqtt, "mqtt_online", False):
             self.ui.send_message(chat_id, "❌ MQTT недоступен. Выключение не отправлено.")
             return False
-        if self.mqtt.system_status != "online":
+        if self.mqtt.system_status == "online":
+            cmd_id = self.mqtt.publish_system_action("shutdown")
+        elif getattr(self.mqtt, "desktop_status", None) == "online":
+            cmd_id = self.mqtt.publish_desktop_action("shutdown")
+        else:
             self.ui.send_message(
                 chat_id,
-                f"❌ Системный агент сейчас недоступен ({self.mqtt.system_status}). Выключение не отправлено.",
+                f"❌ Агенты Windows сейчас недоступны (system: {self.mqtt.system_status}, desktop: {getattr(self.mqtt, 'desktop_status', 'offline')}). Выключение не отправлено.",
                 reply_markup=self._power_menu_markup(),
             )
             return False
-        cmd_id = self.mqtt.publish_system_action("shutdown")
         if hasattr(self.mqtt, "publish_esp_action"):
             self.mqtt.publish_esp_action("LED_OFF")
         if not cmd_id:

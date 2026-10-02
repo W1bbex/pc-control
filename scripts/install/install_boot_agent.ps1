@@ -27,7 +27,13 @@ if (!(Test-Path -LiteralPath $collector)) {
 # Files created by the SYSTEM collector must remain readable by the desktop
 # agent. Grant only read/execute and inheritance to the current owner; SYSTEM
 # keeps its existing full-control permissions.
-$currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
+$currentUser = if ($consoleUser) { $consoleUser } else { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name }
+$currentUserSid = try {
+    (New-Object System.Security.Principal.NTAccount($currentUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+} catch {
+    [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
 & icacls.exe $hardwareDir /grant "*$($currentUserSid):(OI)(CI)(RX)" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Could not grant desktop-agent read access to: $hardwareDir"
@@ -73,7 +79,6 @@ Register-ScheduledTask `
     -Description "PC CONTROL MQTT core available before Windows logon" `
     -Force | Out-Null
 
-$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $desktopTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $desktopPrincipal = New-ScheduledTaskPrincipal `
     -UserId $currentUser `
