@@ -891,6 +891,7 @@ class PCControlAgent:
             "ts": now,
             "agent_mode": "desktop",
             "host": socket.gethostname(),
+            "os": platform.system().lower(),
             "windows": platform.platform(),
             "local_ip": self.get_local_ip(),
             "uptime_seconds": max(0, int(time.time() - REAL_BOOT_TIME)),

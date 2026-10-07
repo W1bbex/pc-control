@@ -28,6 +28,8 @@ def _load_icons():
 ICONS = _load_icons()
 
 EMOJI_HEADER_PC = ICONS.get("pc", "5330499003580721030")        # 💻 PC Control
+EMOJI_OS_WINDOWS = ICONS.get("windows", "5332280534540264957")    # 🪟 Windows OS
+EMOJI_OS_LINUX = ICONS.get("linux", "5332695978136874502")        # 🐧 Linux OS
 EMOJI_SECTION_SESSION = ICONS.get("user", "5330478284658488376")  # 👤 Сессия
 EMOJI_STATUS_ACTIVE = ICONS.get("status_active", "5330273230034871570")    # ✔️ Active
 EMOJI_STATUS_INACTIVE = ICONS.get("status_inactive", "5330015179809794606")  # ❌ Inactive
@@ -160,6 +162,62 @@ class MonitoringManager:
 
         return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji> Офлайн', "н/д"
 
+    def get_os_type(self, telemetry=None) -> str:
+        """Detect operating system ('windows', 'linux', or 'unknown') from telemetry or environment."""
+        telem = telemetry if telemetry is not None else (self.latest_telemetry or {})
+
+        # 1. Explicit os / os_type / platform_system field
+        explicit_os = telem.get("os") or telem.get("os_type") or telem.get("platform_system")
+        if explicit_os:
+            val = str(explicit_os).lower()
+            if "win" in val:
+                return "windows"
+            if "linux" in val:
+                return "linux"
+
+        # 2. Check "windows" field in telemetry (agent.py and boot_agent.py emit "windows": platform.platform())
+        win_field = telem.get("windows")
+        if win_field:
+            if isinstance(win_field, str) and ("win" in win_field.lower() or "10" in win_field or "11" in win_field):
+                return "windows"
+            elif bool(win_field):
+                return "windows"
+
+        # 3. Check "platform" field
+        plat = telem.get("platform")
+        if plat:
+            val = str(plat).lower()
+            if "win" in val:
+                return "windows"
+            if "linux" in val:
+                return "linux"
+
+        # 4. Check disk mountpoints or devices
+        disks = telem.get("disks") or []
+        if isinstance(disks, list):
+            for d in disks:
+                dev = str(d.get("drive", "") or d.get("device", "") or d.get("mountpoint", "")).lower()
+                if dev.startswith(("/", "/dev/")):
+                    return "linux"
+                if len(dev) >= 2 and dev[1] == ":" and dev[0].isalpha():
+                    return "windows"
+
+        # 5. Default fallback for PC Control host
+        return "windows"
+
+    def header_os_tag(self, telemetry=None) -> str:
+        """Return adaptive custom emoji tag for OS in the header."""
+        os_type = self.get_os_type(telemetry)
+        if os_type == "windows":
+            eid = ICONS.get("windows") or EMOJI_OS_WINDOWS
+            return f'<tg-emoji emoji-id="{eid}">🪟</tg-emoji>'
+        elif os_type == "linux":
+            eid = ICONS.get("linux") or EMOJI_OS_LINUX
+            return f'<tg-emoji emoji-id="{eid}">🐧</tg-emoji>'
+        else:
+            eid = ICONS.get("pc") or EMOJI_HEADER_PC
+            return f'<tg-emoji emoji-id="{eid}">💻</tg-emoji>'
+
     def dashboard_text(self, media_state=None):
         """Build the full dashboard from the nested schema emitted by agent.py."""
         pc_state = self.mqtt.health.evaluate_pc_state(telemetry_age=self.telemetry_age())
@@ -173,9 +231,12 @@ class MonitoringManager:
                     diff = int(time.time() - float(ts))
                     last_telem_info = f"\n\n<i>Последняя телеметрия получена {format_duration(diff)} назад.</i>"
 
+            os_tag = self.header_os_tag()
+            os_type = self.get_os_type()
+            os_label = "Windows" if os_type == "windows" else ("Linux" if os_type == "linux" else "Система")
             return (
-                f'<tg-emoji emoji-id="{EMOJI_HEADER_PC}">💻</tg-emoji> <b>PC Control</b> — {header}\n'
-                f"Windows: {pc_state.label}\n\n"
+                f'{os_tag} <b>PC Control</b> — {header}\n'
+                f"{os_label}: {pc_state.label}\n\n"
                 f"<i>{pc_state.reason}</i>{last_telem_info}\n\n"
                 f"<i>Агенты: System {pc_state.system_status} | Desktop {pc_state.desktop_status} | ESP {pc_state.esp_status}</i>"
             )
@@ -285,8 +346,9 @@ class MonitoringManager:
             app_line = f" └ Открыт: {app_emoji} {active_application}\n"
 
         dur_str = f"  ({session_duration})" if session_duration and session_duration != "н/д" else ""
+        os_tag = self.header_os_tag(telemetry)
         return (
-            f'<tg-emoji emoji-id="{EMOJI_HEADER_PC}">💻</tg-emoji> <b>PC Control</b>\n\n'
+            f'{os_tag} <b>PC Control</b>\n\n'
             f'<b><tg-emoji emoji-id="{EMOJI_SECTION_SESSION}">👤</tg-emoji> Сессия</b>\n'
             f' ├ Статус: {status_icon}{dur_str}\n'
             + app_line

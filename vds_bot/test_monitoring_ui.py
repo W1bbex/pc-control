@@ -420,8 +420,55 @@ def test_sanitize_reply_markup_strips_null_or_invalid_emojis():
     assert rows[4][0]["icon_custom_emoji_id"] == "5330140476890718558"
 
 
+def test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux():
+    manager = MonitoringManager.__new__(MonitoringManager)
+    manager.mqtt = FakeMqtt()
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+
+    # 1. Windows telemetry
+    manager.process_telemetry({
+        "timestamp": int(time.time()),
+        "os": "windows",
+        "windows": "Windows 10 Pro",
+        "user_active": True,
+        "cpu": {"load_percent": 12},
+    })
+    assert manager.get_os_type() == "windows"
+    win_tag = manager.header_os_tag()
+    assert "5332280534540264957" in win_tag
+    assert "🪟" in win_tag
+    win_dashboard = manager.dashboard_text()
+    assert f'{win_tag} <b>PC Control</b>' in win_dashboard
+
+    # 2. Linux telemetry
+    manager.process_telemetry({
+        "timestamp": int(time.time()),
+        "os": "linux",
+        "user_active": True,
+        "cpu": {"load_percent": 5},
+    })
+    assert manager.get_os_type() == "linux"
+    linux_tag = manager.header_os_tag()
+    assert "5332695978136874502" in linux_tag
+    assert "🐧" in linux_tag
+    linux_dashboard = manager.dashboard_text()
+    assert f'{linux_tag} <b>PC Control</b>' in linux_dashboard
+
+    # 3. Unreachable state displays correct OS tag and label
+    manager.mqtt.health.update("windows_system", "offline")
+    manager.mqtt.health.update("windows_desktop", "offline")
+    manager.mqtt.health.update("telemetry", "stale")
+    unreachable_text = manager.dashboard_text()
+    assert f'{linux_tag} <b>PC Control</b> — ' in unreachable_text
+    assert "Linux: " in unreachable_text
+
+
 if __name__ == "__main__":
     test_dashboard_uses_real_nested_agent_schema()
+    test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux()
     test_dashboard_renders_media_playback_when_active()
     test_dashboard_omits_media_when_inactive()
     test_dashboard_formats_telegram_chat_title()
