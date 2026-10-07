@@ -171,6 +171,26 @@ class TestMediaPlayerUI(unittest.TestCase):
         btn_heart = markup["inline_keyboard"][2][0]
         self.assertEqual(btn_heart["icon_custom_emoji_id"], "5346267379007530615")
 
+    def test_unliked_heart_crossed_out(self):
+        from vds_bot.monitoring import MonitoringManager
+        from vds_bot.telegram_ui import TelegramBotApi
+
+        ui = TelegramBotApi("dummy")
+        state = {
+            "active": True,
+            "title": "sekairotten",
+            "artist": "sekairotten",
+            "is_playing": True,
+            "is_liked": False,
+            "ui_icons": {
+                "tag_heart_unliked": "5348530607729190493",
+            }
+        }
+        markup = ui.player_card_markup(state)
+        btn_heart = markup["inline_keyboard"][2][0]
+        self.assertEqual(btn_heart["icon_custom_emoji_id"], "5348530607729190493")
+        self.assertEqual(btn_heart["text"], "В избранное")
+
         # In monitoring dashboard text
         mock_mqtt = MagicMock()
         mock_mqtt.system_status = "online"
@@ -180,8 +200,48 @@ class TestMediaPlayerUI(unittest.TestCase):
         mm.latest_received_at = 9999999999.0
         mm.latest_telemetry = {"user_active": True}
         text = mm.dashboard_text(state)
-        self.assertIn("5346267379007530615", text)
-        self.assertNotIn("5330276670303674347", text)
+        self.assertIn("5348530607729190493", text)
+        self.assertIn("💔", text)
+
+    def test_title_match_required_in_resolve_track(self):
+        from core.media_manager import MediaManager
+        mm = MediaManager.__new__(MediaManager)
+        mm._lock = MagicMock()
+        mm.yandex_token = "dummy"
+        mm.yandex_uid = 123
+        mm.liked_track_ids = {"155806688"}  # 'idk' is in likes
+        mm._last_liked_fetch = 9999999999.0
+        mm._http_session = MagicMock()
+
+        # Mock search returning:
+        # 1) 'sekairotten' by 'sekairotten' (not liked)
+        # 2) 'idk' by 'седьмоенебо, sekairotten' (liked)
+        mm._http_session.get.return_value.json.return_value = {
+            "tracks": {
+                "results": [
+                    {
+                        "id": 154887343,
+                        "realId": 154887343,
+                        "title": "sekairotten",
+                        "artists": [{"name": "sekairotten"}],
+                        "durationMs": 122000,
+                    },
+                    {
+                        "id": 155806688,
+                        "realId": 155806688,
+                        "title": "idk",
+                        "artists": [{"name": "седьмоенебо"}, {"name": "sekairotten"}],
+                        "durationMs": 125340,
+                    },
+                ]
+            }
+        }
+
+        # Resolve 'sekairotten' - must NEVER pick 'idk' despite 'idk' being in likes!
+        title, artist, tid, is_liked, cover = mm._resolve_track("sekairotten", "sekairotten", 122.0)
+        self.assertEqual(title, "sekairotten")
+        self.assertEqual(tid, "154887343")
+        self.assertFalse(is_liked)
 
 if __name__ == "__main__":
     unittest.main()

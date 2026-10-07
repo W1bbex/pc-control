@@ -82,7 +82,7 @@ UI_ICONS = {
     "tag_clock": _CANONICAL_ICONS.get("clock", "5330473500064912704"),
     "tag_slider_dot": _CANONICAL_ICONS.get("dot", "5330193051585391352"),
     "tag_heart_liked": _CANONICAL_ICONS.get("heart_liked", _CANONICAL_ICONS.get("heart", "5346267379007530615")),
-    "tag_heart_unliked": _CANONICAL_ICONS.get("heart_unliked", "5346066056710498954"),
+    "tag_heart_unliked": _CANONICAL_ICONS.get("heart_unliked", "5348530607729190493"),
 }
 
 YANDEX_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN") or _ym_cfg.get("token") or ""
@@ -118,6 +118,27 @@ class MediaManager:
 
         # HTTP session for connection pooling (avoids repeated TLS handshakes)
         self._http_session = requests.Session()
+        # Bind to physical LAN interface for Yandex Music to bypass VPN TUN if VPN is active
+        try:
+            import socket
+            from requests.adapters import HTTPAdapter
+
+            class _SourceAddressAdapter(HTTPAdapter):
+                def __init__(self, source_address, **kwargs):
+                    self.source_address = source_address
+                    super().__init__(**kwargs)
+                def init_poolmanager(self, *args, **kwargs):
+                    kwargs['source_address'] = self.source_address
+                    super().init_poolmanager(*args, **kwargs)
+
+            ips = socket.gethostbyname_ex(socket.gethostname())[2]
+            phys_ips = [ip for ip in ips if not ip.startswith(("127.", "198.18.", "169.254."))]
+            if phys_ips:
+                adapter = _SourceAddressAdapter((phys_ips[0], 0))
+                self._http_session.mount("https://api.music.yandex.net/", adapter)
+                self._http_session.mount("http://api.music.yandex.net/", adapter)
+        except Exception as e:
+            LOG.debug("Could not mount physical source address adapter: %s", e)
 
         # Local playback clock anchor
         self._anchor_time = time.time()
@@ -160,9 +181,12 @@ class MediaManager:
             ).json()
             data = r.get("result", r) if isinstance(r, dict) else {}
             tracks = data.get("library", {}).get("tracks", []) if isinstance(data, dict) else []
-            self.liked_track_ids = {str(x.get("id")) for x in tracks if x.get("id")}
-            self._last_liked_fetch = now
-            LOG.info("Synced %d liked tracks from Yandex Music", len(self.liked_track_ids))
+            if tracks:
+                self.liked_track_ids = {str(x.get("id")) for x in tracks if x.get("id")}
+                self._last_liked_fetch = now
+                LOG.info("Synced %d liked tracks from Yandex Music", len(self.liked_track_ids))
+            elif self.liked_track_ids:
+                LOG.warning("Yandex Music likes sync returned empty or error (%s), keeping %d cached tracks", r.get("name") if isinstance(r, dict) else "", len(self.liked_track_ids))
         except Exception as e:
             LOG.warning("Failed syncing Yandex Music likes: %s", e)
 
@@ -196,11 +220,12 @@ class MediaManager:
         for q in queries_to_try:
             try:
                 r = self._http_session.get(
-                    f"https://api.music.yandex.net/search?text={requests.utils.quote(q)}&type=track&page=0",
+                    f"https://api.music.yandex.net/search?text={requests.utils.quote(q)}&type=all&page=0",
                     headers=self._get_yandex_headers(),
                     timeout=3,
                 ).json()
-                tracks_data = r.get("result", {}).get("tracks", {}) if "result" in r else r.get("tracks", {})
+                res = r.get("result", r) if isinstance(r, dict) else {}
+                tracks_data = res.get("tracks", {})
                 found = tracks_data.get("results", tracks_data.get("items", []))
                 if found:
                     tracks.extend(found)
@@ -216,8 +241,14 @@ class MediaManager:
             diff = abs(t_dur - duration) if duration > 0 else 0.0
             t_title = t.get("title", "").lower()
             t_artists = [a.get("name", "").lower() for a in t.get("artists", [])]
-            t_matched = bool(clean_title and clean_title.lower() in t_title)
+            t_matched = bool(clean_title and (clean_title.lower() in t_title or t_title in clean_title.lower()))
             a_matched = bool(clean_artist and any(clean_artist.lower() in a or a in clean_artist.lower() for a in t_artists))
+
+            # Strictly require title match if clean_title is present!
+            # Never match another song just because the artist or likes match!
+            if clean_title and not t_matched:
+                continue
+
             t_id = str(t.get("id"))
             t_real_id = str(t.get("realId"))
             t_liked = (t_id in self.liked_track_ids or t_real_id in self.liked_track_ids)
@@ -227,8 +258,8 @@ class MediaManager:
                 bonus += 15.0
             if a_matched:
                 bonus += 15.0
-            if t_liked and (t_matched or a_matched):
-                bonus += 25.0
+            if t_liked:
+                bonus += 5.0
 
             score = diff - bonus
             if score < best_score:
@@ -242,20 +273,19 @@ class MediaManager:
                 clean_artist.lower() in a.get("name", "").lower() or a.get("name", "").lower() in clean_artist.lower()
                 for a in best_track.get("artists", [])
             ) if (best_track and clean_artist) else False
-            title_matched = (clean_title.lower() in best_track.get("title", "").lower()) if (best_track and clean_title) else False
-            best_t_id = str(best_track.get("id"))
-            best_t_real_id = str(best_track.get("realId"))
-            best_is_liked = (best_t_id in self.liked_track_ids or best_t_real_id in self.liked_track_ids)
+            best_t_title = best_track.get("title", "").lower()
+            title_matched = bool(clean_title and (clean_title.lower() in best_t_title or best_t_title in clean_title.lower())) if (best_track and clean_title) else False
 
-            if best_diff < 5.0:
-                is_good_match = True
-            elif best_is_liked and (title_matched or artist_matched) and best_diff < 120.0:
+            # Title match is strictly required if clean_title is present
+            if clean_title and not title_matched:
+                is_good_match = False
+            elif best_diff < 5.0 and (title_matched or artist_matched):
                 is_good_match = True
             elif title_matched and artist_matched and best_diff < 60.0:
                 is_good_match = True
-            elif (title_matched or not clean_title) and not duration:
-                is_good_match = True
             elif title_matched and best_diff < 15.0:
+                is_good_match = True
+            elif (title_matched or not clean_title) and not duration:
                 is_good_match = True
 
         if best_track and is_good_match:
