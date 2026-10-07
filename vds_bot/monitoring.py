@@ -324,6 +324,8 @@ class MonitoringManager:
             play_eid = icons.get("tag_status_play") or EMOJI_PLAYER_PLAY
             pause_eid = icons.get("tag_status_pause") or EMOJI_PLAYER_PAUSE
             heart_eid = icons.get("tag_heart_liked") or EMOJI_PLAYER_HEART
+            if heart_eid == "5330276670303674347":
+                heart_eid = "5346267379007530615"
 
             if m_playing:
                 status_symbol = f'<tg-emoji emoji-id="{play_eid}">▶️</tg-emoji>'

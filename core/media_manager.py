@@ -217,7 +217,7 @@ class MediaManager:
             t_title = t.get("title", "").lower()
             t_artists = [a.get("name", "").lower() for a in t.get("artists", [])]
             t_matched = bool(clean_title and clean_title.lower() in t_title)
-            a_matched = bool(clean_artist and any(clean_artist.lower() in a for a in t_artists))
+            a_matched = bool(clean_artist and any(clean_artist.lower() in a or a in clean_artist.lower() for a in t_artists))
             t_id = str(t.get("id"))
             t_real_id = str(t.get("realId"))
             t_liked = (t_id in self.liked_track_ids or t_real_id in self.liked_track_ids)
@@ -238,9 +238,18 @@ class MediaManager:
 
         is_good_match = False
         if best_track:
-            artist_matched = any(clean_artist.lower() in a.get("name", "").lower() for a in best_track.get("artists", [])) if (best_track and clean_artist) else False
+            artist_matched = any(
+                clean_artist.lower() in a.get("name", "").lower() or a.get("name", "").lower() in clean_artist.lower()
+                for a in best_track.get("artists", [])
+            ) if (best_track and clean_artist) else False
             title_matched = (clean_title.lower() in best_track.get("title", "").lower()) if (best_track and clean_title) else False
+            best_t_id = str(best_track.get("id"))
+            best_t_real_id = str(best_track.get("realId"))
+            best_is_liked = (best_t_id in self.liked_track_ids or best_t_real_id in self.liked_track_ids)
+
             if best_diff < 5.0:
+                is_good_match = True
+            elif best_is_liked and (title_matched or artist_matched) and best_diff < 120.0:
                 is_good_match = True
             elif title_matched and artist_matched and best_diff < 60.0:
                 is_good_match = True

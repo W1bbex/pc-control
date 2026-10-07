@@ -701,6 +701,7 @@ class PcControlBotApp:
         elif event_type == "media_status":
             self.latest_media_state = data
             self._handle_media_status_event(data)
+            self._update_dashboard_on_media(data)
 
         elif event_type == "activity_response":
             self._handle_activity_response_event(data)
@@ -760,6 +761,22 @@ class PcControlBotApp:
         chat_id = getattr(self, "active_player_chat_id", None)
         if msg_id and chat_id:
             self._render_and_send_player(chat_id, msg_id, data)
+
+    def _update_dashboard_on_media(self, data):
+        menu_msg_id = getattr(self, "active_main_menu_message_id", None)
+        if not menu_msg_id or getattr(self, "current_menu_view", "main") != "main":
+            return
+        try:
+            text = self.monitoring.dashboard_text(data)
+            markup = self._main_menu_markup()
+            self.ui.send_message(
+                ALLOWED_USER_ID,
+                text,
+                reply_markup=markup,
+                message_id=menu_msg_id,
+            )
+        except Exception:
+            LOG.exception("Failed to update dashboard on media event")
 
     def _delete_old_player_card(self):
         old_msg_id = getattr(self, "active_player_message_id", None)

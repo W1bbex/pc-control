@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import MagicMock
 import time
 from vds_bot.telegram_ui import TelegramBotApi
 
@@ -122,5 +123,66 @@ class TestMediaPlayerUI(unittest.TestCase):
         self.assertEqual(ticks, 155000000)
         self.assertIsInstance(ticks, int)
 
+    def test_multi_artist_matching_in_resolve_track(self):
+        from core.media_manager import MediaManager
+        mm = MediaManager.__new__(MediaManager)
+        mm._lock = MagicMock()
+        mm.yandex_token = "dummy"
+        mm.yandex_uid = 123
+        mm.liked_track_ids = {"155806688"}
+        mm._last_liked_fetch = 9999999999.0
+        mm._http_session = MagicMock()
+
+        # Mock Yandex search returning track with list of artists
+        fake_track = {
+            "id": 155806688,
+            "realId": 155806688,
+            "title": "idk",
+            "artists": [{"name": "седьмоенебо"}, {"name": "sekairotten"}],
+            "durationMs": 125340,
+        }
+        mm._http_session.get.return_value.json.return_value = {
+            "tracks": {"results": [fake_track]}
+        }
+
+        # Search with comma-separated artists and slight duration difference
+        title, artist, tid, is_liked, cover = mm._resolve_track("idk", "седьмоенебо, sekairotten", 130.0)
+        self.assertEqual(tid, "155806688")
+        self.assertTrue(is_liked)
+
+    def test_obsolete_heart_emoji_id_remapped(self):
+        from vds_bot.monitoring import MonitoringManager
+        from vds_bot.telegram_ui import TelegramBotApi
+
+        ui = TelegramBotApi("dummy")
+        # Obsolete heart ID in ui_icons
+        state = {
+            "active": True,
+            "title": "idk",
+            "artist": "test",
+            "is_playing": True,
+            "is_liked": True,
+            "ui_icons": {
+                "tag_heart_liked": "5330276670303674347",
+            }
+        }
+        markup = ui.player_card_markup(state)
+        # Check that like button remapped obsolete ID to 5346267379007530615
+        btn_heart = markup["inline_keyboard"][2][0]
+        self.assertEqual(btn_heart["icon_custom_emoji_id"], "5346267379007530615")
+
+        # In monitoring dashboard text
+        mock_mqtt = MagicMock()
+        mock_mqtt.system_status = "online"
+        mock_mqtt.system_session = "unlocked"
+        mock_mqtt.desktop_status = "online"
+        mm = MonitoringManager(ui, mock_mqtt)
+        mm.latest_received_at = 9999999999.0
+        mm.latest_telemetry = {"user_active": True}
+        text = mm.dashboard_text(state)
+        self.assertIn("5346267379007530615", text)
+        self.assertNotIn("5330276670303674347", text)
+
 if __name__ == "__main__":
     unittest.main()
+

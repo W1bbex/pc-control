@@ -887,6 +887,8 @@ class TelegramBotApi:
         # Row 3: Single full-width Like button
         is_liked = media_state.get("is_liked", False) if media_state else False
         btn_heart = icons.get("tag_heart_liked" if is_liked else "tag_heart_unliked")
+        if btn_heart == "5330276670303674347":
+            btn_heart = "5346267379007530615" if is_liked else "5346066056710498954"
         heart_text = "В любимых" if is_liked else "В избранное"
         r3_btn = {"text": heart_text, "callback_data": "player_toggle_like"}
         if btn_heart:
