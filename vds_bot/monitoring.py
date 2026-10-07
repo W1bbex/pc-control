@@ -37,7 +37,7 @@ EMOJI_DEFAULT_APP = ICONS.get("apps", "5346196795514989290")      # 🪟 Windows
 EMOJI_PLAYER_PLAY = ICONS.get("play", "5330015871299527534")      # ▶️ Minimalist play
 EMOJI_PLAYER_PAUSE = ICONS.get("pause", "5330570905628222348")     # ⏸️ Minimalist pause
 EMOJI_PLAYER_HEART = ICONS.get("tag_heart_liked", ICONS.get("heart", "5346267379007530615"))     # ❤️ Heart liked
-EMOJI_SECTION_HARDWARE = ICONS.get("power", "5346321083278600717") # ⚡️ Железо
+EMOJI_SECTION_HARDWARE = ICONS.get("hardware") or ICONS.get("cpu", "5348117861372044294") # 💻 Железо
 EMOJI_SECTION_DISKS = ICONS.get("folder", "5330394360997517972")    # 📁 Накопители
 
 
@@ -360,7 +360,7 @@ class MonitoringManager:
             f' ├ Статус: {status_icon}{dur_str}\n'
             + app_line
             + "\n"
-            f'<b><tg-emoji emoji-id="{EMOJI_SECTION_HARDWARE}">⚡️</tg-emoji> Железо</b>\n'
+            f'<b><tg-emoji emoji-id="{EMOJI_SECTION_HARDWARE}">💻</tg-emoji> Железо</b>\n'
             f' ├ CPU: {cpu_text}\n'
             f' ├ GPU: {" · ".join(gpu_parts)}\n'
             f' └ RAM: {ram_text}\n\n'
