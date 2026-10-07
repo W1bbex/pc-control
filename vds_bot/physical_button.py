@@ -5,6 +5,11 @@ import time
 
 LOG = logging.getLogger("pc-control-bot.physical_button")
 
+try:
+    from .telegram_ui import ICONS
+except ImportError:
+    from telegram_ui import ICONS
+
 MORSE_UNLOCK_WINDOW_SECONDS = 300.0  # 5 minutes
 
 
@@ -66,6 +71,8 @@ class PhysicalButtonManager:
         return " · ".join("CLICK" if c == "C" else "HOLD" for c in password_str)
 
     def physical_control_text(self):
+        game_id = ICONS.get("game")
+        game_tag = f'<tg-emoji emoji-id="{game_id}">🎮</tg-emoji> ' if game_id else ""
         pwd_display = self.format_password_display(self.saved_password)
         count_str = f" ({len(self.saved_password)} шагов)" if self.saved_password else ""
         unlock_display = self.format_password_display(self.saved_unlock_pattern or "CC")
@@ -73,36 +80,63 @@ class PhysicalButtonManager:
         ws_pattern = (self.saved_unlock_pattern or "CC") + "HH"
         ws_display = self.format_password_display(ws_pattern)
 
+        check_id = ICONS.get("check")
+        clock_id = ICONS.get("clock")
+
         if self.physical_morse_unlock_eligible:
             elapsed = int(time.time() - (self.last_physical_morse_success_at or 0))
             remaining = max(0, int(MORSE_UNLOCK_WINDOW_SECONDS - elapsed))
             if remaining > 0:
-                status_line = f"🟢 Активна ({remaining} сек)"
+                icon_tag = f'<tg-emoji emoji-id="{check_id}">🟢</tg-emoji> ' if check_id else "🟢 "
+                status_line = f"{icon_tag}Активна ({remaining} сек)"
             else:
-                status_line = "🔴 Истекла"
+                icon_tag = f'<tg-emoji emoji-id="{clock_id}">🔴</tg-emoji> ' if clock_id else "🔴 "
+                status_line = f"{icon_tag}Истекла"
         else:
-            status_line = "⚪️ Неактивна"
+            status_line = "Неактивна"
+
+        lock_id = ICONS.get("lock")
+        lock_tag = f'<tg-emoji emoji-id="{lock_id}">🔒</tg-emoji> ' if lock_id else ""
 
         return (
-            "<b>🕹 Физическая кнопка</b>\n\n"
-            f"<b>🔑 Пароль включения ПК (морзе):</b>\n<blockquote><b>{pwd_display}</b></blockquote>{count_str}\n\n"
-            f"<b>🔓 Жест разблокировки Windows:</b>\n<blockquote><b>{unlock_display}</b></blockquote>{unlock_count}\n\n"
-            f"<b>🚀 Жест разблока + рабочего сетапа:</b>\n<blockquote><b>{ws_display}</b></blockquote>\n\n"
-            f"Окно морзе-разблокировки: <b>{status_line}</b>"
+            f"{game_tag}<b>Физическая кнопка</b>\n\n"
+            f"{lock_tag}<b>Морзе-управление (ESP8266)</b>\n"
+            f" ├ Пароль включения: {pwd_display}{count_str}\n"
+            f" ├ Жест разблокировки: {unlock_display}{unlock_count}\n"
+            f" ├ Жест сетапа: {ws_display}\n"
+            f" └ Окно разблокировки: {status_line}"
         )
 
     def physical_control_markup(self):
         keyboard = []
-        pwd_btn_text = "🔑 Изменить пароль включения" if self.saved_password else "🔑 Задать пароль включения"
-        keyboard.append([{"text": pwd_btn_text, "callback_data": "physical_record_begin"}])
-        keyboard.append([
-            {"text": "🔓 Жест разблока", "callback_data": "physical_unlock_pattern_begin"},
-            {"text": "🕹 Тест нажатий", "callback_data": "physical_test"},
-        ])
+        pwd_btn_text = "Изменить пароль включения" if self.saved_password else "Задать пароль включения"
+        pwd_btn = {"text": pwd_btn_text, "style": "primary", "callback_data": "physical_record_begin"}
+        if ICONS.get("pencil"):
+            pwd_btn["icon_custom_emoji_id"] = ICONS.get("pencil")
+        keyboard.append([pwd_btn])
+
+        unlock_btn = {"text": "Жест разблокировки", "style": "primary", "callback_data": "physical_unlock_pattern_begin"}
+        if ICONS.get("lock"):
+            unlock_btn["icon_custom_emoji_id"] = ICONS.get("lock")
+
+        test_btn = {"text": "Тест нажатий", "style": "primary", "callback_data": "physical_test"}
+        if ICONS.get("game"):
+            test_btn["icon_custom_emoji_id"] = ICONS.get("game")
+
+        keyboard.append([unlock_btn, test_btn])
+
         if self.saved_password:
-            keyboard.append([{"text": "🗑 Удалить пароль включения", "callback_data": "physical_password_delete"}])
+            del_btn = {"text": "Удалить пароль включения", "style": "danger", "callback_data": "physical_password_delete"}
+            if ICONS.get("trash"):
+                del_btn["icon_custom_emoji_id"] = ICONS.get("trash")
+            keyboard.append([del_btn])
+
         if getattr(self, "esp_locked", False):
-            keyboard.append([{"text": "🚨 Кнопка заблокирована — Разблокировать", "callback_data": "physical_unlock"}])
+            unl_btn = {"text": "Кнопка заблокирована — Разблокировать", "style": "success", "callback_data": "physical_unlock"}
+            if ICONS.get("check"):
+                unl_btn["icon_custom_emoji_id"] = ICONS.get("check")
+            keyboard.append([unl_btn])
+
         keyboard.append(self.ui.back_button("settings_menu"))
         return {"inline_keyboard": keyboard}
 
@@ -114,41 +148,57 @@ class PhysicalButtonManager:
 
         count = len(self.password_draft)
         status_steps = f"{count} / 12 шагов"
+        check_id = ICONS.get("check")
         if count < 4:
             status_steps += " (минимум 4)"
         else:
-            status_steps += " ✅"
+            status_steps += f' <tg-emoji emoji-id="{check_id}">✅</tg-emoji>' if check_id else " (готово)"
 
-        last_press = f"\n⚡️ Последнее нажатие: <code>{self.last_press_info}</code>" if self.last_press_info else ""
+        last_press = f"\nПоследнее нажатие: <code>{self.last_press_info}</code>" if self.last_press_info else ""
+        pencil_id = ICONS.get("pencil")
+        pencil_tag = f'<tg-emoji emoji-id="{pencil_id}">✏️</tg-emoji> ' if pencil_id else ""
 
         return (
-            "<b>🎙 Запись пароля включения ПК</b>\n\n"
+            f"{pencil_tag}<b>Запись пароля включения ПК</b>\n\n"
             "Нажимай кнопку на корпусе ПК или используй кнопки ниже:\n"
             "• <b>CLICK</b> — короче 500 мс\n"
             "• <b>HOLD</b> — от 500 мс\n\n"
             f"Текущая комбинация:\n<blockquote><b>{seq_display}</b></blockquote>\n"
             f"Шагов: <b>{status_steps}</b>{last_press}\n\n"
-            "<i>⏱ Пауза 3 сек сохранит комбинацию, либо нажми кнопку ниже.</i>"
+            "<i>Пауза 3 сек сохранит комбинацию, либо нажми кнопку ниже.</i>"
         )
 
     def password_record_markup(self):
         keyboard = [
             [
-                {"text": "➕ CLICK", "callback_data": "physical_add:C"},
-                {"text": "➕ HOLD", "callback_data": "physical_add:H"},
+                {"text": "+ CLICK", "style": "primary", "callback_data": "physical_add:C"},
+                {"text": "+ HOLD", "style": "primary", "callback_data": "physical_add:H"},
             ]
         ]
         edit_row = []
         if self.password_draft:
-            edit_row.append({"text": "↩ Стереть шаг", "callback_data": "physical_back"})
-            edit_row.append({"text": "🔄 Очистить", "callback_data": "physical_clear"})
+            back_btn = {"text": "Стереть шаг", "style": "primary", "callback_data": "physical_back"}
+            if ICONS.get("back"):
+                back_btn["icon_custom_emoji_id"] = ICONS.get("back")
+            edit_row.append(back_btn)
+
+            clear_btn = {"text": "Очистить", "style": "primary", "callback_data": "physical_clear"}
+            if ICONS.get("trash") or ICONS.get("refresh"):
+                clear_btn["icon_custom_emoji_id"] = ICONS.get("trash") or ICONS.get("refresh")
+            edit_row.append(clear_btn)
         if edit_row:
             keyboard.append(edit_row)
 
         action_row = []
         if len(self.password_draft) >= 4:
-            action_row.append({"text": "💾 Сохранить", "callback_data": "physical_save"})
-        action_row.append({"text": "✖ Отмена", "callback_data": "physical_cancel_record"})
+            save_btn = {"text": "Сохранить", "style": "success", "callback_data": "physical_save"}
+            if ICONS.get("check"):
+                save_btn["icon_custom_emoji_id"] = ICONS.get("check")
+            action_row.append(save_btn)
+        cancel_btn = {"text": "Отмена", "style": "danger", "callback_data": "physical_cancel_record"}
+        if ICONS.get("cross"):
+            cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
+        action_row.append(cancel_btn)
         keyboard.append(action_row)
         return {"inline_keyboard": keyboard}
 

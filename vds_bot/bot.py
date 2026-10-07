@@ -1025,12 +1025,17 @@ class PcControlBotApp:
             self.ui.answer_callback(callback_id)
             pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
             text = (
-                "<b>⚡ ПК и экран</b>\n\n"
-                f"<b>Состояние:</b> {pc_state.label}\n"
-                f"<i>{pc_state.reason}</i>\n\n"
-                f"<b>Сессия:</b> {self.mqtt.system_session}\n"
-                f"<b>ESP:</b> {self.mqtt.esp_status}"
+                self.ui.power_menu_text(
+                    pc_state=pc_state,
+                    session=self.mqtt.system_session,
+                    desktop_status=self.mqtt.desktop_status,
+                    esp_status=self.mqtt.esp_status,
+                )
+                if hasattr(self.ui, "power_menu_text")
+                else ""
             )
+            if not isinstance(text, str) or not text:
+                text = f"<b>ПК и экран</b>\n\n<b>Состояние:</b> {getattr(pc_state, 'label', 'Готов к работе')}"
             self.ui.send_message(chat_id, text, reply_markup=self._power_menu_markup(), message_id=message_id)
             return
 
@@ -1042,7 +1047,7 @@ class PcControlBotApp:
 
         if data == "apps_menu":
             self.ui.answer_callback(callback_id)
-            self.ui.send_message(chat_id, "<b>🧩 Программы</b>\n\nВыбери программу для запуска:", reply_markup=self.ui.apps_menu_markup(), message_id=message_id)
+            self.ui.send_message(chat_id, self.ui.apps_menu_text(), reply_markup=self.ui.apps_menu_markup(), message_id=message_id)
             return
 
         if data == "console_open":
@@ -1087,9 +1092,12 @@ class PcControlBotApp:
 
         if data == "sound_menu":
             self.ui.answer_callback(callback_id)
+            vol = None
+            if hasattr(self, "monitoring") and self.monitoring.latest_telemetry:
+                vol = self.monitoring.latest_telemetry.get("volume")
             self.ui.send_message(
                 chat_id,
-                "<b>🔊 Управление громкостью</b>",
+                self.ui.sound_menu_text(volume=vol),
                 reply_markup=self.ui.sound_menu_markup(),
                 message_id=message_id,
             )
@@ -1175,11 +1183,7 @@ class PcControlBotApp:
         if data == "history_menu":
             self.ui.answer_callback(callback_id)
             stats = self.monitoring.history.stats()
-            text = (
-                "<b>📈 Графики</b>\n\n"
-                f"Точек телеметрии: {stats['count']}\n"
-                "Выбери период для графика нагрузки, температур, RAM, диска и сети."
-            )
+            text = self.ui.history_menu_text(count=stats.get("count", 0))
             self.ui.send_message(chat_id, text, reply_markup=self.ui.history_menu_markup(), message_id=message_id)
             return
 
@@ -1279,7 +1283,9 @@ class PcControlBotApp:
         if data in {"flow_workspace_yes", "flow_workspace_no"}:
             if data == "flow_workspace_yes":
                 self.ui.answer_callback(callback_id)
-                text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+                text = self.ui.workspace_vpn_choice_text() if hasattr(self.ui, "workspace_vpn_choice_text") else ""
+                if not isinstance(text, str) or not text:
+                    text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
                 markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
                 self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
                 return
@@ -1310,7 +1316,9 @@ class PcControlBotApp:
             pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
             if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
                 self.ui.answer_callback(callback_id)
-                text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+                text = self.ui.workspace_vpn_choice_text() if hasattr(self.ui, "workspace_vpn_choice_text") else ""
+                if not isinstance(text, str) or not text:
+                    text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
                 markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
                 self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
             elif pc_state.state == "LOCKED":

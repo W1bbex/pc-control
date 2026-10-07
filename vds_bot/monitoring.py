@@ -31,11 +31,11 @@ EMOJI_HEADER_PC = ICONS.get("pc", "5330499003580721030")        # 💻 PC Contro
 EMOJI_SECTION_SESSION = ICONS.get("user", "5330478284658488376")  # 👤 Сессия
 EMOJI_STATUS_ACTIVE = ICONS.get("status_active", "5330273230034871570")    # ✔️ Active
 EMOJI_STATUS_INACTIVE = ICONS.get("status_inactive", "5330015179809794606")  # ❌ Inactive
-EMOJI_DEFAULT_APP = ICONS.get("apps", "5330130731609929749")      # 🪟 Windows Explorer / Window icon
+EMOJI_DEFAULT_APP = ICONS.get("apps", "5346196795514989290")      # 🪟 Windows Explorer / Window icon
 EMOJI_PLAYER_PLAY = ICONS.get("play", "5330015871299527534")      # ▶️ Minimalist play
 EMOJI_PLAYER_PAUSE = ICONS.get("pause", "5330570905628222348")     # ⏸️ Minimalist pause
 EMOJI_PLAYER_HEART = ICONS.get("heart", "5330276670303674347")     # ❤️ Heart liked
-EMOJI_SECTION_HARDWARE = ICONS.get("power", "5330077297921795474") # ⚡️ Железо
+EMOJI_SECTION_HARDWARE = ICONS.get("power", "5346321083278600717") # ⚡️ Железо
 EMOJI_SECTION_DISKS = ICONS.get("folder", "5330394360997517972")    # 📁 Накопители
 
 

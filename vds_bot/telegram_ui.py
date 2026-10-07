@@ -11,24 +11,24 @@ from requests.adapters import HTTPAdapter
 LOG = logging.getLogger("pc-control-bot.telegram_ui")
 
 CANONICAL_ICONS = {
-    "power": "5330077297921795474",
-    "screenshot": "5330238646958204875",
-    "sound": "5330140476890718558",
+    "power": "5346321083278600717",
+    "screenshot": "5345959885118942220",
+    "sound": "5348313432707868130",
     "sound_mute": "5330388528431935587",
-    "screen": "5330015235644368681",
-    "apps": "5330130731609929749",
-    "game": "5330130731609929749",
-    "gear": "5330260680140431237",
-    "cpu": "5330128631370914549",
-    "ram": "5330429420815559823",
-    "disk": "5330487329859612207",
-    "network": "5330474032640861878",
-    "lock": "5330152648828033682",
-    "light": "5330514620081809665",
-    "music": "5330477356945551054",
-    "telegram": "5330467899427564107",
-    "chrome": "5330191582706576698",
-    "terminal": "5330563608478787902",
+    "screen": "5346102804450681939",
+    "apps": "5346196795514989290",
+    "game": "5346155860181689133",
+    "gear": "5348024810905581079",
+    "cpu": "5348117861372044294",
+    "ram": "5348445923859016939",
+    "disk": "5346264376825393526",
+    "network": "5346016016046532285",
+    "lock": "5348293839067068050",
+    "light": "5346214490780246375",
+    "music": "5346016960939337497",
+    "telegram": "5345922274090330566",
+    "chrome": "5346208250192767289",
+    "terminal": "5346172035028531557",
     "pc": "5330499003580721030",
     "user": "5330478284658488376",
     "folder": "5330394360997517972",
@@ -963,4 +963,103 @@ class TelegramBotApi:
                 ],
             ]
         }
+
+    def power_menu_text(self, pc_state, session=None, desktop_status=None, esp_status=None):
+        power_id = ICONS.get("power")
+        user_id = ICONS.get("user")
+        check_id = ICONS.get("check") or ICONS.get("status_active")
+        clock_id = ICONS.get("clock")
+        cross_id = ICONS.get("cross") or ICONS.get("status_inactive")
+
+        power_tag = f'<tg-emoji emoji-id="{power_id}">⚡</tg-emoji> ' if power_id else ""
+        user_tag = f'<tg-emoji emoji-id="{user_id}">👤</tg-emoji> ' if user_id else ""
+
+        state_val = getattr(pc_state, "state", None)
+        if hasattr(state_val, "value"):
+            state_val = state_val.value
+        state_val = str(state_val or "").upper()
+
+        if state_val in ("READY", "VERIFIED", "ONLINE"):
+            status_icon = f'<tg-emoji emoji-id="{check_id}">🟢</tg-emoji>' if check_id else "🟢"
+        elif state_val in ("BOOTING", "STARTING", "CONNECTING", "DEGRADED", "LOCKED"):
+            status_icon = f'<tg-emoji emoji-id="{clock_id}">🟡</tg-emoji>' if clock_id else "🟡"
+        else:
+            status_icon = f'<tg-emoji emoji-id="{cross_id}">🔴</tg-emoji>' if cross_id else "🔴"
+
+        sess_str = str(session or "").lower().strip()
+        if sess_str == "unlocked":
+            sess_ru = "Разблокирована"
+        elif sess_str in ("locked", "login_screen"):
+            sess_ru = "Заблокирована"
+        elif sess_str in ("unknown", "none", ""):
+            sess_ru = "Неизвестно"
+        else:
+            sess_ru = sess_str.capitalize()
+
+        desk_str = str(desktop_status or "").lower().strip()
+        if desk_str == "online":
+            desk_ru = "В сети"
+        elif desk_str == "offline":
+            desk_ru = "Не в сети"
+        else:
+            desk_ru = "Ожидание"
+
+        esp_str = str(esp_status or "").lower().strip()
+        if esp_str == "online":
+            esp_ru = "В сети"
+        elif esp_str == "offline":
+            esp_ru = "Не в сети"
+        else:
+            esp_ru = "Оффлайн"
+
+        clean_label = str(getattr(pc_state, "label", "Готов к работе") or "Готов к работе")
+        for e in ("🟢", "🟡", "🔴", "⚪", "⚪️"):
+            clean_label = clean_label.replace(e, "").strip()
+
+        reason = getattr(pc_state, "reason", None)
+        reason_line = f"\n\n<i>{reason}</i>" if reason else ""
+
+        return (
+            f"{power_tag}<b>ПК и экран</b>\n\n"
+            f"{user_tag}<b>Состояние</b>\n"
+            f" ├ Статус: {status_icon} {clean_label}\n"
+            f" ├ Сессия: {sess_ru}\n"
+            f" ├ Desktop-агент: {desk_ru}\n"
+            f" └ Контроллер ESP: {esp_ru}"
+            f"{reason_line}"
+        )
+
+    def apps_menu_text(self):
+        apps_id = ICONS.get("apps") or ICONS.get("game")
+        apps_tag = f'<tg-emoji emoji-id="{apps_id}">📱</tg-emoji> ' if apps_id else ""
+        return f"{apps_tag}<b>Программы</b>\n\nЗапуск установленных приложений и рабочего сетапа:"
+
+    def sound_menu_text(self, volume=None):
+        sound_id = ICONS.get("sound")
+        sound_tag = f'<tg-emoji emoji-id="{sound_id}">🔊</tg-emoji> ' if sound_id else ""
+        vol_line = f" ├ Текущая громкость: {volume}%\n" if volume is not None else ""
+        return (
+            f"{sound_tag}<b>Управление звуком</b>\n\n"
+            f"<b>Параметры аудио</b>\n"
+            f"{vol_line}"
+            f" └ Выберите действие:"
+        )
+
+    def history_menu_text(self, count=0):
+        chart_id = ICONS.get("chart")
+        chart_tag = f'<tg-emoji emoji-id="{chart_id}">📈</tg-emoji> ' if chart_id else ""
+        return (
+            f"{chart_tag}<b>Графики и телеметрия</b>\n\n"
+            f"<b>История метрик</b>\n"
+            f" ├ Точек в базе: {count}\n"
+            f" └ Выберите период для графика нагрузки, RAM, диска и сети:"
+        )
+
+    def workspace_vpn_choice_text(self):
+        net_id = ICONS.get("network") or ICONS.get("wifi")
+        net_tag = f'<tg-emoji emoji-id="{net_id}">📡</tg-emoji> ' if net_id else ""
+        return (
+            f"{net_tag}<b>Рабочий сетап — Выбор VPN</b>\n\n"
+            f"Выберите VPN-туннель для подключения:"
+        )
 

@@ -135,7 +135,7 @@ def test_physical_control_markup_dynamic_buttons():
     flat_buttons = [btn["text"] for row in markup["inline_keyboard"] for btn in row]
     flat_callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
 
-    assert "🔑 Задать пароль включения" in flat_buttons
+    assert "Задать пароль включения" in flat_buttons
     assert "physical_record_begin" in flat_callbacks
     assert not any("Удалить" in t for t in flat_buttons)
     assert not any("Разблокировать" in t for t in flat_buttons)
@@ -144,7 +144,7 @@ def test_physical_control_markup_dynamic_buttons():
     mgr.saved_password = "CHCC"
     markup2 = mgr.physical_control_markup()
     flat_buttons2 = [btn["text"] for row in markup2["inline_keyboard"] for btn in row]
-    assert "🔑 Изменить пароль включения" in flat_buttons2
+    assert "Изменить пароль включения" in flat_buttons2
     assert any("Удалить" in t for t in flat_buttons2)
     assert not any("Разблокировать" in t for t in flat_buttons2)
 

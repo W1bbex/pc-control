@@ -77,6 +77,21 @@ class MockTelegramUi:
     def settings_menu_markup(self, *args, **kwargs):
         return {"inline_keyboard": []}
 
+    def power_menu_text(self, *args, **kwargs):
+        return "<b>⚡ ПК и экран</b>\n\nСостояние: Готов к работе"
+
+    def apps_menu_text(self, *args, **kwargs):
+        return "<b>Программы</b>"
+
+    def sound_menu_text(self, *args, **kwargs):
+        return "<b>Звук</b>"
+
+    def history_menu_text(self, *args, **kwargs):
+        return "<b>Графики</b>"
+
+    def workspace_vpn_choice_text(self, *args, **kwargs):
+        return "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+
 
 from health_engine import HealthEngine
 
