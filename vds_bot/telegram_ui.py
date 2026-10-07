@@ -10,8 +10,65 @@ from requests.adapters import HTTPAdapter
 
 LOG = logging.getLogger("pc-control-bot.telegram_ui")
 
+CANONICAL_ICONS = {
+    "power": "5330077297921795474",
+    "screenshot": "5330238646958204875",
+    "sound": "5330140476890718558",
+    "sound_mute": "5330388528431935587",
+    "screen": "5330015235644368681",
+    "apps": "5330130731609929749",
+    "game": "5330130731609929749",
+    "gear": "5330260680140431237",
+    "cpu": "5330128631370914549",
+    "ram": "5330429420815559823",
+    "disk": "5330487329859612207",
+    "network": "5330474032640861878",
+    "lock": "5330152648828033682",
+    "light": "5330514620081809665",
+    "music": "5330477356945551054",
+    "telegram": "5330467899427564107",
+    "chrome": "5330191582706576698",
+    "terminal": "5330563608478787902",
+    "pc": "5330499003580721030",
+    "user": "5330478284658488376",
+    "folder": "5330394360997517972",
+    "back": "5330209080403340437",
+    "refresh": "5330544792227063795",
+    "cross": "5330015179809794606",
+    "trash": "5330144857757362833",
+    "pencil": "5330305068627436798",
+    "search": "5330079544189695031",
+    "play": "5330015871299527534",
+    "pause": "5330570905628222348",
+    "fwd10": "5330317725896059016",
+    "back10": "5330294859490179153",
+    "next": "5330255053733276330",
+    "prev": "5330363570376977789",
+    "repeat": "5330448799707998190",
+    "heart": "5330276670303674347",
+    "headphones": "5330526830673831881",
+    "dot": "5330193051585391352",
+    "check": "5330273230034871570",
+    "clock": "5330473500064912704",
+    "chart": "5330382442463271794",
+    "wifi": "5330160856510540663",
+    "battery": "5330277593721644293",
+    "status_active": "5330273230034871570",
+    "status_inactive": "5330015179809794606",
+    "wave": "5330448799707998190",
+    "linux": "5332695978136874502",
+    "windows": "5332280534540264957",
+    "app_telegram": "5251740431632344455",
+    "app_yandex_music": "5251544533879006440",
+    "app_happ": "5251339414830880848",
+    "app_incy": "5319035276306196317",
+    "app_chrome": "5251317871274929314",
+    "app_antigravity": "5251292384938994108",
+}
+
 def _load_canonical_icons():
     from pathlib import Path
+    icons = dict(CANONICAL_ICONS)
     for candidate in [
         Path(__file__).resolve().parent / "resources" / "icons.json",
         Path(__file__).resolve().parent.parent / "resources" / "icons.json",
@@ -19,10 +76,13 @@ def _load_canonical_icons():
         if candidate.exists():
             try:
                 with open(candidate, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        icons.update(data)
+                        return icons
             except Exception:
                 pass
-    return {}
+    return icons
 
 ICONS = _load_canonical_icons()
 
@@ -67,8 +127,40 @@ class TelegramBotApi:
             s = s.replace(self.token, "[REDACTED_BOT_TOKEN]")
         return s
 
+    @staticmethod
+    def _sanitize_reply_markup(reply_markup):
+        if not isinstance(reply_markup, dict):
+            return reply_markup
+        sanitized = dict(reply_markup)
+        if "inline_keyboard" in sanitized and isinstance(sanitized["inline_keyboard"], list):
+            new_rows = []
+            for row in sanitized["inline_keyboard"]:
+                if isinstance(row, list):
+                    new_row = []
+                    for btn in row:
+                        if isinstance(btn, dict):
+                            btn_copy = {k: v for k, v in btn.items() if v is not None}
+                            if "icon_custom_emoji_id" in btn_copy:
+                                val = btn_copy["icon_custom_emoji_id"]
+                                val_str = str(val).strip() if val is not None else ""
+                                if not val_str or val_str.lower() in ("none", "null") or not val_str.isdigit():
+                                    btn_copy.pop("icon_custom_emoji_id", None)
+                                else:
+                                    btn_copy["icon_custom_emoji_id"] = val_str
+                            new_row.append(btn_copy)
+                        else:
+                            new_row.append(btn)
+                    new_rows.append(new_row)
+                else:
+                    new_rows.append(row)
+            sanitized["inline_keyboard"] = new_rows
+        return sanitized
+
     def call_raw(self, method, payload=None, timeout=25):
         url = f"{self.api_url}/{method}"
+        if payload and isinstance(payload, dict) and "reply_markup" in payload:
+            payload = dict(payload)
+            payload["reply_markup"] = self._sanitize_reply_markup(payload["reply_markup"])
         try:
             with self._lock:
                 response = self.session.post(url, json=payload or {}, timeout=timeout)
@@ -159,7 +251,8 @@ class TelegramBotApi:
         if caption:
             data["caption"] = caption
         if reply_markup is not None:
-            data["reply_markup"] = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
+            clean_markup = self._sanitize_reply_markup(reply_markup)
+            data["reply_markup"] = json.dumps(clean_markup) if isinstance(clean_markup, dict) else clean_markup
         if business_connection_id:
             data["business_connection_id"] = business_connection_id
 
@@ -200,7 +293,8 @@ class TelegramBotApi:
         if caption:
             data["caption"] = caption
         if reply_markup is not None:
-            data["reply_markup"] = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
+            clean_markup = self._sanitize_reply_markup(reply_markup)
+            data["reply_markup"] = json.dumps(clean_markup) if isinstance(clean_markup, dict) else clean_markup
         if business_connection_id:
             data["business_connection_id"] = business_connection_id
 
@@ -303,7 +397,7 @@ class TelegramBotApi:
 
     @staticmethod
     def back_button(target="menu"):
-        btn = {"text": "↩ Назад", "callback_data": target}
+        btn = {"text": "Назад", "callback_data": target}
         if ICONS.get("back"):
             btn["icon_custom_emoji_id"] = ICONS.get("back")
         return [btn]
@@ -505,24 +599,49 @@ class TelegramBotApi:
         rows.append(self.back_button("power_menu"))
         return {"inline_keyboard": rows}
 
+    def reboot_menu_markup(self):
+        reboot_unlock_btn = {
+            "text": "Перезагрузка + Разблок",
+            "style": "success",
+            "callback_data": "reboot_unlock",
+        }
+        if ICONS.get("refresh"):
+            reboot_unlock_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
+
+        reboot_plain_btn = {
+            "text": "Только перезагрузка",
+            "style": "primary",
+            "callback_data": "reboot_confirm",
+        }
+        if ICONS.get("refresh"):
+            reboot_plain_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
+
+        return {
+            "inline_keyboard": [
+                [reboot_unlock_btn],
+                [reboot_plain_btn],
+                [self.back_button("power_menu")],
+            ]
+        }
+
     def apps_menu_markup(self):
         return {
             "inline_keyboard": [
-                [{"text": "🚀 Запустить рабочий сетап", "style": "success", "callback_data": "workspace_start_direct"}],
+                [{"text": "Запустить рабочий сетап", "style": "success", "icon_custom_emoji_id": ICONS.get("apps") or ICONS.get("game"), "callback_data": "workspace_start_direct"}],
                 [
-                    {"text": "Telegram", "style": "primary", "icon_custom_emoji_id": ICONS.get("telegram"), "callback_data": "app:Telegram"},
-                    {"text": "Музыка", "style": "primary", "icon_custom_emoji_id": ICONS.get("music"), "callback_data": "app:Музыка"},
+                    {"text": "Telegram", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_telegram") or ICONS.get("telegram"), "callback_data": "app:Telegram"},
+                    {"text": "Музыка", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_yandex_music") or ICONS.get("music"), "callback_data": "app:Музыка"},
                 ],
                 [
-                    {"text": "🐬 Dolphin", "style": "primary", "callback_data": "app:Dolphin"},
-                    {"text": "Chrome", "style": "primary", "icon_custom_emoji_id": ICONS.get("chrome"), "callback_data": "app:Chrome"},
+                    {"text": "Dolphin", "style": "primary", "callback_data": "app:Dolphin"},
+                    {"text": "Chrome", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chrome") or ICONS.get("chrome"), "callback_data": "app:Chrome"},
                 ],
                 [
-                    {"text": "Happ", "style": "primary", "icon_custom_emoji_id": ICONS.get("network"), "callback_data": "app:Happ"},
-                    {"text": "INCY", "style": "primary", "icon_custom_emoji_id": ICONS.get("network"), "callback_data": "app:INCY"},
+                    {"text": "Happ", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_happ") or ICONS.get("network"), "callback_data": "app:Happ"},
+                    {"text": "INCY", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_incy") or ICONS.get("network"), "callback_data": "app:INCY"},
                 ],
                 [
-                    {"text": "🚀 Antigravity", "style": "primary", "callback_data": "app:Antigravity"},
+                    {"text": "Antigravity", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"), "callback_data": "app:Antigravity"},
                     {"text": "Консоль (Терминал)", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
                 ],
                 self.back_button("menu"),
@@ -530,25 +649,27 @@ class TelegramBotApi:
         }
 
     def workspace_vpn_choice_markup(self, active_vpn="incy"):
-        happ_label = "⚡ Happ (VPN) ✅" if active_vpn == "happ" else "⚡ Happ (VPN)"
-        incy_label = "🛡️ INCY (VPN) ✅" if active_vpn == "incy" else "🛡️ INCY (VPN)"
+        happ_label = "Happ (VPN)"
+        incy_label = "INCY (VPN)"
+        happ_icon = ICONS.get("app_happ") or ICONS.get("network")
+        incy_icon = ICONS.get("app_incy") or ICONS.get("network")
         return {
             "inline_keyboard": [
                 [
                     {
                         "text": incy_label,
                         "style": "success" if active_vpn == "incy" else "primary",
-                        "icon_custom_emoji_id": ICONS.get("network"),
+                        "icon_custom_emoji_id": incy_icon,
                         "callback_data": "workspace_vpn:incy",
                     },
                     {
                         "text": happ_label,
                         "style": "success" if active_vpn == "happ" else "primary",
-                        "icon_custom_emoji_id": ICONS.get("network"),
+                        "icon_custom_emoji_id": happ_icon,
                         "callback_data": "workspace_vpn:happ",
                     },
                 ],
-                [{"text": "✖ Отмена", "style": "danger", "callback_data": "menu"}],
+                [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
             ]
         }
 

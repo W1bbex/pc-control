@@ -1008,14 +1008,20 @@ class PCControlAgent:
 
     @staticmethod
     def _run_network_probe(timeout=2.0):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(timeout)
-            s.connect(("1.1.1.1", 53))
-            s.close()
-            return True
-        except Exception:
-            pass
+        probe_targets = [
+            ("1.1.1.1", 53),
+            ("8.8.8.8", 53),
+            ("77.88.8.8", 53),
+        ]
+        for host, port in probe_targets:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(min(1.5, timeout))
+                s.connect((host, port))
+                s.close()
+                return True
+            except Exception:
+                pass
         try:
             import urllib.request
             req = urllib.request.Request(
@@ -1151,7 +1157,7 @@ class PCControlAgent:
                 )
 
         if timeout is None:
-            timeout = max(15, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 12))))
+            timeout = max(45, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 45))))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
@@ -1279,7 +1285,7 @@ class PCControlAgent:
                 LOG.warning("HAPP window was not ready after 15s")
                 return {"verified": False, "reason": "window_not_found"}
 
-            verify_timeout = max(15, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 12))))
+            verify_timeout = max(35, int(self.config.get("happ_ready_delay_seconds", self.config.get("vpn_ready_delay_seconds", 35))))
             verify_deadline = time.monotonic() + verify_timeout
             while time.monotonic() < verify_deadline:
                 if cancel_event and cancel_event.is_set():
@@ -1370,7 +1376,12 @@ class PCControlAgent:
     def launch_app(self, app_key, workspace_id=None, progress_callback=None, vpn=None):
         app_config = self.config.get("apps", {}).get(app_key)
         if not app_config:
+            app_config = self.config.get("scenarios", {}).get(app_key)
+        if not app_config:
             raise ValueError("Application is not configured")
+
+        if isinstance(app_config, str) and app_config in self.config.get("scenarios", {}):
+            app_config = self.config["scenarios"][app_config]
 
         scenario = app_config if isinstance(app_config, dict) else {}
         minimize_after = bool(scenario.get("minimize_after", False))
@@ -1431,22 +1442,22 @@ class PCControlAgent:
                         "desktop_minimized": False,
                     }
 
-                step_id = step.get("id", f"step_{idx}")
+                step_id = step.get("id") or step.get("step_id", f"step_{idx}")
                 label = step.get("label", step_id)
-                cmd = [os.path.expandvars(str(c)) for c in (step.get("command") or [])]
+                raw_cmd = step.get("command") or ([step.get("executable")] if step.get("executable") else [])
+                cmd = [os.path.expandvars(str(c)) for c in raw_cmd]
                 required = bool(step.get("required", True))
                 verification = step.get("verification") or {}
-                ver_type = verification.get("type", "process_name")
-                targets = [t.lower() for t in verification.get("targets", [])]
+                if isinstance(verification, str):
+                    ver_type = verification
+                    targets = []
+                else:
+                    ver_type = verification.get("type", "process_name")
+                    targets = [t.lower() for t in verification.get("targets", [])]
 
                 if not cmd:
                     continue
                 executable = cmd[0]
-                resolved_exe = shutil.which(executable)
-                if resolved_exe:
-                    executable = resolved_exe
-                elif not Path(executable).exists():
-                    raise FileNotFoundError(executable)
 
                 is_vpn = (
                     step_id in ("happ_vpn", "incy_vpn", "vpn")

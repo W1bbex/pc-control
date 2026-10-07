@@ -304,3 +304,247 @@ def test_bot_runner_waits_for_chosen_vpn():
 
     runner_thread.join(timeout=2.0)
     assert not runner_thread.is_alive()
+
+
+def test_reboot_unlock_flow_lifecycle():
+    ui = MagicMock()
+    mqtt = MagicMock()
+    mqtt.system_status = "online"
+    mqtt.publish_system_action.return_value = "cmd-rst-1"
+    mqtt.publish_esp_action.return_value = "cmd-esp-1"
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.power_flow = PowerFlowManager(ui, mqtt)
+    app.save_state = MagicMock()
+
+    call = {
+        "id": "cb-rst-1",
+        "data": "reboot_unlock",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 777, "chat": {"id": ALLOWED_USER_ID}},
+    }
+    app.handle_callback(call)
+
+    assert mqtt.publish_system_action.called
+    assert mqtt.publish_system_action.call_args[0][0] == "restart"
+    assert app.power_flow.stage == PowerFlowStage.REBOOTING
+    assert app.power_flow.reboot_with_unlock is True
+
+    # Simulate PC going offline
+    mqtt.system_status = "offline"
+    mqtt.desktop_status = "offline"
+    app.power_flow.on_system_session_update("unknown", ALLOWED_USER_ID)
+    assert app.power_flow.reboot_offline_detected is True
+
+    # Simulate PC booting back up to login_screen
+    mqtt.system_status = "online"
+    mqtt.system_session = "login_screen"
+    mqtt.publish_system_action.return_value = "cmd-unlock-1"
+    app.power_flow.on_system_session_update("login_screen", ALLOWED_USER_ID)
+
+    assert app.power_flow.stage == PowerFlowStage.UNLOCKING
+    assert app.power_flow.pending_unlock_command_id == "cmd-unlock-1"
+
+    # Simulate unlock success
+    mqtt.system_session = "unlocked"
+    app.power_flow.on_system_session_update("unlocked", ALLOWED_USER_ID)
+    assert app.power_flow.stage == PowerFlowStage.WAITING_WORKSPACE_DECISION
+
+    # Verify VPN choice prompt sent
+    sent_text = ui.send_message.call_args[0][1]
+    assert "Выберите VPN" in sent_text
+
+
+def test_reboot_plain_flow_lifecycle():
+    ui = MagicMock()
+    mqtt = MagicMock()
+    mqtt.system_status = "online"
+    mqtt.publish_system_action.return_value = "cmd-rst-2"
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.power_flow = PowerFlowManager(ui, mqtt)
+    app.save_state = MagicMock()
+
+    call = {
+        "id": "cb-rst-2",
+        "data": "reboot_confirm",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 778, "chat": {"id": ALLOWED_USER_ID}},
+    }
+    app.handle_callback(call)
+
+    assert app.power_flow.stage == PowerFlowStage.REBOOTING
+    assert app.power_flow.reboot_with_unlock is False
+
+    # Simulate reboot completed
+    mqtt.system_status = "online"
+    app.power_flow.reboot_offline_detected = True
+    app.power_flow.on_system_session_update("login_screen", ALLOWED_USER_ID)
+
+    assert app.power_flow.stage == PowerFlowStage.IDLE
+    sent_text = ui.send_message.call_args[0][1]
+    assert "ПК успешно перезагружен" in sent_text
+
+
+def test_workspace_steps_app_emojis_and_no_generic_shield_lightning():
+    from vds_bot.bot import format_workspace_step_line, get_workspace_steps
+    from vds_bot.telegram_ui import ICONS, TelegramBotApi
+
+    steps_happ = get_workspace_steps("happ")
+    steps_incy = get_workspace_steps("incy")
+
+    happ_step = next(s for s in steps_happ if s["id"] == "happ_vpn")
+    incy_step = next(s for s in steps_incy if s["id"] == "incy_vpn")
+
+    # Labels must be clean without generic ⚡ / 🛡️
+    assert "⚡" not in happ_step["label"]
+    assert "🛡" not in incy_step["label"]
+
+    # Verify emoji_id matches app icons
+    assert happ_step["emoji_id"] == ICONS.get("app_happ")
+    assert incy_step["emoji_id"] == ICONS.get("app_incy")
+
+    # Verify Telegram, Yandex Music, Chrome, Antigravity have app emojis
+    tg_step = next(s for s in steps_happ if s["id"] == "telegram")
+    ym_step = next(s for s in steps_happ if s["id"] == "yandex_music")
+    chrome_step = next(s for s in steps_happ if s["id"] == "chrome")
+    ag_step = next(s for s in steps_happ if s["id"] == "antigravity")
+
+    assert tg_step["emoji_id"] == ICONS.get("app_telegram")
+    assert ym_step["emoji_id"] == ICONS.get("app_yandex_music")
+    assert chrome_step["emoji_id"] == ICONS.get("app_chrome")
+    assert ag_step["emoji_id"] == ICONS.get("app_antigravity")
+
+    # Verify formatted checklist lines contain tg-emoji
+    line_queued = format_workspace_step_line(happ_step, "⏳ В очереди")
+    assert "tg-emoji" in line_queued
+    assert "Happ (VPN)" in line_queued
+    assert "В очереди" in line_queued
+
+    line_done = format_workspace_step_line(tg_step, "✅")
+    assert "tg-emoji" in line_done
+    assert "Telegram" in line_done
+
+    # Verify buttons in workspace_vpn_choice_markup don't have generic ⚡ / 🛡️ in text and have app icons
+    ui = TelegramBotApi("dummy_token")
+    markup = ui.workspace_vpn_choice_markup()
+    buttons = [btn for row in markup["inline_keyboard"] for btn in row]
+    incy_btn = next(b for b in buttons if b.get("callback_data") == "workspace_vpn:incy")
+    happ_btn = next(b for b in buttons if b.get("callback_data") == "workspace_vpn:happ")
+
+    assert "⚡" not in happ_btn["text"]
+    assert "🛡" not in incy_btn["text"]
+    assert incy_btn["icon_custom_emoji_id"] == ICONS.get("app_incy")
+    assert happ_btn["icon_custom_emoji_id"] == ICONS.get("app_happ")
+
+
+def test_reboot_offline_detection_race_condition():
+    ui = MagicMock()
+    mqtt = MagicMock()
+    mqtt.system_status = "online"
+    mqtt.desktop_status = "online"
+    mqtt.system_session = "unlocked"
+
+    flow = PowerFlowManager(ui, mqtt)
+    flow.start_reboot_flow(ALLOWED_USER_ID, message_id=101, unlock=True)
+    assert flow.stage == PowerFlowStage.REBOOTING
+    assert flow.reboot_offline_detected is False
+
+    # Simulate t = 8.5s while PC is still shutting down (still online, unlocked)
+    with patch("time.time", return_value=flow.reboot_started_at + 8.5):
+        flow.on_system_session_update("unlocked", ALLOWED_USER_ID)
+
+    # Must NOT have prematurely jumped to UNLOCKING or WAITING_WORKSPACE_DECISION
+    assert flow.stage == PowerFlowStage.REBOOTING
+    assert flow.reboot_offline_detected is False
+
+
+def test_locked_workspace_direct_uses_unlock_and_workspace():
+    ui = MagicMock()
+    mqtt = MagicMock()
+    mqtt.health.evaluate_pc_state.return_value = MagicMock(
+        state="LOCKED",
+        session_status="locked",
+        system_status="online",
+        label="Заблокирован",
+        reason="Экран входа",
+    )
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.monitoring = MagicMock()
+    app.monitoring.telemetry_age.return_value = 5.0
+    app.power_flow = PowerFlowManager(ui, mqtt)
+    app.save_state = MagicMock()
+
+    call = {
+        "id": "cb-ws-locked",
+        "data": "workspace_start_direct",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 888, "chat": {"id": ALLOWED_USER_ID}},
+    }
+    app.handle_callback(call)
+
+    sent_markup = ui.send_message.call_args[1]["reply_markup"]
+    buttons = [btn for row in sent_markup["inline_keyboard"] for btn in row]
+    unlock_btn = next(b for b in buttons if b.get("callback_data") == "flow_unlock_and_workspace")
+    assert unlock_btn["text"] == "Разблокировать и запустить"
+
+
+def test_menu_callback_resets_waiting_workspace_decision():
+    ui = MagicMock()
+    mqtt = MagicMock()
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.monitoring = MagicMock()
+    app.monitoring.dashboard_text.return_value = "Dashboard"
+    app._main_menu_markup = MagicMock(return_value={"inline_keyboard": []})
+    app.power_flow = PowerFlowManager(ui, mqtt)
+    app.power_flow.stage = PowerFlowStage.WAITING_WORKSPACE_DECISION
+    app.save_state = MagicMock()
+
+    call = {
+        "id": "cb-menu-reset",
+        "data": "menu",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 999, "chat": {"id": ALLOWED_USER_ID}},
+    }
+    app.handle_callback(call)
+
+    assert app.power_flow.stage == PowerFlowStage.IDLE
+
+
+def test_apps_menu_launch_offline_guard():
+    ui = MagicMock()
+    mqtt = MagicMock()
+    mqtt.desktop_status = "offline"
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.save_state = MagicMock()
+
+    call = {
+        "id": "cb-app-offline",
+        "data": "app:Telegram",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 111, "chat": {"id": ALLOWED_USER_ID}},
+    }
+    app.handle_callback(call)
+
+    # Must NOT publish action to MQTT
+    assert not mqtt.publish_desktop_action.called
+    # Must show alert toast explaining why
+    ui.answer_callback.assert_called_with(
+        "cb-app-offline",
+        "ПК заблокирован или выключен. Разблокируйте Windows для запуска программ.",
+        alert=True,
+    )
+
+

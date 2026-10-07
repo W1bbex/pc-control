@@ -17,7 +17,10 @@ try:
 except Exception:
     MOSCOW = timezone(timedelta(hours=3))
 
-from telegram_ui import TelegramBotApi
+try:
+    from .telegram_ui import TelegramBotApi, ICONS
+except ImportError:
+    from telegram_ui import TelegramBotApi, ICONS
 from mqtt_gateway import MqttGateway
 from power_flow import PowerFlowManager, PowerFlowStage
 from physical_button import PhysicalButtonManager
@@ -57,18 +60,83 @@ def unpack_screenshot_payload(payload):
 
 
 def get_workspace_steps(vpn="incy"):
+    vpn_is_happ = str(vpn).lower() == "happ"
     vpn_item = (
-        {"id": "happ_vpn", "label": "Happ (VPN)", "icon_key": "network"}
-        if str(vpn).lower() == "happ"
-        else {"id": "incy_vpn", "label": "INCY (VPN)", "icon_key": "network"}
+        {
+            "id": "happ_vpn",
+            "label": "Happ (VPN)",
+            "emoji_id": ICONS.get("app_happ"),
+            "fallback_emoji": "⚡",
+            "icon_key": "app_happ",
+        }
+        if vpn_is_happ
+        else {
+            "id": "incy_vpn",
+            "label": "INCY (VPN)",
+            "emoji_id": ICONS.get("app_incy"),
+            "fallback_emoji": "🛡️",
+            "icon_key": "app_incy",
+        }
     )
     return [
-        {"id": "telegram", "label": "Telegram", "icon_key": "telegram"},
-        {"id": "yandex_music", "label": "Yandex Music", "icon_key": "music"},
+        {
+            "id": "telegram",
+            "label": "Telegram",
+            "emoji_id": ICONS.get("app_telegram") or ICONS.get("telegram"),
+            "fallback_emoji": "💬",
+            "icon_key": "telegram",
+        },
+        {
+            "id": "yandex_music",
+            "label": "Yandex Music",
+            "emoji_id": ICONS.get("app_yandex_music") or ICONS.get("music"),
+            "fallback_emoji": "🎵",
+            "icon_key": "music",
+        },
         vpn_item,
-        {"id": "chrome", "label": "Google Chrome", "icon_key": "chrome"},
-        {"id": "antigravity", "label": "Antigravity", "icon_key": "terminal"},
+        {
+            "id": "chrome",
+            "label": "Google Chrome",
+            "emoji_id": ICONS.get("app_chrome") or ICONS.get("chrome"),
+            "fallback_emoji": "🌐",
+            "icon_key": "chrome",
+        },
+        {
+            "id": "antigravity",
+            "label": "Antigravity",
+            "emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"),
+            "fallback_emoji": "🚀",
+            "icon_key": "terminal",
+        },
     ]
+
+
+def format_workspace_step_line(step, status_str):
+    app_emoji_id = step.get("emoji_id")
+    fallback = step.get("fallback_emoji", "📱")
+    if app_emoji_id:
+        app_icon_tag = f'<tg-emoji emoji-id="{app_emoji_id}">{fallback}</tg-emoji> '
+    else:
+        app_icon_tag = f"{fallback} "
+
+    clock_id = ICONS.get("clock")
+    check_id = ICONS.get("check")
+    cross_id = ICONS.get("cross")
+    refresh_id = ICONS.get("refresh")
+
+    raw_status = str(status_str or "⏳ В очереди")
+    if raw_status in ("⏳ В очереди", "queued", "None"):
+        status_display = f'<tg-emoji emoji-id="{clock_id}">⏳</tg-emoji> В очереди' if clock_id else "⏳ В очереди"
+    elif raw_status in ("🔄 Запуск...", "starting", "running"):
+        status_display = f'<tg-emoji emoji-id="{refresh_id}">🔄</tg-emoji> Запуск...' if refresh_id else "🔄 Запуск..."
+    elif raw_status in ("✅", "✅ Запущен", "verified", "already_running_verified"):
+        status_display = f'<tg-emoji emoji-id="{check_id}">✅</tg-emoji>' if check_id else "✅"
+    elif "❌" in raw_status or "Ошибка" in raw_status or raw_status == "failed":
+        status_display = f'<tg-emoji emoji-id="{cross_id}">❌</tg-emoji> {raw_status.replace("❌", "").strip()}' if cross_id else raw_status
+    else:
+        status_display = raw_status
+
+    return f"{app_icon_tag}{step['label']} — {status_display}"
 
 
 WORKSPACE_STEPS = get_workspace_steps("happ")
@@ -395,11 +463,14 @@ class PcControlBotApp:
 
         steps = getattr(self, "current_workspace_steps", WORKSPACE_STEPS)
         lines = [
-            f"{step['label']} — {self.app_statuses.get(step['id'], '⏳ В очереди')}"
+            format_workspace_step_line(step, self.app_statuses.get(step['id'], '⏳ В очереди'))
             for step in steps
         ]
         text = "<b>🚀 Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
-        markup = {"inline_keyboard": [[{"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}]]}
+        cancel_btn = {"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}
+        if ICONS.get("cross"):
+            cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
+        markup = {"inline_keyboard": [[cancel_btn]]}
         self.ui.send_message(ALLOWED_USER_ID, text, reply_markup=markup, message_id=self.workspace_card_msg_id)
 
     def _on_mqtt_event(self, event_type, data):
@@ -839,6 +910,11 @@ class PcControlBotApp:
         # 1. Quick Navigation Callbacks
         if data == "menu":
             self.ui.answer_callback(callback_id)
+            if self.power_flow.stage in (
+                PowerFlowStage.WAITING_WORKSPACE_DECISION,
+                PowerFlowStage.UNLOCK_FAILED,
+            ):
+                self.power_flow.reset_flow()
             self.current_menu_view = "main"
             self.active_main_menu_message_id = message_id
             self.save_state()
@@ -848,8 +924,10 @@ class PcControlBotApp:
         if data == "settings_menu":
             self.ui.answer_callback(callback_id)
             self.current_menu_view = "settings_menu"
+            gear_icon = ICONS.get("gear")
+            prefix = f'<tg-emoji emoji-id="{gear_icon}">⚙️</tg-emoji> ' if gear_icon else ""
             text = (
-                "⚙️ <b>Настройки и сервисы</b>\n\n"
+                f"{prefix}<b>Настройки и сервисы</b>\n\n"
                 "Выбери нужный раздел:"
             )
             self.ui.send_message(
@@ -1201,7 +1279,7 @@ class PcControlBotApp:
         if data in {"flow_workspace_yes", "flow_workspace_no"}:
             if data == "flow_workspace_yes":
                 self.ui.answer_callback(callback_id)
-                text = "<b>🚀 Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+                text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
                 markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
                 self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
                 return
@@ -1214,6 +1292,8 @@ class PcControlBotApp:
             self.chosen_vpn = selected_vpn
             vpn_name = "INCY" if selected_vpn == "incy" else "Happ"
             self.ui.answer_callback(callback_id, f"Выбран {vpn_name} VPN! Запускаю...")
+            self.power_flow.chat_id = chat_id
+            self.power_flow.message_id = message_id
             self.power_flow.stage = PowerFlowStage.WORKSPACE_RUNNING
             self.power_flow.workspace_cancelled = False
             self.power_flow.active_workspace_id = f"ws-{int(time.time())}"
@@ -1230,17 +1310,29 @@ class PcControlBotApp:
             pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
             if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
                 self.ui.answer_callback(callback_id)
-                text = "<b>🚀 Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
+                text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
                 markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
                 self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
             elif pc_state.state == "LOCKED":
                 self.ui.answer_callback(callback_id)
-                text = "<b>🔒 Windows не разблокирована.</b>\n\nРазблокировать сейчас?"
+                text = "<b>Windows не разблокирована.</b>\n\nРазблокировать сейчас?"
                 markup = {
                     "inline_keyboard": [
                         [
-                            {"text": "Да, разблокировать", "style": "success", "callback_data": "flow_unlock_yes"},
-                            {"text": "✖ Не сейчас", "callback_data": "flow_unlock_no"},
+                            {
+                                "text": "Разблокировать и запустить",
+                                "style": "success",
+                                "icon_custom_emoji_id": ICONS.get("apps"),
+                                "callback_data": "flow_unlock_and_workspace",
+                            },
+                        ],
+                        [
+                            {
+                                "text": "Отмена",
+                                "style": "danger",
+                                "icon_custom_emoji_id": ICONS.get("cross"),
+                                "callback_data": "menu",
+                            },
                         ]
                     ]
                 }
@@ -1251,8 +1343,20 @@ class PcControlBotApp:
                 markup = {
                     "inline_keyboard": [
                         [
-                            {"text": "Включить ПК", "style": "success", "callback_data": "power_on"},
-                            {"text": "✖ Не сейчас", "callback_data": "menu"},
+                            {
+                                "text": "Включить ПК",
+                                "style": "success",
+                                "icon_custom_emoji_id": ICONS.get("power"),
+                                "callback_data": "power_on",
+                            },
+                        ],
+                        [
+                            {
+                                "text": "Отмена",
+                                "style": "danger",
+                                "icon_custom_emoji_id": ICONS.get("cross"),
+                                "callback_data": "menu",
+                            },
                         ]
                     ]
                 }
@@ -1344,23 +1448,34 @@ class PcControlBotApp:
 
         if data == "reboot_pc":
             self.ui.answer_callback(callback_id)
-            markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "Да, перезагрузить", "style": "primary", "callback_data": "reboot_confirm"},
-                        {"text": "✖ Отмена", "callback_data": "menu"},
-                    ]
-                ]
-            }
             self.ui.send_message(
                 chat_id,
-                "<b>🔄 Перезагрузка ПК</b>\n\nВы уверены, что хотите перезагрузить компьютер?",
-                reply_markup=markup,
+                "<b>🔄 Перезагрузка ПК</b>\n\nВыберите тип перезагрузки:\n\n"
+                "• <b>Перезагрузка + Разблок</b> — ПК перезагрузится, дождётся экрана входа, введёт пароль и предложит рабочий сетап.\n"
+                "• <b>Только перезагрузка</b> — обычный рестарт без авторазблокировки.",
+                reply_markup=self.ui.reboot_menu_markup(),
                 message_id=message_id,
             )
             return
 
+        if data == "reboot_unlock":
+            if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
+                self.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
+                return
+            self.ui.answer_callback(callback_id, "Перезагружаю с авторазблоком...")
+            if self.mqtt.system_status == "online":
+                self.mqtt.publish_system_action("restart")
+            elif getattr(self.mqtt, "desktop_status", None) == "online":
+                self.mqtt.publish_desktop_action("restart")
+            if hasattr(self.mqtt, "publish_esp_action"):
+                self.mqtt.publish_esp_action("LED_OFF")
+            self.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=True)
+            return
+
         if data == "reboot_confirm":
+            if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
+                self.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
+                return
             self.ui.answer_callback(callback_id, "Перезагружаю...")
             if self.mqtt.system_status == "online":
                 self.mqtt.publish_system_action("restart")
@@ -1368,13 +1483,25 @@ class PcControlBotApp:
                 self.mqtt.publish_desktop_action("restart")
             if hasattr(self.mqtt, "publish_esp_action"):
                 self.mqtt.publish_esp_action("LED_OFF")
+            self.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=False)
+            return
+
+        if data == "flow_reboot_cancel":
+            self.ui.answer_callback(callback_id, "Ожидание отменено")
+            self.power_flow.reset_flow()
+            self.ui.send_message(
+                chat_id,
+                "<b>Ожидание перезагрузки отменено.</b>",
+                reply_markup=self._power_menu_markup(),
+                message_id=message_id,
+            )
             return
 
         if data == "shutdown_pc":
             self.ui.answer_callback(callback_id)
             self.ui.send_message(
                 chat_id,
-                "<b>🛑 Выключение ПК</b>\n\nВыключить сейчас или запланировать по московскому времени?",
+                "<b>Выключение ПК</b>\n\nВыключить сейчас или запланировать по московскому времени?",
                 reply_markup=self.ui.shutdown_menu_markup(self.scheduled_shutdown_ts),
                 message_id=message_id,
             )
@@ -1390,7 +1517,7 @@ class PcControlBotApp:
             self.awaiting_shutdown_time_chat_id = chat_id
             self.ui.send_message(
                 chat_id,
-                "<b>⏰ Выключение по времени</b>\n\nОтправь время в формате <code>HH:MM</code>. Часовой пояс — Москва.\nНапример: <code>23:45</code>",
+                "<b>Выключение по времени</b>\n\nОтправь время в формате <code>HH:MM</code>. Часовой пояс — Москва.\nНапример: <code>23:45</code>",
                 reply_markup={"inline_keyboard": [self.ui.back_button("shutdown_pc")]},
                 message_id=message_id,
             )
@@ -1425,7 +1552,7 @@ class PcControlBotApp:
             self.save_state()
             self.ui.send_message(
                 chat_id,
-                "<b>✅ Таймер выключения отменён.</b>",
+                "<b>Таймер выключения отменён.</b>",
                 reply_markup=self._power_menu_markup(),
                 message_id=message_id,
             )
@@ -1433,6 +1560,13 @@ class PcControlBotApp:
 
         if data.startswith("app:"):
             app_name = data.split(":", 1)[1]
+            if getattr(self.mqtt, "desktop_status", None) != "online":
+                self.ui.answer_callback(
+                    callback_id,
+                    "ПК заблокирован или выключен. Разблокируйте Windows для запуска программ.",
+                    alert=True,
+                )
+                return
             self.ui.answer_callback(callback_id, f"Запускаю {app_name}...")
             self.mqtt.publish_desktop_action("launch_app", {"app": app_name})
             return
@@ -1662,12 +1796,15 @@ class PcControlBotApp:
 
         def render_checklist():
             lines = [
-                f"{step['label']} — {self.app_statuses.get(step['id'], '⏳ В очереди')}"
+                format_workspace_step_line(step, self.app_statuses.get(step['id'], '⏳ В очереди'))
                 for step in self.current_workspace_steps
             ]
-            return "<b>🚀 Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
+            return "<b>Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
 
-        markup = {"inline_keyboard": [[{"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}]]}
+        cancel_btn = {"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}
+        if ICONS.get("cross"):
+            cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
+        markup = {"inline_keyboard": [[cancel_btn]]}
 
         res = self.ui.send_message(chat_id, render_checklist(), reply_markup=markup, message_id=card_message_id)
         msg_id = res["message_id"] if res and res.get("message_id") else card_message_id
@@ -1686,11 +1823,11 @@ class PcControlBotApp:
 
         if self.mqtt.desktop_status != "online":
             LOG.warning("Desktop agent still not online after 15s wait.")
-            error_text = render_checklist() + "\n\n<b>❌ Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
+            error_text = render_checklist() + "\n\n<b>Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
             error_markup = {
                 "inline_keyboard": [
-                    [{"text": "🔁 Повторить сетап", "callback_data": "workspace_start_direct"}],
-                    [{"text": "✖ Отмена", "callback_data": "menu"}],
+                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                    [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
                 ]
             }
             self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
@@ -1702,13 +1839,13 @@ class PcControlBotApp:
         cmd_id = self.mqtt.publish_desktop_action(
             "launch_app",
             {"app": "Рабочий сетап", "workspace_id": ws_id, "vpn": active_vpn},
-            timeout=60,
+            timeout=120,
         )
         self.active_workspace_cmd_id = cmd_id
 
-        # 1. Wait for Happ / INCY VPN readiness (up to 35 seconds)
+        # 1. Wait for Happ / INCY VPN readiness (up to 55 seconds)
         vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
-        vpn_ready = self._wait_event_or_cancel(vpn_event, 35.0) if vpn_event else True
+        vpn_ready = self._wait_event_or_cancel(vpn_event, 55.0) if vpn_event else True
 
         if self.workspace_cancel_event.is_set():
             LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
@@ -1722,19 +1859,22 @@ class PcControlBotApp:
         if not vpn_ready and (vpn_event and not vpn_event.is_set()):
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
             self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
-            error_text = render_checklist() + f"\n\n<b>❌ Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
+            error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
             error_markup = {
                 "inline_keyboard": [
-                    [{"text": "🔁 Повторить сетап", "callback_data": "workspace_start_direct"}],
-                    [{"text": "🖼️ Скриншот", "callback_data": "screenshot"}, {"text": "📍 Главное меню", "callback_data": "menu"}],
+                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
                 ]
             }
             self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
             self.power_flow.reset_flow()
             return
 
-        # 2. Wait for full workspace scenario execution ACK from agent.py (up to 45 seconds)
-        ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 45.0)
+        # 2. Wait for full workspace scenario execution ACK from agent.py (up to 65 seconds)
+        ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 65.0)
 
         if self.workspace_cancel_event.is_set():
             LOG.info("Runner thread detected cancellation during workspace execution wait. Halting.")
@@ -1744,11 +1884,14 @@ class PcControlBotApp:
 
         if not ws_executed or self.workspace_execution_result == "failed":
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            error_text = render_checklist() + "\n\n<b>❌ Ошибка выполнения рабочего сетапа.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
+            error_text = render_checklist() + "\n\n<b>Ошибка выполнения рабочего сетапа.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
             error_markup = {
                 "inline_keyboard": [
-                    [{"text": "🔁 Повторить сетап", "callback_data": "workspace_start_direct"}],
-                    [{"text": "🖼️ Скриншот", "callback_data": "screenshot"}, {"text": "📍 Главное меню", "callback_data": "menu"}],
+                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
                 ]
             }
             self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
@@ -1758,11 +1901,14 @@ class PcControlBotApp:
         # 3. Strict verification check: every step must be strictly verified
         unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
         if unverified:
-            notice_text = render_checklist() + f"\n\n<b>⚠️ Рабочий сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
+            notice_text = render_checklist() + f"\n\n<b>Рабочий сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
             notice_markup = {
                 "inline_keyboard": [
-                    [{"text": "🔁 Повторить сетап", "callback_data": "workspace_start_direct"}],
-                    [{"text": "🖼️ Скриншот", "callback_data": "screenshot"}, {"text": "📍 Главное меню", "callback_data": "menu"}],
+                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
                 ]
             }
             self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
@@ -1786,11 +1932,14 @@ class PcControlBotApp:
 
             # Check min_ack_received and minimize_ack_result strictly
             if not min_ack_received or self.minimize_ack_result != "executed":
-                notice_text = render_checklist() + "\n\n<b>⚠️ Рабочий сетап запущен, но не удалось свернуть окна.</b>"
+                notice_text = render_checklist() + "\n\n<b>Рабочий сетап запущен, но не удалось свернуть окна.</b>"
                 notice_markup = {
                     "inline_keyboard": [
-                        [{"text": "🖥 Свернуть окна", "callback_data": "minimize_windows"}],
-                        [{"text": "🖼️ Скриншот", "callback_data": "screenshot"}, {"text": "📍 Главное меню", "callback_data": "menu"}],
+                        [{"text": "Свернуть окна", "style": "primary", "icon_custom_emoji_id": ICONS.get("screen"), "callback_data": "minimize_windows"}],
+                        [
+                            {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                            {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                        ],
                     ]
                 }
                 self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
@@ -1801,7 +1950,10 @@ class PcControlBotApp:
         final_text = render_checklist() + "\n\n<b>✅ Рабочий сетап успешно запущен!</b>\nВсе приложения открыты, VPN активен, окна свернуты."
         final_markup = {
             "inline_keyboard": [
-                [{"text": "🖼️ Скриншот", "callback_data": "screenshot"}, {"text": "📍 Главное меню", "callback_data": "menu"}],
+                [
+                    {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                    {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                ],
             ]
         }
         self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)

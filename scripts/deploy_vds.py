@@ -39,6 +39,7 @@ MANIFEST_FILES = [
     "power_flow.py",
     "telegram_ui.py",
     "requirements.txt",
+    "resources/icons.json",
 ]
 
 
@@ -191,10 +192,14 @@ def rollback_to_previous():
 
     restore_cmd = (
         f"for f in {' '.join(MANIFEST_FILES)}; do "
-        f"  if [ -f {prev_dir}/$f ]; then cp {prev_dir}/$f {REMOTE_BASE}/$f; fi; "
+        f"  if [ -f {prev_dir}/$f ]; then "
+        f"    mkdir -p $(dirname {REMOTE_BASE}/$f) && "
+        f"    cp {prev_dir}/$f {REMOTE_BASE}/$f; "
+        f"  fi; "
         f"done && "
-        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt && "
-        f"chmod 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt && "
+        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources 2>/dev/null || true && "
+        f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
+        f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "
         f"systemctl restart pc-control-bot.service"
     )
     run_ssh(restore_cmd)
@@ -221,11 +226,13 @@ def deploy_and_verify(release_tag, remote_release_dir):
     # Atomic copy and permission setup
     deploy_cmd = (
         f"for f in {' '.join(MANIFEST_FILES)}; do "
+        f"  mkdir -p $(dirname {REMOTE_BASE}/$f) && "
         f"  cp {remote_release_dir}/$f {REMOTE_BASE}/$f; "
         f"done && "
         f"echo '{release_tag}' > {REMOTE_BASE}/current_release && "
-        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt && "
-        f"chmod 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt && "
+        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources 2>/dev/null || true && "
+        f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
+        f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "
         f"systemctl restart pc-control-bot.service"
     )
     run_ssh(deploy_cmd)

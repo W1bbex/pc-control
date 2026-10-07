@@ -134,11 +134,11 @@ class MonitoringManager:
     def _session_lines(self, telemetry):
         is_shutting_down = getattr(self, "is_shutting_down", None)
         if is_shutting_down and is_shutting_down():
-            return "⏳", "Выключение..."
+            return "⏳ Выключение...", "н/д"
 
         session = self.mqtt.system_session
         if session in {"locked", "login_screen"}:
-            return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji>', "н/д"
+            return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji> Заблокирован', "н/д"
 
         desk_status = getattr(self.mqtt, "desktop_status", None)
         age = self.telemetry_age()
@@ -151,13 +151,14 @@ class MonitoringManager:
 
         if is_unlocked:
             if telemetry and telemetry.get("user_active", False):
-                status_icon = f'<tg-emoji emoji-id="{EMOJI_STATUS_ACTIVE}">🟢</tg-emoji>'
+                status_icon = f'<tg-emoji emoji-id="{EMOJI_STATUS_ACTIVE}">🟢</tg-emoji> В сети'
             else:
-                status_icon = "🟡"
+                clock_eid = ICONS.get("clock", "5330473500064912704")
+                status_icon = f'<tg-emoji emoji-id="{clock_eid}">🟡</tg-emoji> В сети (AFK)'
             dur = telemetry.get("session_seconds") if telemetry else None
             return status_icon, format_duration(dur)
 
-        return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji>', "н/д"
+        return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji> Офлайн', "н/д"
 
     def dashboard_text(self, media_state=None):
         """Build the full dashboard from the nested schema emitted by agent.py."""
@@ -283,10 +284,11 @@ class MonitoringManager:
         else:
             app_line = f" └ Открыт: {app_emoji} {active_application}\n"
 
+        dur_str = f"  ({session_duration})" if session_duration and session_duration != "н/д" else ""
         return (
             f'<tg-emoji emoji-id="{EMOJI_HEADER_PC}">💻</tg-emoji> <b>PC Control</b>\n\n'
             f'<b><tg-emoji emoji-id="{EMOJI_SECTION_SESSION}">👤</tg-emoji> Сессия</b>\n'
-            f' ├ Статус: {status_icon}  ({session_duration})\n'
+            f' ├ Статус: {status_icon}{dur_str}\n'
             + app_line
             + "\n"
             f'<b><tg-emoji emoji-id="{EMOJI_SECTION_HARDWARE}">⚡️</tg-emoji> Железо</b>\n'

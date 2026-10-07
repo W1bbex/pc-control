@@ -348,11 +348,12 @@ class TestPowerFlowWorkspaceAutoLaunch(unittest.TestCase):
 
                 flow.on_unlock_success(12345)
 
-                self.assertEqual(flow.stage, PowerFlowStage.WORKSPACE_RUNNING)
+                self.assertEqual(flow.stage, PowerFlowStage.WAITING_WORKSPACE_DECISION)
                 self.assertFalse(flow.auto_launch_workspace)
-                self.assertEqual(len(ws_started), 1)
-                self.assertEqual(ws_started[0][0], 12345)
-                self.assertTrue(str(ws_started[0][1]).startswith("ws-"))
+                self.assertEqual(len(ws_started), 0)
+                self.assertTrue(mock_ui.send_message.called)
+                sent_text = mock_ui.send_message.call_args[0][1]
+                self.assertIn("Выберите VPN", sent_text)
 
     def test_on_unlock_success_normal_flow_when_flag_false(self):
         from power_flow import PowerFlowManager, PowerFlowStage
@@ -370,6 +371,7 @@ class TestPowerFlowWorkspaceAutoLaunch(unittest.TestCase):
 
                 self.assertEqual(flow.stage, PowerFlowStage.WAITING_WORKSPACE_DECISION)
                 self.assertEqual(len(ws_started), 0)
+                self.assertTrue(mock_ui.send_message.called)
 
 
 class TestWorkspaceConcurrencyGuard(unittest.TestCase):

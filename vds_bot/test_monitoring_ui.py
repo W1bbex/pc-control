@@ -388,6 +388,38 @@ def test_session_lines_states():
     assert dur == "н/д"
 
 
+def test_sound_menu_markup_has_valid_custom_emojis():
+    from telegram_ui import TelegramBotApi
+    ui = TelegramBotApi("dummy_token")
+    markup = ui.sound_menu_markup()
+    buttons = [btn for row in markup["inline_keyboard"] for btn in row]
+    for btn in buttons:
+        if "icon_custom_emoji_id" in btn:
+            val = btn["icon_custom_emoji_id"]
+            assert val is not None, f"Button {btn.get('text')} has null icon_custom_emoji_id"
+            assert str(val).isdigit(), f"Button {btn.get('text')} has non-numeric icon_custom_emoji_id: {val}"
+
+
+def test_sanitize_reply_markup_strips_null_or_invalid_emojis():
+    from telegram_ui import TelegramBotApi
+    bad_markup = {
+        "inline_keyboard": [
+            [{"text": "Bad Null", "icon_custom_emoji_id": None, "callback_data": "test:1"}],
+            [{"text": "Bad String Null", "icon_custom_emoji_id": "null", "callback_data": "test:2"}],
+            [{"text": "Bad Empty", "icon_custom_emoji_id": "", "callback_data": "test:3"}],
+            [{"text": "Good Numeric", "icon_custom_emoji_id": "5330140476890718558", "callback_data": "test:4"}],
+            [{"text": "Good Int", "icon_custom_emoji_id": 5330140476890718558, "callback_data": "test:5"}],
+        ]
+    }
+    cleaned = TelegramBotApi._sanitize_reply_markup(bad_markup)
+    rows = cleaned["inline_keyboard"]
+    assert "icon_custom_emoji_id" not in rows[0][0]
+    assert "icon_custom_emoji_id" not in rows[1][0]
+    assert "icon_custom_emoji_id" not in rows[2][0]
+    assert rows[3][0]["icon_custom_emoji_id"] == "5330140476890718558"
+    assert rows[4][0]["icon_custom_emoji_id"] == "5330140476890718558"
+
+
 if __name__ == "__main__":
     test_dashboard_uses_real_nested_agent_schema()
     test_dashboard_renders_media_playback_when_active()
@@ -397,6 +429,8 @@ if __name__ == "__main__":
     test_main_menu_markup_excludes_player_and_activity()
     test_main_menu_markup_structure_and_custom_emojis()
     test_settings_menu_markup()
+    test_sound_menu_markup_has_valid_custom_emojis()
+    test_sanitize_reply_markup_strips_null_or_invalid_emojis()
     test_is_user_in_telegram_on_pc()
     test_dashboard_auto_refresh_every_10s()
     test_dashboard_auto_refresh_every_5s_when_in_pc_control()
