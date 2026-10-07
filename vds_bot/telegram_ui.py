@@ -45,7 +45,9 @@ CANONICAL_ICONS = {
     "next": "5330255053733276330",
     "prev": "5330363570376977789",
     "repeat": "5330448799707998190",
-    "heart": "5330276670303674347",
+    "heart": "5346267379007530615",
+    "heart_liked": "5346267379007530615",
+    "heart_unliked": "5346066056710498954",
     "headphones": "5330526830673831881",
     "dot": "5330193051585391352",
     "check": "5330273230034871570",
@@ -109,8 +111,8 @@ DEFAULT_PLAYER_ICONS = {
     "tag_status_pause": ICONS.get("pause", "5330570905628222348"),
     "tag_clock": ICONS.get("clock", "5330473500064912704"),
     "tag_slider_dot": ICONS.get("dot", "5330193051585391352"),
-    "tag_heart_liked": ICONS.get("heart", "5330276670303674347"),
-    "tag_heart_unliked": ICONS.get("heart", "5330276670303674347"),
+    "tag_heart_liked": ICONS.get("heart_liked", ICONS.get("heart", "5346267379007530615")),
+    "tag_heart_unliked": ICONS.get("heart_unliked", "5346066056710498954"),
 }
 
 
