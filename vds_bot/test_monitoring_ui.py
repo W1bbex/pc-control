@@ -376,7 +376,8 @@ def test_session_lines_states():
     # Case 4: system_session locked
     fake_mqtt.system_session = "locked"
     icon, dur = manager._session_lines({"user_active": True, "session_seconds": 120})
-    assert "❌" in icon
+    assert "🔴" in icon
+    assert "5345825096160291312" in icon
     assert dur == "н/д"
 
     # Case 5: system_session unknown and desktop offline
@@ -384,7 +385,8 @@ def test_session_lines_states():
     fake_mqtt.desktop_status = "offline"
     manager.latest_received_at = 0.0
     icon, dur = manager._session_lines({})
-    assert "❌" in icon
+    assert "🔴" in icon
+    assert "5345825096160291312" in icon
     assert dur == "н/д"
 
 

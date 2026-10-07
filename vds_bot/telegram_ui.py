@@ -53,8 +53,10 @@ CANONICAL_ICONS = {
     "chart": "5330382442463271794",
     "wifi": "5330160856510540663",
     "battery": "5330277593721644293",
-    "status_active": "5330273230034871570",
-    "status_inactive": "5330015179809794606",
+    "status_active": "5345809221961167372",
+    "status_inactive": "5345825096160291312",
+    "pulse_green": "5345809221961167372",
+    "pulse_red": "5345825096160291312",
     "wave": "5330448799707998190",
     "linux": "5332695978136874502",
     "windows": "5332280534540264957",
@@ -967,9 +969,9 @@ class TelegramBotApi:
     def power_menu_text(self, pc_state, session=None, desktop_status=None, esp_status=None):
         power_id = ICONS.get("power")
         user_id = ICONS.get("user")
-        check_id = ICONS.get("check") or ICONS.get("status_active")
+        green_pulse = ICONS.get("status_active") or "5345809221961167372"
+        red_pulse = ICONS.get("status_inactive") or "5345825096160291312"
         clock_id = ICONS.get("clock")
-        cross_id = ICONS.get("cross") or ICONS.get("status_inactive")
 
         power_tag = f'<tg-emoji emoji-id="{power_id}">⚡</tg-emoji> ' if power_id else ""
         user_tag = f'<tg-emoji emoji-id="{user_id}">👤</tg-emoji> ' if user_id else ""
@@ -980,37 +982,47 @@ class TelegramBotApi:
         state_val = str(state_val or "").upper()
 
         if state_val in ("READY", "VERIFIED", "ONLINE"):
-            status_icon = f'<tg-emoji emoji-id="{check_id}">🟢</tg-emoji>' if check_id else "🟢"
+            status_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji>'
         elif state_val in ("BOOTING", "STARTING", "CONNECTING", "DEGRADED", "LOCKED"):
             status_icon = f'<tg-emoji emoji-id="{clock_id}">🟡</tg-emoji>' if clock_id else "🟡"
         else:
-            status_icon = f'<tg-emoji emoji-id="{cross_id}">🔴</tg-emoji>' if cross_id else "🔴"
+            status_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji>'
 
         sess_str = str(session or "").lower().strip()
         if sess_str == "unlocked":
-            sess_ru = "Разблокирована"
+            sess_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji> '
+            sess_ru = f"{sess_icon}Разблокирована"
         elif sess_str in ("locked", "login_screen"):
-            sess_ru = "Заблокирована"
+            sess_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            sess_ru = f"{sess_icon}Заблокирована"
         elif sess_str in ("unknown", "none", ""):
-            sess_ru = "Неизвестно"
+            sess_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            sess_ru = f"{sess_icon}Неизвестно"
         else:
-            sess_ru = sess_str.capitalize()
+            sess_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            sess_ru = f"{sess_icon}{sess_str.capitalize()}"
 
         desk_str = str(desktop_status or "").lower().strip()
         if desk_str == "online":
-            desk_ru = "В сети"
+            desk_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji> '
+            desk_ru = f"{desk_icon}В сети"
         elif desk_str == "offline":
-            desk_ru = "Не в сети"
+            desk_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            desk_ru = f"{desk_icon}Не в сети"
         else:
-            desk_ru = "Ожидание"
+            desk_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            desk_ru = f"{desk_icon}Ожидание"
 
         esp_str = str(esp_status or "").lower().strip()
         if esp_str == "online":
-            esp_ru = "В сети"
+            esp_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji> '
+            esp_ru = f"{esp_icon}В сети"
         elif esp_str == "offline":
-            esp_ru = "Не в сети"
+            esp_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            esp_ru = f"{esp_icon}Не в сети"
         else:
-            esp_ru = "Оффлайн"
+            esp_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            esp_ru = f"{esp_icon}Оффлайн"
 
         clean_label = str(getattr(pc_state, "label", "Готов к работе") or "Готов к работе")
         for e in ("🟢", "🟡", "🔴", "⚪", "⚪️"):

@@ -31,8 +31,8 @@ EMOJI_HEADER_PC = ICONS.get("pc", "5330499003580721030")        # 💻 PC Contro
 EMOJI_OS_WINDOWS = ICONS.get("windows", "5332280534540264957")    # 🪟 Windows OS
 EMOJI_OS_LINUX = ICONS.get("linux", "5332695978136874502")        # 🐧 Linux OS
 EMOJI_SECTION_SESSION = ICONS.get("user", "5330478284658488376")  # 👤 Сессия
-EMOJI_STATUS_ACTIVE = ICONS.get("status_active", "5330273230034871570")    # ✔️ Active
-EMOJI_STATUS_INACTIVE = ICONS.get("status_inactive", "5330015179809794606")  # ❌ Inactive
+EMOJI_STATUS_ACTIVE = ICONS.get("status_active", "5345809221961167372")    # 🟢 Зеленый пульсирующий круг
+EMOJI_STATUS_INACTIVE = ICONS.get("status_inactive", "5345825096160291312")  # 🔴 Красный пульсирующий круг
 EMOJI_DEFAULT_APP = ICONS.get("apps", "5346196795514989290")      # 🪟 Windows Explorer / Window icon
 EMOJI_PLAYER_PLAY = ICONS.get("play", "5330015871299527534")      # ▶️ Minimalist play
 EMOJI_PLAYER_PAUSE = ICONS.get("pause", "5330570905628222348")     # ⏸️ Minimalist pause
@@ -140,7 +140,7 @@ class MonitoringManager:
 
         session = self.mqtt.system_session
         if session in {"locked", "login_screen"}:
-            return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji> Заблокирован', "н/д"
+            return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">🔴</tg-emoji> Заблокирован', "н/д"
 
         desk_status = getattr(self.mqtt, "desktop_status", None)
         age = self.telemetry_age()
@@ -160,7 +160,7 @@ class MonitoringManager:
             dur = telemetry.get("session_seconds") if telemetry else None
             return status_icon, format_duration(dur)
 
-        return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji> Офлайн', "н/д"
+        return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">🔴</tg-emoji> Офлайн', "н/д"
 
     def get_os_type(self, telemetry=None) -> str:
         """Detect operating system ('windows', 'linux', or 'unknown') from telemetry or environment."""
@@ -223,7 +223,7 @@ class MonitoringManager:
         pc_state = self.mqtt.health.evaluate_pc_state(telemetry_age=self.telemetry_age())
 
         if pc_state.state in ("UNREACHABLE", "SHUTDOWN_OBSERVED"):
-            header = "⚪" if pc_state.state == "UNREACHABLE" else f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">❌</tg-emoji>'
+            header = "⚪" if pc_state.state == "UNREACHABLE" else f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">🔴</tg-emoji>'
             last_telem_info = ""
             if self.latest_telemetry:
                 ts = self.latest_telemetry.get("ts") or self.latest_telemetry.get("timestamp")

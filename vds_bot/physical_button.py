@@ -80,20 +80,21 @@ class PhysicalButtonManager:
         ws_pattern = (self.saved_unlock_pattern or "CC") + "HH"
         ws_display = self.format_password_display(ws_pattern)
 
-        check_id = ICONS.get("check")
-        clock_id = ICONS.get("clock")
+        pulse_green = ICONS.get("status_active") or "5345809221961167372"
+        pulse_red = ICONS.get("status_inactive") or "5345825096160291312"
 
         if self.physical_morse_unlock_eligible:
             elapsed = int(time.time() - (self.last_physical_morse_success_at or 0))
             remaining = max(0, int(MORSE_UNLOCK_WINDOW_SECONDS - elapsed))
             if remaining > 0:
-                icon_tag = f'<tg-emoji emoji-id="{check_id}">🟢</tg-emoji> ' if check_id else "🟢 "
+                icon_tag = f'<tg-emoji emoji-id="{pulse_green}">🟢</tg-emoji> '
                 status_line = f"{icon_tag}Активна ({remaining} сек)"
             else:
-                icon_tag = f'<tg-emoji emoji-id="{clock_id}">🔴</tg-emoji> ' if clock_id else "🔴 "
+                icon_tag = f'<tg-emoji emoji-id="{pulse_red}">🔴</tg-emoji> '
                 status_line = f"{icon_tag}Истекла"
         else:
-            status_line = "Неактивна"
+            icon_tag = f'<tg-emoji emoji-id="{pulse_red}">🔴</tg-emoji> '
+            status_line = f"{icon_tag}Неактивна"
 
         lock_id = ICONS.get("lock")
         lock_tag = f'<tg-emoji emoji-id="{lock_id}">🔒</tg-emoji> ' if lock_id else ""
