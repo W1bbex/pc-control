@@ -183,12 +183,12 @@ class TestMediaPlayerUI(unittest.TestCase):
             "is_playing": True,
             "is_liked": False,
             "ui_icons": {
-                "tag_heart_unliked": "5348530607729190493",
+                "tag_heart_unliked": "5346165399304055198",
             }
         }
         markup = ui.player_card_markup(state)
         btn_heart = markup["inline_keyboard"][2][0]
-        self.assertEqual(btn_heart["icon_custom_emoji_id"], "5348530607729190493")
+        self.assertEqual(btn_heart["icon_custom_emoji_id"], "5346165399304055198")
         self.assertEqual(btn_heart["text"], "В избранное")
 
         # In monitoring dashboard text
@@ -200,7 +200,7 @@ class TestMediaPlayerUI(unittest.TestCase):
         mm.latest_received_at = 9999999999.0
         mm.latest_telemetry = {"user_active": True}
         text = mm.dashboard_text(state)
-        self.assertIn("5348530607729190493", text)
+        self.assertIn("5346165399304055198", text)
         self.assertIn("💔", text)
 
     def test_title_match_required_in_resolve_track(self):

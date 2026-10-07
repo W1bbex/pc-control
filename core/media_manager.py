@@ -82,7 +82,7 @@ UI_ICONS = {
     "tag_clock": _CANONICAL_ICONS.get("clock", "5330473500064912704"),
     "tag_slider_dot": _CANONICAL_ICONS.get("dot", "5330193051585391352"),
     "tag_heart_liked": _CANONICAL_ICONS.get("heart_liked", _CANONICAL_ICONS.get("heart", "5346267379007530615")),
-    "tag_heart_unliked": _CANONICAL_ICONS.get("heart_unliked", "5348530607729190493"),
+    "tag_heart_unliked": _CANONICAL_ICONS.get("heart_unliked", "5346165399304055198"),
 }
 
 YANDEX_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN") or _ym_cfg.get("token") or ""

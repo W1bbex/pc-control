@@ -47,7 +47,7 @@ CANONICAL_ICONS = {
     "repeat": "5330448799707998190",
     "heart": "5346267379007530615",
     "heart_liked": "5346267379007530615",
-    "heart_unliked": "5348530607729190493",
+    "heart_unliked": "5346165399304055198",
     "headphones": "5330526830673831881",
     "dot": "5330193051585391352",
     "check": "5330273230034871570",
@@ -112,7 +112,7 @@ DEFAULT_PLAYER_ICONS = {
     "tag_clock": ICONS.get("clock", "5330473500064912704"),
     "tag_slider_dot": ICONS.get("dot", "5330193051585391352"),
     "tag_heart_liked": ICONS.get("heart_liked", ICONS.get("heart", "5346267379007530615")),
-    "tag_heart_unliked": ICONS.get("heart_unliked", "5348530607729190493"),
+    "tag_heart_unliked": ICONS.get("heart_unliked", "5346165399304055198"),
 }
 
 
@@ -887,8 +887,8 @@ class TelegramBotApi:
         # Row 3: Single full-width Like button
         is_liked = media_state.get("is_liked", False) if media_state else False
         btn_heart = icons.get("tag_heart_liked" if is_liked else "tag_heart_unliked")
-        if not btn_heart or btn_heart in ("5330276670303674347", "5346066056710498954", "5346025172916807121"):
-            btn_heart = "5346267379007530615" if is_liked else "5348530607729190493"
+        if not btn_heart or btn_heart in ("5330276670303674347", "5346066056710498954", "5346025172916807121", "5348530607729190493"):
+            btn_heart = "5346267379007530615" if is_liked else "5346165399304055198"
         heart_text = "В любимых" if is_liked else "В избранное"
         r3_btn = {"text": heart_text, "callback_data": "player_toggle_like"}
         if btn_heart:
