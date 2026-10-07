@@ -322,17 +322,22 @@ class MonitoringManager:
             m_liked = media_state.get("is_liked", False)
             icons = media_state.get("ui_icons") or {}
             play_eid = icons.get("tag_status_play") or EMOJI_PLAYER_PLAY
-            pause_eid = icons.get("tag_status_pause") or EMOJI_PLAYER_PAUSE
             heart_eid = icons.get("tag_heart_liked") or EMOJI_PLAYER_HEART
             if heart_eid == "5330276670303674347":
                 heart_eid = "5346267379007530615"
+            unliked_eid = icons.get("tag_heart_unliked") or ICONS.get("heart_unliked", "5346066056710498954")
+            if unliked_eid == "5330276670303674347":
+                unliked_eid = "5346066056710498954"
 
             if m_playing:
                 status_symbol = f'<tg-emoji emoji-id="{play_eid}">▶️</tg-emoji>'
             else:
                 status_symbol = f'<tg-emoji emoji-id="{pause_eid}">⏸️</tg-emoji>'
 
-            liked_icon = f' <tg-emoji emoji-id="{heart_eid}">❤️</tg-emoji>' if m_liked else ""
+            if m_liked:
+                liked_icon = f' <tg-emoji emoji-id="{heart_eid}">❤️</tg-emoji>'
+            else:
+                liked_icon = f' <tg-emoji emoji-id="{unliked_eid}">🤍</tg-emoji>'
 
             track_info = m_title
             if m_artist:
