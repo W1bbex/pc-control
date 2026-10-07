@@ -1468,7 +1468,7 @@ class PCControlAgent:
                 if is_vpn:
                     if selected_vpn == "happ":
                         step_id = "happ_vpn"
-                        label = "⚡ Happ (VPN)"
+                        label = "Happ (VPN)"
                         configured_path = self.config.get("apps", {}).get("Happ", r"C:\Program Files\FlyFrogLLC\Happ\Happ.exe")
                         executable = str(configured_path)
                         cmd = [os.path.expandvars(executable)]
@@ -1476,7 +1476,7 @@ class PCControlAgent:
                         is_incy = False
                     else:
                         step_id = "incy_vpn"
-                        label = "🛡️ INCY (VPN)"
+                        label = "INCY (VPN)"
                         configured_path = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
                         executable = str(configured_path)
                         cmd = [os.path.expandvars(executable)]

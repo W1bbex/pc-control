@@ -66,7 +66,7 @@ def get_workspace_steps(vpn="incy"):
             "id": "happ_vpn",
             "label": "Happ (VPN)",
             "emoji_id": ICONS.get("app_happ"),
-            "fallback_emoji": "⚡",
+            "fallback_emoji": "🌐",
             "icon_key": "app_happ",
         }
         if vpn_is_happ
@@ -74,7 +74,7 @@ def get_workspace_steps(vpn="incy"):
             "id": "incy_vpn",
             "label": "INCY (VPN)",
             "emoji_id": ICONS.get("app_incy"),
-            "fallback_emoji": "🛡️",
+            "fallback_emoji": "🌐",
             "icon_key": "app_incy",
         }
     )

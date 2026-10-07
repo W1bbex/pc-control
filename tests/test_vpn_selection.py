@@ -441,6 +441,17 @@ def test_workspace_steps_app_emojis_and_no_generic_shield_lightning():
     assert incy_btn["icon_custom_emoji_id"] == ICONS.get("app_incy")
     assert happ_btn["icon_custom_emoji_id"] == ICONS.get("app_happ")
 
+    # Verify fallbacks are clean without generic ⚡ / 🛡️
+    assert "⚡" not in happ_step.get("fallback_emoji", "")
+    assert "🛡" not in incy_step.get("fallback_emoji", "")
+
+    # Verify Dolphin has app icon in apps_menu_markup
+    apps_markup = ui.apps_menu_markup()
+    apps_btns = [btn for row in apps_markup["inline_keyboard"] for btn in row]
+    dolphin_btn = next(b for b in apps_btns if b.get("callback_data") == "app:Dolphin")
+    assert dolphin_btn["icon_custom_emoji_id"] == ICONS.get("app_dolphin")
+    assert ICONS.get("app_dolphin") == "5278321743709124204"
+
 
 def test_reboot_offline_detection_race_condition():
     ui = MagicMock()

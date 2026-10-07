@@ -64,6 +64,7 @@ CANONICAL_ICONS = {
     "app_incy": "5319035276306196317",
     "app_chrome": "5251317871274929314",
     "app_antigravity": "5251292384938994108",
+    "app_dolphin": "5278321743709124204",
 }
 
 def _load_canonical_icons():
@@ -633,7 +634,7 @@ class TelegramBotApi:
                     {"text": "Музыка", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_yandex_music") or ICONS.get("music"), "callback_data": "app:Музыка"},
                 ],
                 [
-                    {"text": "Dolphin", "style": "primary", "callback_data": "app:Dolphin"},
+                    {"text": "Dolphin", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_dolphin"), "callback_data": "app:Dolphin"},
                     {"text": "Chrome", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chrome") or ICONS.get("chrome"), "callback_data": "app:Chrome"},
                 ],
                 [
