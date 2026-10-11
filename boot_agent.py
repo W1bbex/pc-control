@@ -79,15 +79,27 @@ def get_real_boot_time():
             win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryReverseDirection,
             query_str
         )
-        events = win32evtlog.EvtNext(query, 1)
-        if events:
-            xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
-            root = ET.fromstring(xml_data)
-            for elem in root.iter():
-                if elem.tag.endswith('TimeCreated') and 'SystemTime' in elem.attrib:
-                    st = elem.attrib['SystemTime']
-                    dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
-                    return dt.timestamp()
+        try:
+            events = win32evtlog.EvtNext(query, 1)
+            if events:
+                try:
+                    xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
+                    root = ET.fromstring(xml_data)
+                    for elem in root.iter():
+                        if elem.tag.endswith('TimeCreated') and 'SystemTime' in elem.attrib:
+                            st = elem.attrib['SystemTime']
+                            dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
+                            return dt.timestamp()
+                finally:
+                    try:
+                        win32evtlog.EvtClose(events[0])
+                    except Exception:
+                        pass
+        finally:
+            try:
+                win32evtlog.EvtClose(query)
+            except Exception:
+                pass
     except Exception:
         pass
     try:
@@ -172,21 +184,32 @@ patch_paho_sockpair()
 
 def acquire_single_instance():
     kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel32.ReleaseMutex.restype = wintypes.BOOL
+
     mutex = kernel32.CreateMutexW(
         None,
-        False,
+        True,
         "Global\\W1bbexPCControlSystemAgent",
     )
     err = kernel32.GetLastError()
     if err == 183:
+        if mutex:
+            kernel32.CloseHandle(mutex)
         raise SystemExit("PC Control System Agent is already running")
     if not mutex and err == 5:
         mutex = kernel32.CreateMutexW(
             None,
-            False,
+            True,
             "Local\\W1bbexPCControlSystemAgent",
         )
         if kernel32.GetLastError() == 183:
+            if mutex:
+                kernel32.CloseHandle(mutex)
             raise SystemExit("PC Control System Agent is already running")
     return mutex
 
@@ -295,6 +318,17 @@ def active_console_session(ttl=0.5):
     wtsapi32 = ctypes.windll.wtsapi32
     user32 = ctypes.windll.user32
 
+    wtsapi32.WTSQuerySessionInformationW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    wtsapi32.WTSQuerySessionInformationW.restype = wintypes.BOOL
+    wtsapi32.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+    wtsapi32.WTSFreeMemory.restype = None
+
     session_id = int(kernel32.WTSGetActiveConsoleSessionId())
     if session_id == 0xFFFFFFFF:
         res = {
@@ -309,21 +343,21 @@ def active_console_session(ttl=0.5):
         return res
 
     # 1. Query Username
-    username_buffer = ctypes.c_wchar_p()
+    username_buf = ctypes.c_void_p()
     returned = wintypes.DWORD()
     username = ""
     user_query_ok = bool(wtsapi32.WTSQuerySessionInformationW(
         None,
         session_id,
         5,  # WTSUserName
-        ctypes.byref(username_buffer),
+        ctypes.byref(username_buf),
         ctypes.byref(returned),
     ))
-    if user_query_ok:
+    if user_query_ok and username_buf.value:
         try:
-            username = username_buffer.value or ""
+            username = ctypes.wstring_at(username_buf.value) or ""
         finally:
-            wtsapi32.WTSFreeMemory(username_buffer)
+            wtsapi32.WTSFreeMemory(username_buf)
 
     # 2. Query Connect State
     cstate_buf = ctypes.c_void_p()
@@ -531,6 +565,7 @@ class SystemAgent:
         self.previous_net = psutil.net_io_counters()
         self.previous_net_time = time.time()
         self._last_reconnect_attempt = 0.0
+        self._shutdown_detected = False
         self.load_state()
         self.setup_mqtt_client()
 
@@ -1395,15 +1430,29 @@ class SystemAgent:
 
                 def wndproc(hwnd, msg, wparam, lparam):
                     if msg in (win32con.WM_QUERYENDSESSION, win32con.WM_ENDSESSION):
-                        LOG.info("Windows shutdown/logoff detected in SystemAgent via WM_ENDSESSION (msg=0x%x)", msg)
+                        LOG.info("Windows shutdown/logoff detected in SystemAgent via WM_ENDSESSION (msg=0x%x, lparam=0x%x)", msg, lparam)
+                        self._shutdown_detected = True
                         self._turn_off_led_esp()
                         try:
-                            self.mqtt.publish(
+                            status_payload = {
+                                "state": "offline",
+                                "event": "graceful_shutdown",
+                                "reason": "windows_shutdown",
+                                "agent": "system",
+                                "session": "unknown",
+                                "ts": time.time(),
+                                "boot_id": self.boot_id,
+                            }
+                            pub_info = self.mqtt.publish(
                                 TOPIC_STATUS,
-                                json.dumps({"state": "offline", "agent": "system", "ts": time.time()}),
+                                json.dumps(status_payload, ensure_ascii=False),
                                 qos=1,
                                 retain=True,
                             )
+                            try:
+                                pub_info.wait_for_publish(timeout=1.5)
+                            except Exception:
+                                pass
                             time.sleep(0.3)
                         except Exception:
                             pass
@@ -1510,12 +1559,27 @@ class SystemAgent:
         finally:
             self._turn_off_led_esp()
             try:
-                self.mqtt.publish(
+                status_payload = {
+                    "state": "offline",
+                    "agent": "system",
+                    "session": "unknown",
+                    "ts": time.time(),
+                    "boot_id": self.boot_id,
+                }
+                if getattr(self, "_shutdown_detected", False):
+                    status_payload["event"] = "graceful_shutdown"
+                    status_payload["reason"] = "windows_shutdown"
+
+                pub_info = self.mqtt.publish(
                     TOPIC_STATUS,
-                    json.dumps({"state": "offline", "agent": "system", "ts": time.time()}),
+                    json.dumps(status_payload, ensure_ascii=False),
                     qos=1,
                     retain=True,
                 )
+                try:
+                    pub_info.wait_for_publish(timeout=1.5)
+                except Exception:
+                    pass
                 time.sleep(0.2)
             except Exception:
                 pass
@@ -1541,7 +1605,15 @@ def main():
     try:
         agent.run()
     finally:
-        ctypes.windll.kernel32.ReleaseMutex(mutex)
+        if mutex:
+            try:
+                ctypes.windll.kernel32.ReleaseMutex(mutex)
+            except Exception:
+                pass
+            try:
+                ctypes.windll.kernel32.CloseHandle(mutex)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
