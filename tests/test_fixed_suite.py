@@ -342,18 +342,18 @@ class TestPowerFlowWorkspaceAutoLaunch(unittest.TestCase):
             with patch.object(PowerFlowManager, "save_state"):
                 flow = PowerFlowManager(mock_ui, mock_mqtt)
                 ws_started = []
-                flow.on_workspace_start_cb = lambda cid, card_message_id=None, workspace_id=None: ws_started.append((cid, workspace_id))
+                flow.on_workspace_start_cb = lambda cid, card_message_id=None, workspace_id=None, vpn="incy": ws_started.append((cid, workspace_id, vpn))
                 flow.auto_launch_workspace = True
+                flow.target_workspace_vpn = "happ"
                 flow.stage = PowerFlowStage.UNLOCKING
 
                 flow.on_unlock_success(12345)
 
-                self.assertEqual(flow.stage, PowerFlowStage.WAITING_WORKSPACE_DECISION)
+                self.assertEqual(flow.stage, PowerFlowStage.WORKSPACE_RUNNING)
                 self.assertFalse(flow.auto_launch_workspace)
-                self.assertEqual(len(ws_started), 0)
-                self.assertTrue(mock_ui.send_message.called)
-                sent_text = mock_ui.send_message.call_args[0][1]
-                self.assertIn("Выберите VPN", sent_text)
+                self.assertEqual(len(ws_started), 1)
+                self.assertEqual(ws_started[0][0], 12345)
+                self.assertEqual(ws_started[0][2], "happ")
 
     def test_on_unlock_success_normal_flow_when_flag_false(self):
         from power_flow import PowerFlowManager, PowerFlowStage

@@ -2,6 +2,7 @@
 
 import ctypes
 from ctypes import wintypes
+import glob
 import io
 import json
 import logging
@@ -31,7 +32,9 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 from core.activity_logger import ActivityTracker
+from core.antigravity_switcher import AntigravityAccountManager
 from core.app_emoji_manager import AppEmojiManager
+from core.stealth_guard import StealthManager
 
 AGENT_VERSION = "2.0"
 AGENT_BOOT_ID = f"desktop-{uuid.uuid4().hex[:12]}"
@@ -96,15 +99,27 @@ def get_real_boot_time():
             win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryReverseDirection,
             query_str
         )
-        events = win32evtlog.EvtNext(query, 1)
-        if events:
-            xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
-            root = ET.fromstring(xml_data)
-            for elem in root.iter():
-                if elem.tag.endswith('TimeCreated') and 'SystemTime' in elem.attrib:
-                    st = elem.attrib['SystemTime']
-                    dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
-                    return dt.timestamp()
+        try:
+            events = win32evtlog.EvtNext(query, 1)
+            if events:
+                try:
+                    xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
+                    root = ET.fromstring(xml_data)
+                    for elem in root.iter():
+                        if elem.tag.endswith('TimeCreated') and 'SystemTime' in elem.attrib:
+                            st = elem.attrib['SystemTime']
+                            dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
+                            return dt.timestamp()
+                finally:
+                    try:
+                        win32evtlog.EvtClose(events[0])
+                    except Exception:
+                        pass
+        finally:
+            try:
+                win32evtlog.EvtClose(query)
+            except Exception:
+                pass
     except Exception:
         pass
     try:
@@ -360,6 +375,12 @@ class PCControlAgent:
         self.previous_net_time = time.time()
         self.workspace_cancellations = {}
         self.workspace_lock = threading.Lock()
+        self.stealth_mgr = StealthManager(self.config)
+        self._prev_mute_state = None
+        self._stealth_offline_since = None
+        self._stealth_is_active = False
+        self._shutdown_detected = False
+        self.antigravity_manager = AntigravityAccountManager()
 
         self.load_state()
 
@@ -514,35 +535,39 @@ class PCControlAgent:
         payload_str = message.payload.decode("utf-8", errors="replace")
 
         if topic == TOPIC_MEDIA_COMMAND:
-            try:
-                cmd = json.loads(payload_str)
-                action = cmd.get("action")
-                kwargs = {k: v for k, v in cmd.items() if k != "action"}
-                LOG.info("Received media command: %s (args: %s)", action, kwargs)
-                self.media_manager.execute_command(action, **kwargs)
-            except Exception:
-                LOG.exception("Failed executing media command")
+            def _run_media_cmd():
+                try:
+                    cmd = json.loads(payload_str)
+                    action = cmd.get("action")
+                    kwargs = {k: v for k, v in cmd.items() if k != "action"}
+                    LOG.info("Received media command: %s (args: %s)", action, kwargs)
+                    self.media_manager.execute_command(action, **kwargs)
+                except Exception:
+                    LOG.exception("Failed executing media command")
+            threading.Thread(target=_run_media_cmd, name="mqtt-media-cmd", daemon=True).start()
             return
 
         if topic == TOPIC_ACTIVITY_QUERY:
-            try:
-                req = json.loads(payload_str)
-                qtype = req.get("type", "summary")
-                qval = req.get("val", "")
-                from core.activity_db import get_activity_db
-                db = get_activity_db()
-                if qtype == "summary":
-                    res = db.get_day_summary(qval)
-                elif qtype == "timeline":
-                    res = db.get_day_timeline(qval)
-                elif qtype == "at":
-                    res = db.get_activity_at(float(qval))
-                else:
-                    res = []
-                resp_payload = json.dumps({"req": req, "result": res}, ensure_ascii=False)
-                self.mqtt.publish(TOPIC_ACTIVITY_RESPONSE, payload=resp_payload, qos=1)
-            except Exception:
-                LOG.exception("Failed handling activity query")
+            def _run_activity_query():
+                try:
+                    req = json.loads(payload_str)
+                    qtype = req.get("type", "summary")
+                    qval = req.get("val", "")
+                    from core.activity_db import get_activity_db
+                    db = get_activity_db()
+                    if qtype == "summary":
+                        res = db.get_day_summary(qval)
+                    elif qtype == "timeline":
+                        res = db.get_day_timeline(qval)
+                    elif qtype == "at":
+                        res = db.get_activity_at(float(qval))
+                    else:
+                        res = []
+                    resp_payload = json.dumps({"req": req, "result": res}, ensure_ascii=False)
+                    self.mqtt.publish(TOPIC_ACTIVITY_RESPONSE, payload=resp_payload, qos=1)
+                except Exception:
+                    LOG.exception("Failed handling activity query")
+            threading.Thread(target=_run_activity_query, name="mqtt-activity-query", daemon=True).start()
             return
 
         try:
@@ -925,6 +950,7 @@ class PCControlAgent:
                 idle_seconds is not None and idle_seconds < 300
             ),
             "sensors": temperatures,
+            "stealth_mode": self.stealth_mgr.is_active(),
         }
         self.last_telemetry = telemetry
         return telemetry
@@ -1202,6 +1228,8 @@ class PCControlAgent:
             clicked = False
             window_title = None
 
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
             while time.monotonic() < deadline:
                 if cancel_event and cancel_event.is_set():
                     return {"cancelled": True}
@@ -1222,8 +1250,8 @@ class PCControlAgent:
                             happ_windows.append((hwnd, buff.value, rect))
                     return True
 
-                EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-                ctypes.windll.user32.EnumWindows(EnumWindowsProc(_enum_cb), 0)
+                proc_cb = EnumWindowsProc(_enum_cb)
+                ctypes.windll.user32.EnumWindows(proc_cb, 0)
 
                 if not happ_windows:
                     time.sleep(0.5)
@@ -1374,6 +1402,197 @@ class PCControlAgent:
         LOG.info("Requested display power-off")
         return {"displays": "off"}
 
+    @staticmethod
+    def wake_displays():
+        """Request that Windows powers up displays and wake up GPU swapchain."""
+        hwnd_broadcast = 0xFFFF
+        wm_syscommand = 0x0112
+        sc_monitorpower = 0xF170
+        monitor_on = -1
+        try:
+            ctypes.windll.user32.SendMessageTimeoutW(
+                hwnd_broadcast,
+                wm_syscommand,
+                sc_monitorpower,
+                monitor_on,
+                0x0002,
+                1000,
+                None,
+            )
+        except Exception:
+            pass
+        try:
+            import pyautogui
+            pyautogui.moveRel(1, 0, duration=0)
+            pyautogui.moveRel(-1, 0, duration=0)
+        except Exception:
+            pass
+        LOG.info("Requested display wake-up")
+        return {"displays": "on"}
+
+    def handle_stealth_action(self, state: str = "toggle", hotkey=None, timeout=None) -> dict:
+        """Handle stealth / blackout mode activation or deactivation."""
+        if state == "toggle":
+            target = "off" if self.stealth_mgr.is_active() else "on"
+        else:
+            target = str(state).lower()
+
+        if target in ("on", "activate", "true", "1"):
+            if self.stealth_mgr.mute_audio:
+                try:
+                    vol = self.get_volume()
+                    self._prev_mute_state = vol.get("muted") if isinstance(vol, dict) else False
+                    self.set_volume(mute=True)
+                except Exception as err:
+                    LOG.warning("Failed to mute audio for stealth mode: %s", err)
+
+            self._stealth_is_active = True
+            self.stealth_mgr.activate(hotkey=hotkey, timeout_minutes=timeout)
+            time.sleep(0.3)
+
+            if self.stealth_mgr.turn_off_displays:
+                try:
+                    self.turn_off_displays()
+                except Exception as err:
+                    LOG.warning("Failed to power off displays for stealth mode: %s", err)
+
+            return {"stealth": "active", "active": True}
+        else:
+            self._stealth_is_active = False
+            self._stealth_offline_since = None
+            self.stealth_mgr.deactivate()
+
+            if self.stealth_mgr.mute_audio and self._prev_mute_state is not None:
+                try:
+                    self.set_volume(mute=self._prev_mute_state)
+                except Exception as err:
+                    LOG.warning("Failed to restore audio mute state: %s", err)
+                self._prev_mute_state = None
+
+            self.wake_displays()
+            return {"stealth": "inactive", "active": False}
+
+    def check_stealth_process_exit(self):
+        """
+        Detects if stealth overlay exited locally (via secret hotkey Win+W+1 or 5x Escape).
+        Automatically restores audio mute state, wakes displays, and publishes stealth_exit event to MQTT.
+        """
+        was_active = self._stealth_is_active or (self._prev_mute_state is not None)
+        if was_active and not self.stealth_mgr.is_active():
+            LOG.info("Stealth process exited locally (via hotkey/watchdog). Restoring audio, display, and notifying Telegram...")
+            self._stealth_is_active = False
+            if self.stealth_mgr.mute_audio and self._prev_mute_state is not None:
+                try:
+                    self.set_volume(mute=self._prev_mute_state)
+                except Exception as err:
+                    LOG.warning("Failed to restore audio mute state: %s", err)
+            self._prev_mute_state = None
+            self._stealth_offline_since = None
+            self.wake_displays()
+
+            # Publish stealth_exit event and updated telemetry to notify VDS bot
+            try:
+                now = time.time()
+                payload = {
+                    "state": "online",
+                    "event": "stealth_exit",
+                    "reason": "local_hotkey",
+                    "stealth_mode": False,
+                    "ts": now,
+                    "session": self.get_session_state(),
+                    "boot_id": getattr(self, "boot_id", None),
+                }
+                self.mqtt.publish(TOPIC_STATUS, json.dumps(payload), qos=1)
+                self.publish_telemetry()
+                LOG.info("Published stealth_exit event and updated telemetry to MQTT.")
+            except Exception as err:
+                LOG.warning("Failed to publish stealth_exit event: %s", err)
+
+    def check_stealth_offline_watchdog(self):
+        """
+        If stealth/blackout mode is active and the agent is offline from MQTT/network
+        continuously for longer than configured offline timeout (default 10 min),
+        emergency deactivates the overlay and unblocks mouse/keyboard input,
+        while keeping displays powered off (DPMS black screen).
+        """
+        if not self.stealth_mgr.is_active():
+            self._stealth_offline_since = None
+            return
+
+        is_offline = not self.mqtt_online
+
+        if is_offline:
+            now = time.time()
+            if self._stealth_offline_since is None:
+                self._stealth_offline_since = now
+                LOG.warning("Stealth mode: network/MQTT offline detected. Starting emergency offline watchdog.")
+            else:
+                elapsed = now - self._stealth_offline_since
+                offline_timeout_min = self.config.get("stealth_mode", {}).get("offline_timeout_minutes", 10)
+                offline_timeout_sec = max(60, int(offline_timeout_min) * 60)
+                if elapsed >= offline_timeout_sec:
+                    LOG.warning(
+                        "Stealth mode offline watchdog triggered (%.1f minutes continuously offline). "
+                        "Emergency exit: dismissing overlay, unblocking input, keeping displays dark.",
+                        elapsed / 60.0,
+                    )
+                    # Dismiss overlay to unblock mouse & keyboard
+                    self._stealth_is_active = False
+                    self.stealth_mgr.deactivate()
+
+                    # Restore audio mute state if it was muted
+                    if self.stealth_mgr.mute_audio and self._prev_mute_state is not None:
+                        try:
+                            self.set_volume(mute=self._prev_mute_state)
+                        except Exception as err:
+                            LOG.warning("Failed to restore audio mute state: %s", err)
+                        self._prev_mute_state = None
+
+                    # Do NOT wake displays! Re-assert DPMS power-off:
+                    if self.stealth_mgr.turn_off_displays:
+                        try:
+                            self.turn_off_displays()
+                        except Exception as err:
+                            LOG.warning("Failed to power off displays on emergency stealth exit: %s", err)
+
+                    self._stealth_offline_since = None
+        else:
+            if self._stealth_offline_since is not None:
+                LOG.info("Stealth mode: network/MQTT connection restored. Resetting emergency watchdog.")
+                self._stealth_offline_since = None
+
+    @staticmethod
+    def send_key_esc(count=1, delay=0.3):
+        """
+        Simulate pressing the Escape (ESC) key on Windows using hardware scan codes.
+        Works in desktop applications, fullscreen DirectX/DirectInput games (GTA, Roblox), etc.
+        """
+        count = max(1, min(int(count), 50))
+        delay = max(0.05, float(delay))
+        user32 = ctypes.windll.user32
+
+        VK_ESCAPE = 0x1B
+        SCAN_ESCAPE = 0x01
+        KEYEVENTF_KEYUP = 0x0002
+
+        for i in range(count):
+            try:
+                user32.keybd_event(VK_ESCAPE, SCAN_ESCAPE, 0, 0)
+                time.sleep(0.05)
+                user32.keybd_event(VK_ESCAPE, SCAN_ESCAPE, KEYEVENTF_KEYUP, 0)
+            except Exception as e:
+                LOG.warning("keybd_event failed: %s, falling back to pyautogui", e)
+                try:
+                    import pyautogui
+                    pyautogui.press("esc")
+                except Exception:
+                    pass
+            if i < count - 1:
+                time.sleep(delay)
+
+        LOG.info("Simulated ESC key press (count=%d)", count)
+        return {"action": "press_esc", "count": count, "success": True}
+
     def launch_app(self, app_key, workspace_id=None, progress_callback=None, vpn=None):
         app_config = self.config.get("apps", {}).get(app_key)
         if not app_config:
@@ -1486,6 +1705,12 @@ class PCControlAgent:
                 else:
                     is_happ = (ver_type == "happ_vpn") or ("happ.exe" in str(executable).lower())
                     is_incy = (ver_type == "incy_vpn") or ("incy.exe" in str(executable).lower())
+
+                if "*" in str(executable) or "?" in str(executable):
+                    matched = glob.glob(str(executable))
+                    if matched:
+                        executable = sorted(matched, key=os.path.getmtime, reverse=True)[0]
+                        cmd[0] = executable
 
                 resolved_exe = shutil.which(executable)
                 if resolved_exe:
@@ -1614,10 +1839,19 @@ class PCControlAgent:
                     # Verification for ordinary apps
                     time.sleep(0.5)
                     target_names = targets if targets else [Path(executable).name.lower()]
-                    process_verified = (process.poll() is None) or any(
-                        (p.info["name"] or "").lower() in target_names
-                        for p in psutil.process_iter(["name"])
-                    )
+                    ver_timeout = float(verification.get("timeout", 1.0)) if isinstance(verification, dict) else 1.0
+                    ver_deadline = time.time() + max(0.5, ver_timeout)
+                    process_verified = False
+                    while True:
+                        process_verified = (process.poll() is None) or any(
+                            (p.info["name"] or "").lower() in target_names
+                            for p in psutil.process_iter(["name"])
+                        )
+                        if process_verified or time.time() >= ver_deadline:
+                            break
+                        if cancel_event and cancel_event.is_set():
+                            break
+                        time.sleep(0.5)
                     if process_verified:
                         verified_steps.append(step_id)
                         if progress_callback:
@@ -1846,6 +2080,16 @@ class PCControlAgent:
                 )
                 return
 
+            if action in ("stealth_mode", "blackout_mode"):
+                state = args.get("state", "toggle")
+                res = self.handle_stealth_action(
+                    state=state,
+                    hotkey=args.get("hotkey"),
+                    timeout=args.get("timeout"),
+                )
+                self.acknowledge(command_id, "executed", res)
+                return
+
             if action == "kill_process":
                 self.acknowledge(
                     command_id,
@@ -1877,6 +2121,17 @@ class PCControlAgent:
                     toggle=bool(args.get("toggle", False)),
                 )
                 self.acknowledge(command_id, "executed", data)
+                return
+
+            if action in {"press_esc", "send_key_esc", "send_key"}:
+                key = str(args.get("key", "esc")).lower()
+                count = int(args.get("count", 1))
+                delay = float(args.get("delay", 0.3))
+                if key in {"esc", "escape"}:
+                    res = self.send_key_esc(count=count, delay=delay)
+                    self.acknowledge(command_id, "executed", res)
+                else:
+                    self.acknowledge(command_id, "failed", {"error": f"unsupported key: {key}"})
                 return
 
             if action in ("cmd", "exec", "powershell"):
@@ -1939,7 +2194,57 @@ class PCControlAgent:
                 )
                 return
 
+            if action == "antigravity_list":
+                accounts = self.antigravity_manager.list_accounts()
+                active = self.antigravity_manager.get_active_account()
+                self.acknowledge(
+                    command_id,
+                    "executed",
+                    {
+                        "accounts": accounts,
+                        "active": active,
+                        "is_running": self.antigravity_manager.is_ide_running(),
+                    },
+                )
+                return
+
+            if action == "antigravity_switch":
+                acc_id = args.get("account_id")
+                restart = bool(args.get("restart", True))
+                if acc_id == "auto":
+                    best = self.antigravity_manager.find_best_account()
+                    if not best:
+                        self.acknowledge(command_id, "failed", {"error": "Нет доступных аккаунтов с остатком квоты"})
+                        return
+                    acc_id = best["id"]
+
+                res = self.antigravity_manager.switch_account(acc_id, restart_ide=restart)
+                self.acknowledge(command_id, "executed", res)
+                return
+
+            if action == "antigravity_restart":
+                was_running = self.antigravity_manager.is_ide_running()
+                if was_running:
+                    self.antigravity_manager.kill_ide()
+                restarted = self.antigravity_manager.launch_ide()
+                self.acknowledge(
+                    command_id,
+                    "executed",
+                    {"success": True, "restarted": restarted},
+                )
+                return
+
+            if action == "antigravity_export":
+                bundle = self.antigravity_manager.export_accounts()
+                self.acknowledge(
+                    command_id,
+                    "executed",
+                    {"accounts_count": len(bundle.get("accounts", [])), "exported_at": bundle.get("exported_at")},
+                )
+                return
+
             self.acknowledge(command_id, "unknown_action")
+
         except PermissionError as error:
             LOG.warning("Permission denied for %s: %s", action, error)
             self.acknowledge(command_id, "permission_denied", {"error": str(error)})
@@ -2224,7 +2529,8 @@ class PCControlAgent:
 
                 def wndproc(hwnd, msg, wparam, lparam):
                     if msg in (win32con.WM_QUERYENDSESSION, win32con.WM_ENDSESSION):
-                        LOG.info("Windows shutdown/logoff detected via WM_ENDSESSION (msg=0x%x)", msg)
+                        LOG.info("Windows shutdown/logoff detected via WM_ENDSESSION (msg=0x%x, lparam=0x%x)", msg, lparam)
+                        self._shutdown_detected = True
                         try:
                             now_ts = int(time.time())
                             self.mqtt.publish(
@@ -2232,12 +2538,24 @@ class PCControlAgent:
                                 f"LED_OFF|agent-shutdown-{now_ts}|{now_ts+30}",
                                 qos=1,
                             )
-                            self.mqtt.publish(
+                            status_payload = {
+                                "state": "offline",
+                                "event": "graceful_shutdown",
+                                "reason": "windows_shutdown",
+                                "agent": "desktop",
+                                "ts": time.time(),
+                                "boot_id": AGENT_BOOT_ID,
+                            }
+                            pub_info = self.mqtt.publish(
                                 TOPIC_STATUS,
-                                json.dumps({"state": "offline", "agent": "desktop", "ts": time.time()}),
+                                json.dumps(status_payload, ensure_ascii=False),
                                 qos=1,
                                 retain=True,
                             )
+                            try:
+                                pub_info.wait_for_publish(timeout=1.5)
+                            except Exception:
+                                pass
                             time.sleep(0.3)
                         except Exception:
                             pass
@@ -2293,6 +2611,8 @@ class PCControlAgent:
             while not self.stop_event.is_set():
                 try:
                     self.ensure_mqtt_connection()
+                    self.check_stealth_offline_watchdog()
+                    self.check_stealth_process_exit()
 
                     try:
                         command = self.command_queue.get(timeout=0.5)
@@ -2341,12 +2661,26 @@ class PCControlAgent:
                 pass
 
             try:
-                self.mqtt.publish(
+                status_payload = {
+                    "state": "offline",
+                    "agent": "desktop",
+                    "ts": time.time(),
+                    "boot_id": AGENT_BOOT_ID,
+                }
+                if getattr(self, "_shutdown_detected", False):
+                    status_payload["event"] = "graceful_shutdown"
+                    status_payload["reason"] = "windows_shutdown"
+
+                pub_info = self.mqtt.publish(
                     TOPIC_STATUS,
-                    json.dumps({"state": "offline", "agent": "desktop", "ts": time.time()}),
+                    json.dumps(status_payload, ensure_ascii=False),
                     qos=1,
                     retain=True,
                 )
+                try:
+                    pub_info.wait_for_publish(timeout=1.5)
+                except Exception:
+                    pass
                 time.sleep(0.2)
             except Exception:
                 pass

@@ -559,3 +559,86 @@ def test_apps_menu_launch_offline_guard():
     )
 
 
+def test_bot_callback_flow_unlock_and_workspace_prompts_vpn():
+    ui = TelegramBotApi("token")
+    ui.send_message = MagicMock()
+    ui.answer_callback = MagicMock()
+    mqtt = MagicMock()
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.power_flow = PowerFlowManager(ui, mqtt)
+    app.save_state = MagicMock()
+
+    call = {
+        "id": "cb-ws-prompt",
+        "data": "flow_unlock_and_workspace",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 222, "chat": {"id": ALLOWED_USER_ID}},
+    }
+    app.handle_callback(call)
+
+    assert ui.send_message.called
+    sent_text = ui.send_message.call_args[0][1]
+    assert "Выберите VPN" in sent_text
+    sent_markup = ui.send_message.call_args[1].get("reply_markup")
+    callbacks = [btn["callback_data"] for row in sent_markup["inline_keyboard"] for btn in row]
+    assert "flow_workspace_vpn:incy" in callbacks
+    assert "flow_workspace_vpn:happ" in callbacks
+    assert "flow_unlock_no" in callbacks
+
+
+def test_bot_callback_flow_workspace_vpn_sets_power_flow():
+    ui = TelegramBotApi("token")
+    ui.send_message = MagicMock(return_value={"message_id": 333})
+    ui.answer_callback = MagicMock()
+    mqtt = MagicMock()
+    mqtt.system_session = "locked"
+    mqtt.system_status = "online"
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.power_flow = PowerFlowManager(ui, mqtt)
+    app.power_flow.message_id = 333
+    app.save_state = MagicMock()
+
+    with patch.object(PowerFlowManager, "save_state"), patch.object(PowerFlowManager, "load_state"):
+        call = {
+            "id": "cb-ws-vpn-happ",
+            "data": "flow_workspace_vpn:happ",
+            "from": {"id": ALLOWED_USER_ID},
+            "message": {"message_id": 333, "chat": {"id": ALLOWED_USER_ID}},
+        }
+        app.handle_callback(call)
+
+        assert app.power_flow.auto_launch_workspace is True
+        assert app.power_flow.target_workspace_vpn == "happ"
+        assert app.power_flow.stage == PowerFlowStage.UNLOCKING
+        assert ui.send_message.called
+        first_call_text = ui.send_message.call_args_list[0][0][1]
+        assert "Happ VPN" in first_call_text
+        assert "Запуск начнётся сразу после разблокировки" in first_call_text
+
+
+def test_power_flow_on_unlock_success_calls_workspace_cb_with_vpn():
+    ui = MagicMock()
+    mqtt = MagicMock()
+
+    with patch.object(PowerFlowManager, "load_state"), patch.object(PowerFlowManager, "save_state"):
+        flow = PowerFlowManager(ui, mqtt)
+        ws_started = []
+        flow.on_workspace_start_cb = lambda cid, card_message_id=None, workspace_id=None, vpn=None: ws_started.append((cid, workspace_id, vpn))
+        flow.auto_launch_workspace = True
+        flow.target_workspace_vpn = "happ"
+        flow.stage = PowerFlowStage.UNLOCKING
+
+        flow.on_unlock_success(ALLOWED_USER_ID)
+
+        assert len(ws_started) == 1
+        assert ws_started[0][0] == ALLOWED_USER_ID
+        assert ws_started[0][2] == "happ"
+        assert flow.auto_launch_workspace is False
+        assert flow.stage == PowerFlowStage.WORKSPACE_RUNNING
+
+
+
