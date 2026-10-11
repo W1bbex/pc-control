@@ -37,4 +37,8 @@ env/
 scratch/
 AUDIT_REPORT*.md
 CRITIQUE_REPORT*.md
+.repowise/
+web_review/
+extracted_unlock.png
+vds_bot_flowmap.html
 
