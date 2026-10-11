@@ -24,6 +24,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 import time
 import zipfile
 
@@ -79,6 +80,15 @@ VDS_MANIFEST_FILES = [
     "requirements.txt",
     "pc-control-bot.env.example",
     "pc-control-bot.service",
+    "resources/icons.json",
+    "routers/__init__.py",
+    "routers/command_router.py",
+    "routers/console_router.py",
+    "routers/monitoring_router.py",
+    "routers/physical_router.py",
+    "routers/player_router.py",
+    "routers/power_router.py",
+    "routers/workspace_router.py",
 ]
 
 MAX_BACKUP_RETENTION = 12  # Keep last 12 weekly archives
@@ -130,11 +140,15 @@ def collect_local_code_files(base_path: Path) -> list[Path]:
 
 def run_ssh_command(cmd: str, timeout: int = 15) -> tuple[int, str, str]:
     try:
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", VDS_HOST, cmd],
             capture_output=True,
             text=False,
             timeout=timeout,
+            **kwargs,
         )
         stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
         stderr = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
@@ -144,16 +158,43 @@ def run_ssh_command(cmd: str, timeout: int = 15) -> tuple[int, str, str]:
 
 
 def collect_vds_code_files(logger: logging.Logger) -> dict[str, bytes]:
-    logger.info("Connecting to VDS (%s) to fetch live production code...", VDS_HOST)
+    logger.info("Connecting to VDS (%s) to fetch live production code in single batch...", VDS_HOST)
     vds_files: dict[str, bytes] = {}
 
-    for fn in VDS_MANIFEST_FILES:
-        code, stdout, stderr = run_ssh_command(f"cat {REMOTE_VDS_DIR}/{fn} 2>/dev/null", timeout=10)
-        if code == 0 and stdout:
-            vds_files[fn] = stdout.encode("utf-8")
-            logger.debug("Fetched remote %s (%d bytes)", fn, len(stdout))
-        else:
-            logger.debug("Remote file %s not present or empty on VDS", fn)
+    # 1. Batch fetch via single SSH command and compressed tar stream
+    try:
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        file_args = " ".join(VDS_MANIFEST_FILES)
+        remote_cmd = f"tar --ignore-failed-read -czf - -C {REMOTE_VDS_DIR} {file_args} 2>/dev/null"
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", VDS_HOST, remote_cmd],
+            capture_output=True,
+            timeout=20,
+            **kwargs,
+        )
+        if proc.returncode in (0, 2) and proc.stdout:
+            with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:gz") as tar:
+                for member in tar.getmembers():
+                    if member.isfile():
+                        f = tar.extractfile(member)
+                        if f:
+                            clean_name = member.name.lstrip("./")
+                            vds_files[clean_name] = f.read()
+                            logger.debug("Fetched remote %s (%d bytes)", clean_name, len(vds_files[clean_name]))
+    except Exception as e:
+        logger.warning("Single-batch fetch failed: %s. Falling back to per-file fetch...", e)
+
+    # 2. Fallback if single batch returned no files
+    if not vds_files:
+        for fn in VDS_MANIFEST_FILES:
+            code, stdout, stderr = run_ssh_command(f"cat {REMOTE_VDS_DIR}/{fn} 2>/dev/null", timeout=10)
+            if code == 0 and stdout:
+                vds_files[fn] = stdout.encode("utf-8")
+                logger.debug("Fetched remote %s (%d bytes)", fn, len(stdout))
+            else:
+                logger.debug("Remote file %s not present or empty on VDS", fn)
 
     logger.info("Fetched %d files from VDS production.", len(vds_files))
     return vds_files

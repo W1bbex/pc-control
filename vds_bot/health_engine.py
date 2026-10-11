@@ -116,22 +116,26 @@ class HealthEngine:
         }
         self.shutdown_observed_until = 0.0
         self.shutdown_observed_at = 0.0
+        self.graceful_shutdown_until = 0.0
+        self.graceful_shutdown_at = 0.0
+        self.graceful_shutdown_reason = ""
         
     def update(self, component, status, boot_id=None, ts=None, is_retained=False):
         if component in self.components:
             self.components[component].update(status, boot_id, ts, is_retained)
-            # An active online heartbeat cancels shutdown_observed ONLY IF
+            # An active online heartbeat cancels shutdown_observed and graceful_shutdown ONLY IF
             # it is strictly newer than the shutdown observation timestamp!
             if status in ("online", "unlocked", "locked", "fresh"):
                 msg_ts = ts if ts is not None else time.time()
                 if msg_ts > self.shutdown_observed_at:
                     self.clear_shutdown_observed()
+                if msg_ts > self.graceful_shutdown_at:
+                    self.clear_graceful_shutdown()
                 else:
                     LOG.info(
-                        "Ignored pre-shutdown heartbeat from %s (ts=%.2f <= shutdown_observed_at=%.2f)",
+                        "Ignored pre-shutdown heartbeat from %s (ts=%.2f <= shutdown_ts)",
                         component,
                         msg_ts,
-                        self.shutdown_observed_at,
                     )
             
     def get_status(self, component):
@@ -148,6 +152,28 @@ class HealthEngine:
             LOG.info("Clearing shutdown observed state")
             self.shutdown_observed_until = 0.0
             self.shutdown_observed_at = 0.0
+
+    def set_graceful_shutdown(self, ts=None, ttl=2592000.0, reason="windows_shutdown"):
+        now_ts = time.time() if ts is None else float(ts)
+        self.graceful_shutdown_at = now_ts
+        self.graceful_shutdown_until = now_ts + ttl
+        self.graceful_shutdown_reason = reason
+        if "windows_system" in self.components:
+            self.components["windows_system"].status = "offline"
+            self.components["windows_system"].last_ts = now_ts
+        if "windows_desktop" in self.components:
+            self.components["windows_desktop"].status = "offline"
+            self.components["windows_desktop"].last_ts = now_ts
+        if "windows_session" in self.components:
+            self.components["windows_session"].status = "unknown"
+        LOG.info("Graceful shutdown recorded at %.2f (reason=%s)", now_ts, reason)
+
+    def clear_graceful_shutdown(self):
+        if self.graceful_shutdown_until > 0.0:
+            LOG.info("Clearing graceful shutdown state")
+            self.graceful_shutdown_until = 0.0
+            self.graceful_shutdown_at = 0.0
+            self.graceful_shutdown_reason = ""
         
     def check_all_stale(self):
         changed = []
@@ -190,9 +216,13 @@ class HealthEngine:
                 mqtt_online=False,
             )
 
-        # 2. Check if SHUTDOWN_OBSERVED is active within TTL
-        if now < self.shutdown_observed_until:
-            if sys_status in ("offline", "unknown", "stale") and desk_status in ("offline", "unknown", "stale"):
+        # 2. Check if SHUTDOWN_OBSERVED or GRACEFUL_SHUTDOWN is active within TTL
+        is_both_offline = (
+            sys_status in ("offline", "unknown", "stale")
+            and desk_status in ("offline", "unknown", "stale")
+        )
+        if is_both_offline:
+            if now < self.shutdown_observed_until:
                 return PCStateInfo(
                     state=PCState.SHUTDOWN_OBSERVED,
                     label="🔴 Выключен (наблюдается)",
@@ -204,8 +234,23 @@ class HealthEngine:
                     esp_status=esp_status,
                     mqtt_online=True,
                 )
-            else:
-                self.clear_shutdown_observed()
+            if now < self.graceful_shutdown_until:
+                return PCStateInfo(
+                    state=PCState.SHUTDOWN_OBSERVED,
+                    label="🔴 Выключен (штатно)",
+                    reason="ПК штатно завершил работу через Windows",
+                    telemetry_age=telemetry_age,
+                    system_status=sys_status,
+                    desktop_status=desk_status,
+                    session_status=sess_status,
+                    esp_status=esp_status,
+                    mqtt_online=True,
+                )
+
+        if now < self.shutdown_observed_until and not is_both_offline:
+            self.clear_shutdown_observed()
+        if now < self.graceful_shutdown_until and not is_both_offline:
+            self.clear_graceful_shutdown()
 
         # 3. If system agent is online:
         if sys_status == "online":
@@ -224,6 +269,18 @@ class HealthEngine:
             elif sess_status == "unlocked":
                 telem_fresh = (telem_status == "fresh" and (telemetry_age is not None and telemetry_age <= 90.0))
                 if desk_status == "online" and telem_fresh:
+                    if esp_status in ("offline", "stale"):
+                        return PCStateInfo(
+                            state=PCState.DEGRADED,
+                            label="🟡 ESP недоступна",
+                            reason="Сеанс разблокирован, но модуль питания ESP8266 недоступен (отключен)",
+                            telemetry_age=telemetry_age,
+                            system_status=sys_status,
+                            desktop_status=desk_status,
+                            session_status=sess_status,
+                            esp_status=esp_status,
+                            mqtt_online=True,
+                        )
                     return PCStateInfo(
                         state=PCState.READY,
                         label="🟢 Готов к работе",
@@ -239,6 +296,8 @@ class HealthEngine:
                     reasons = []
                     if desk_status != "online":
                         reasons.append(f"desktop-агент {desk_status}")
+                    if esp_status in ("offline", "stale"):
+                        reasons.append(f"модуль ESP8266 {esp_status}")
                     if telemetry_age is None:
                         reasons.append("телеметрия ещё не получена")
                     elif telemetry_age > 90.0 or telem_status != "fresh":
@@ -273,10 +332,13 @@ class HealthEngine:
         telem_fresh = (telem_status == "fresh" and (telemetry_age is not None and telemetry_age <= 90.0))
         if desk_status == "online" or telem_fresh:
             effective_sess = "unlocked" if sess_status in ("unknown", "", None) else sess_status
+            reasons = [f"системный агент {sys_status}"]
+            if esp_status in ("offline", "stale"):
+                reasons.append(f"ESP8266 {esp_status}")
             return PCStateInfo(
                 state=PCState.DEGRADED,
                 label="🟡 Ограниченная работа",
-                reason=f"ПК включён (desktop: {desk_status}), но системный агент {sys_status}",
+                reason=f"ПК включён (desktop: {desk_status}), но " + ", ".join(reasons),
                 telemetry_age=telemetry_age,
                 system_status=sys_status,
                 desktop_status=desk_status,

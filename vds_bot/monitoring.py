@@ -33,6 +33,7 @@ EMOJI_OS_LINUX = ICONS.get("linux", "5332695978136874502")        # 🐧 Linux O
 EMOJI_SECTION_SESSION = ICONS.get("user", "5330478284658488376")  # 👤 Сессия
 EMOJI_STATUS_ACTIVE = ICONS.get("status_active", "5345809221961167372")    # 🟢 Зеленый пульсирующий круг
 EMOJI_STATUS_INACTIVE = ICONS.get("status_inactive", "5345825096160291312")  # 🔴 Красный пульсирующий круг
+EMOJI_STATUS_WARNING = ICONS.get("status_warning") or ICONS.get("pulse_yellow", "5359432244043754958")  # 🟡 Желтый пульсирующий круг
 EMOJI_DEFAULT_APP = ICONS.get("apps", "5346196795514989290")      # 🪟 Windows Explorer / Window icon
 EMOJI_PLAYER_PLAY = ICONS.get("play", "5330015871299527534")      # ▶️ Minimalist play
 EMOJI_PLAYER_PAUSE = ICONS.get("pause", "5330570905628222348")     # ⏸️ Minimalist pause
@@ -143,6 +144,10 @@ class MonitoringManager:
             return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">🔴</tg-emoji> Заблокирован', "н/д"
 
         desk_status = getattr(self.mqtt, "desktop_status", None)
+        esp_status = getattr(self.mqtt, "esp_status", None)
+        if esp_status is None and hasattr(self.mqtt, "health"):
+            esp_status = self.mqtt.health.get_status("esp")
+
         age = self.telemetry_age()
         is_desk_fresh = (age is not None and age <= 90.0)
         has_desk_activity = bool(telemetry and (telemetry.get("session_seconds") is not None or telemetry.get("active_application")))
@@ -151,13 +156,22 @@ class MonitoringManager:
             session in ("unknown", None, "") and (desk_status == "online" or (is_desk_fresh and has_desk_activity))
         )
 
+        is_esp_unavailable = (esp_status in ("offline", "stale"))
+
         if is_unlocked:
+            dur = telemetry.get("session_seconds") if telemetry else None
+            if is_esp_unavailable:
+                if telemetry and telemetry.get("user_active", False):
+                    status_icon = f'<tg-emoji emoji-id="{EMOJI_STATUS_WARNING}">🟡</tg-emoji> В сети (ESP недоступна)'
+                else:
+                    status_icon = f'<tg-emoji emoji-id="{EMOJI_STATUS_WARNING}">🟡</tg-emoji> В сети (AFK · ESP недоступна)'
+                return status_icon, format_duration(dur)
+
             if telemetry and telemetry.get("user_active", False):
                 status_icon = f'<tg-emoji emoji-id="{EMOJI_STATUS_ACTIVE}">🟢</tg-emoji> В сети'
             else:
                 clock_eid = ICONS.get("clock", "5330473500064912704")
                 status_icon = f'<tg-emoji emoji-id="{clock_eid}">🟡</tg-emoji> В сети (AFK)'
-            dur = telemetry.get("session_seconds") if telemetry else None
             return status_icon, format_duration(dur)
 
         return f'<tg-emoji emoji-id="{EMOJI_STATUS_INACTIVE}">🔴</tg-emoji> Офлайн', "н/д"
@@ -305,6 +319,16 @@ class MonitoringManager:
         elif age > 30:
             telemetry_note = f"\n\n<i>⚠️ Данные задерживаются ({format_duration(age)} назад).</i>"
 
+        esp_status = getattr(self.mqtt, "esp_status", None)
+        if esp_status is None and hasattr(self.mqtt, "health"):
+            esp_status = self.mqtt.health.get_status("esp")
+
+        if esp_status in ("offline", "stale"):
+            telemetry_note += (
+                f'\n\n<i><tg-emoji emoji-id="{EMOJI_STATUS_WARNING}">🟡</tg-emoji> '
+                f'<b>Модуль ESP8266 недоступен</b> — физическое управление питанием отключено.</i>'
+            )
+
         active_emoji_id = telemetry.get("active_application_emoji_id")
         if active_emoji_id:
             app_emoji = f'<tg-emoji emoji-id="{active_emoji_id}">🪟</tg-emoji>'
@@ -322,6 +346,7 @@ class MonitoringManager:
             m_liked = media_state.get("is_liked", False)
             icons = media_state.get("ui_icons") or {}
             play_eid = icons.get("tag_status_play") or EMOJI_PLAYER_PLAY
+            pause_eid = icons.get("tag_status_pause") or EMOJI_PLAYER_PAUSE
             heart_eid = icons.get("tag_heart_liked") or EMOJI_PLAYER_HEART
             if heart_eid == "5330276670303674347":
                 heart_eid = "5346267379007530615"

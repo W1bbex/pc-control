@@ -45,10 +45,19 @@ class PowerFlowManager:
         self.active_workspace_id = None
         self.workspace_cancelled = False
         self.auto_launch_workspace = False
+        self.auto_launch_game = False
+        self.target_game = None
+        self.target_game_vpn = None
+        self.target_workspace_vpn = None
         self.reboot_with_unlock = False
         self.reboot_started_at = 0.0
         self.reboot_offline_detected = False
         self.on_workspace_start_cb = None
+        self.on_game_start_cb = None
+        self.last_card_update_at = 0.0
+        self.win_online_at = None
+        self.logon_ready_at = None
+        self.unlocked_at = None
         self._lock = threading.Lock()
 
         self.load_state()
@@ -73,6 +82,10 @@ class PowerFlowManager:
             self.unlock_attempts = int(data.get("unlock_attempts", 0))
             self.active_workspace_id = data.get("active_workspace_id")
             self.auto_launch_workspace = bool(data.get("auto_launch_workspace", False))
+            self.auto_launch_game = bool(data.get("auto_launch_game", False))
+            self.target_game = data.get("target_game")
+            self.target_game_vpn = data.get("target_game_vpn")
+            self.target_workspace_vpn = data.get("target_workspace_vpn")
             self.reboot_with_unlock = bool(data.get("reboot_with_unlock", False))
             self.reboot_started_at = float(data.get("reboot_started_at", 0.0))
             self.reboot_offline_detected = bool(data.get("reboot_offline_detected", False))
@@ -117,6 +130,10 @@ class PowerFlowManager:
                     "unlock_attempts": int(self.unlock_attempts) if isinstance(self.unlock_attempts, (int, float)) else 0,
                     "active_workspace_id": str(self.active_workspace_id) if self.active_workspace_id else None,
                     "auto_launch_workspace": bool(self.auto_launch_workspace),
+                    "auto_launch_game": bool(self.auto_launch_game),
+                    "target_game": str(self.target_game) if self.target_game else None,
+                    "target_game_vpn": str(self.target_game_vpn) if self.target_game_vpn else None,
+                    "target_workspace_vpn": str(self.target_workspace_vpn) if getattr(self, "target_workspace_vpn", None) else None,
                     "reboot_with_unlock": bool(self.reboot_with_unlock),
                     "reboot_started_at": float(self.reboot_started_at) if isinstance(self.reboot_started_at, (int, float)) else 0.0,
                     "reboot_offline_detected": bool(self.reboot_offline_detected),
@@ -142,9 +159,17 @@ class PowerFlowManager:
         self.active_workspace_id = None
         self.workspace_cancelled = False
         self.auto_launch_workspace = False
+        self.auto_launch_game = False
+        self.target_game = None
+        self.target_game_vpn = None
+        self.target_workspace_vpn = None
         self.reboot_with_unlock = False
         self.reboot_started_at = 0.0
         self.reboot_offline_detected = False
+        self.last_card_update_at = 0.0
+        self.win_online_at = None
+        self.logon_ready_at = None
+        self.unlocked_at = None
         if FLOW_STATE_PATH.exists():
             try:
                 FLOW_STATE_PATH.unlink()
@@ -209,46 +234,100 @@ class PowerFlowManager:
         self.unlock_attempts = 0
         self.pending_unlock_command_id = None
         self.workspace_cancelled = False
+        self.last_card_update_at = self.created_at
+        self.win_online_at = None
+        self.logon_ready_at = None
+        self.unlocked_at = None
 
         # Send LED command via ESP
         self.mqtt.publish_esp_action("LED_ON")
 
-        text = (
-            "<b>ПК запускается...</b>\n\n"
-            "Сигнал включения отправлен.\n"
-            "Разблокировать Windows при появлении экрана входа?"
-        )
-        markup = {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "Разблок + Сетап",
-                        "style": "success",
-                        "icon_custom_emoji_id": ICONS.get("apps"),
-                        "callback_data": "flow_unlock_and_workspace",
-                    },
-                    {
-                        "text": "Только разблок",
-                        "style": "primary",
-                        "icon_custom_emoji_id": ICONS.get("lock"),
-                        "callback_data": "flow_unlock_yes",
-                    },
-                ],
-                [
-                    {
-                        "text": "Не сейчас",
-                        "style": "danger",
-                        "icon_custom_emoji_id": ICONS.get("cross"),
-                        "callback_data": "flow_unlock_no",
-                    },
-                ]
-            ]
-        }
-
-        res = self.ui.send_message(chat_id, text, reply_markup=markup)
-        if res and res.get("message_id"):
-            self.message_id = res["message_id"]
+        self._update_launch_card(force=True, is_initial=True)
         self.save_state()
+
+    def _get_target_mode_info(self):
+        if getattr(self, "auto_launch_workspace", False):
+            vpn = getattr(self, "target_workspace_vpn", None) or "incy"
+            vpn_label = "INCY VPN" if vpn == "incy" else "Happ VPN"
+            return "workspace", vpn_label, f"Сетап ({vpn_label})"
+        elif getattr(self, "auto_launch_game", False):
+            game = getattr(self, "target_game", None) or "Игра"
+            game_map = {
+                "gta5": "GTA 5 Legacy",
+                "roblox": "Roblox",
+                "gtasa": "GTA SA",
+            }
+            game_label = game_map.get(str(game).lower(), str(game))
+            vpn = getattr(self, "target_game_vpn", None) or "incy"
+            vpn_label = "INCY VPN" if vpn == "incy" else "Happ VPN"
+            return "game", f"{game_label} ({vpn_label})", f"Игра: {game_label}"
+        elif self.stage == PowerFlowStage.UNLOCKING:
+            return "unlock", None, "Разблок запланирован"
+        return None, None, None
+
+    def _update_launch_card(self, force=False, is_initial=False, chat_id=None):
+        if self.stage not in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
+            return
+        cid = chat_id or self.chat_id
+        if not cid:
+            return
+        self.chat_id = cid
+        mid = self.message_id
+
+        now = time.time()
+        if not force and not is_initial and (now - getattr(self, "last_card_update_at", 0.0) < 2.5):
+            return
+
+        elapsed = max(0, int(now - getattr(self, "created_at", now)))
+        is_delayed = elapsed >= 60
+
+        target_mode, target_detail, target_label = self._get_target_mode_info()
+
+        created = getattr(self, "created_at", now)
+        win_elapsed = (int(self.win_online_at - created) if getattr(self, "win_online_at", None) else None)
+        logon_elapsed = (int(self.logon_ready_at - created) if getattr(self, "logon_ready_at", None) else None)
+        unlocked_elapsed = (int(self.unlocked_at - created) if getattr(self, "unlocked_at", None) else None)
+
+        sys_status = getattr(self.mqtt, "system_status", "offline")
+        sys_session = getattr(self.mqtt, "system_session", "unknown")
+
+        if hasattr(self.ui, "launch_card_text") and hasattr(self.ui, "launch_card_markup"):
+            text = self.ui.launch_card_text(
+                stage=self.stage,
+                elapsed_seconds=elapsed,
+                session_status=sys_session,
+                system_status=sys_status,
+                target_mode=target_mode,
+                target_detail=target_detail,
+                unlock_attempts=self.unlock_attempts,
+                win_online_elapsed=win_elapsed,
+                logon_ready_elapsed=logon_elapsed,
+                unlocked_elapsed=unlocked_elapsed,
+                is_delayed=is_delayed,
+            )
+            markup = self.ui.launch_card_markup(
+                stage=self.stage,
+                target_mode=target_mode,
+                target_label=target_label,
+                show_emergency=is_delayed,
+            )
+        else:
+            text = "<b>ПК запускается...</b>"
+            markup = self._get_unlocking_markup()
+
+        self.last_card_update_at = now
+        res = self.ui.send_message(cid, text, reply_markup=markup, message_id=mid)
+        if res and res.get("message_id") and not mid:
+            self.message_id = res["message_id"]
+            self.save_state()
+
+    def tick(self, now=None):
+        now = time.time() if now is None else float(now)
+        if self.check_timeout(now):
+            return True
+        if self.stage in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
+            self._update_launch_card(force=False)
+        return False
 
     def handle_unlock_decision(self, choice, chat_id):
         if choice == "flow_unlock_no":
@@ -261,36 +340,46 @@ class PowerFlowManager:
             self.reset_flow()
             return
 
-        if choice in {"flow_unlock_yes", "flow_unlock_and_workspace"}:
+        if choice in {"flow_unlock_yes", "flow_unlock_and_workspace", "flow_unlock_and_game"}:
             self.stage = PowerFlowStage.UNLOCKING
             self.pending_unlock_command_id = None
             if choice == "flow_unlock_and_workspace":
                 self.auto_launch_workspace = True
+                self.auto_launch_game = False
+                if not getattr(self, "target_workspace_vpn", None):
+                    self.target_workspace_vpn = "incy"
+            elif choice == "flow_unlock_and_game":
+                self.auto_launch_game = True
+                self.auto_launch_workspace = False
+            elif choice == "flow_unlock_yes":
+                self.auto_launch_workspace = False
+                self.auto_launch_game = False
+            if chat_id:
+                self.chat_id = chat_id
             self.save_state()
-            if getattr(self, "auto_launch_workspace", False):
-                text = (
-                    "<b>Ожидаю экран входа Windows...</b>\n\n"
-                    "<i>Режим 'Разблок + Сетап': выбор VPN появится сразу после разблокировки.</i>"
-                )
-            else:
-                text = (
-                    "<b>Ожидаю экран входа Windows...</b>\n\n"
-                    "Как только система сообщит о готовности к вводу, будет передан пароль."
-                )
-            markup = self._get_unlocking_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
-            
-            # Check if system session is ready to unlock
+            self._update_launch_card(force=True, chat_id=chat_id)
             self.check_and_trigger_unlock(chat_id)
 
     def _get_unlocking_markup(self):
         check_icon = ICONS.get("check")
         apps_icon = ICONS.get("apps")
+        game_icon = ICONS.get("game")
         cross_icon = ICONS.get("cross")
 
         cancel_btn = {"text": "Отмена", "style": "danger", "callback_data": "flow_unlock_no"}
         if cross_icon:
             cancel_btn["icon_custom_emoji_id"] = cross_icon
+
+        if getattr(self, "auto_launch_game", False):
+            sched_btn = {"text": "Игра запланирована", "style": "success", "callback_data": "noop"}
+            if game_icon or check_icon:
+                sched_btn["icon_custom_emoji_id"] = game_icon or check_icon
+            return {
+                "inline_keyboard": [
+                    [sched_btn],
+                    [cancel_btn],
+                ]
+            }
 
         if getattr(self, "auto_launch_workspace", False):
             sched_btn = {"text": "Сетап запланирован", "style": "success", "callback_data": "noop"}
@@ -313,8 +402,43 @@ class PowerFlowManager:
             ]
         }
 
-    def set_auto_launch_workspace(self, enable=True):
+    def set_auto_launch_workspace(self, enable=True, vpn="incy", chat_id=None):
         self.auto_launch_workspace = bool(enable)
+        if enable:
+            self.auto_launch_game = False
+            self.target_workspace_vpn = str(vpn)
+            self.stage = PowerFlowStage.UNLOCKING
+            self.pending_unlock_command_id = None
+            self.save_state()
+
+            vpn_label = "INCY VPN" if vpn == "incy" else "Happ VPN"
+            text = (
+                "<b>Ожидаю экран входа Windows...</b>\n\n"
+                f"<i>Режим 'Разблок + Сетап' ({vpn_label}).\n"
+                "Запуск начнётся сразу после разблокировки.</i>"
+            )
+            markup = self._get_unlocking_markup()
+            cid = chat_id or self.chat_id
+            if cid:
+                self._update_launch_card(force=True)
+                self.check_and_trigger_unlock(cid)
+        self.save_state()
+
+    def set_auto_launch_game(self, game="gta5", vpn="incy", chat_id=None):
+        self.auto_launch_game = True
+        self.auto_launch_workspace = False
+        self.target_game = str(game)
+        self.target_game_vpn = str(vpn)
+        self.stage = PowerFlowStage.UNLOCKING
+        self.pending_unlock_command_id = None
+        if chat_id:
+            self.chat_id = chat_id
+        self.save_state()
+
+        cid = chat_id or self.chat_id
+        if cid:
+            self._update_launch_card(force=True, chat_id=cid)
+            self.check_and_trigger_unlock(cid)
         self.save_state()
 
     def start_reboot_flow(self, chat_id, message_id=None, unlock=True):
@@ -433,11 +557,7 @@ class PowerFlowManager:
 
             self.unlock_attempts += 1
             self.save_state()
-            text = (
-                f"<b>🔐 Ввожу пароль Windows... (попытка {self.unlock_attempts}/2)</b>\n\n"
-                "Ожидаю подтверждения разблокировки от системы."
-            )
-            self.ui.send_message(chat_id, text, reply_markup=self._get_unlocking_markup(), message_id=self.message_id)
+            self._update_launch_card(force=True)
 
             # Send unlock command to boot_agent.py
             cmd_id = self.mqtt.publish_system_action("unlock")
@@ -475,6 +595,18 @@ class PowerFlowManager:
         desktop-agent online status is NEVER used as proof of session unlock.
         """
         LOG.info("on_system_session_update: session=%s, stage=%s, pending_cmd=%s, attempts=%d", session, self.stage, self.pending_unlock_command_id, self.unlock_attempts)
+        now = time.time()
+        sys_status = getattr(self.mqtt, "system_status", "unknown")
+        if sys_status == "online" and not getattr(self, "win_online_at", None):
+            self.win_online_at = now
+        if session in {"login_screen", "locked", "unlocked"} and not getattr(self, "logon_ready_at", None):
+            self.logon_ready_at = now
+        if session == "unlocked" and not getattr(self, "unlocked_at", None):
+            self.unlocked_at = now
+
+        if self.stage == PowerFlowStage.POWERING_ON:
+            self._update_launch_card(force=True)
+
         if self.stage == PowerFlowStage.REBOOTING:
             now = time.time()
             sys_status = self.mqtt.system_status
@@ -546,6 +678,48 @@ class PowerFlowManager:
                 self.on_unlock_success(chat_id, manual=True)
 
     def on_unlock_success(self, chat_id, manual=False):
+        if getattr(self, "auto_launch_game", False) and getattr(self, "target_game", None):
+            game_key = self.target_game
+            vpn_key = getattr(self, "target_game_vpn", None) or "incy"
+            self.auto_launch_game = False
+            self.stage = PowerFlowStage.WORKSPACE_RUNNING
+            self.save_state()
+            if self.on_game_start_cb:
+                self.on_game_start_cb(chat_id, card_message_id=self.message_id, game=game_key, vpn=vpn_key)
+                return
+
+        if getattr(self, "auto_launch_workspace", False):
+            vpn_key = getattr(self, "target_workspace_vpn", None) or "incy"
+            self.auto_launch_workspace = False
+            self.stage = PowerFlowStage.WORKSPACE_RUNNING
+            self.workspace_cancelled = False
+            self.active_workspace_id = f"ws-{int(time.time())}"
+            self.save_state()
+            if self.on_workspace_start_cb:
+                try:
+                    import inspect
+                    sig = inspect.signature(self.on_workspace_start_cb)
+                    if "vpn" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+                        self.on_workspace_start_cb(
+                            chat_id,
+                            card_message_id=self.message_id,
+                            workspace_id=self.active_workspace_id,
+                            vpn=vpn_key,
+                        )
+                    else:
+                        self.on_workspace_start_cb(
+                            chat_id,
+                            card_message_id=self.message_id,
+                            workspace_id=self.active_workspace_id,
+                        )
+                except Exception:
+                    self.on_workspace_start_cb(
+                        chat_id,
+                        card_message_id=self.message_id,
+                        workspace_id=self.active_workspace_id,
+                    )
+                return
+
         status_title = "<b>ℹ️ Windows разблокирована вручную.</b>" if manual else "<b>✅ Windows разблокирована!</b>"
         
         self.stage = PowerFlowStage.WAITING_WORKSPACE_DECISION
@@ -590,10 +764,14 @@ class PowerFlowManager:
         cancel_btn = {"text": "Отмена", "style": "danger", "callback_data": "flow_unlock_cancel"}
         if ICONS.get("cross"):
             cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
+        emerg_btn = {"text": "⚡ Аварийное выключение", "style": "danger", "callback_data": "emergency_power_off"}
+        if ICONS.get("power"):
+            emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
 
         markup = {
             "inline_keyboard": [
-                [retry_btn, cancel_btn]
+                [retry_btn, cancel_btn],
+                [emerg_btn],
             ]
         }
         self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)

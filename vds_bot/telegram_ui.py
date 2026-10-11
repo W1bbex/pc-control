@@ -58,8 +58,10 @@ CANONICAL_ICONS = {
     "battery": "5330277593721644293",
     "status_active": "5345809221961167372",
     "status_inactive": "5345825096160291312",
+    "status_warning": "5359432244043754958",
     "pulse_green": "5345809221961167372",
     "pulse_red": "5345825096160291312",
+    "pulse_yellow": "5359432244043754958",
     "wave": "5330448799707998190",
     "linux": "5332695978136874502",
     "windows": "5332280534540264957",
@@ -524,7 +526,7 @@ class TelegramBotApi:
             ]
         }
 
-    def power_menu_markup(self, pc_state=None, session=None, system_status=None):
+    def power_menu_markup(self, pc_state=None, session=None, system_status=None, stealth_active: bool = False):
         state_val = ""
         sess_val = ""
         sys_val = ""
@@ -547,12 +549,14 @@ class TelegramBotApi:
         )
 
         if not is_pc_on:
-            return {
-                "inline_keyboard": [
-                    [{"text": "Включить ПК", "style": "success", "callback_data": "power_on"}],
-                    self.back_button("menu"),
-                ]
-            }
+            rows = [[{"text": "Включить ПК", "style": "success", "callback_data": "power_on"}]]
+            if state_val == "UNREACHABLE":
+                emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
+                if ICONS.get("power"):
+                    emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
+                rows.append([emerg_btn])
+            rows.append(self.back_button("menu"))
+            return {"inline_keyboard": rows}
 
         # PC is ON: 1 main power button, 1 adaptive lock button
         if sess_val == "unlocked":
@@ -574,18 +578,43 @@ class TelegramBotApi:
         if ICONS.get("refresh"):
             reboot_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
 
+        rows = [
+            [shutdown_btn],
+            [lock_btn],
+            [
+                screen_btn,
+                {"text": "Свернуть окна", "style": "primary", "callback_data": "minimize_windows"},
+            ],
+            [
+                (
+                    {"text": "☀️ Выйти из скрытности", "style": "danger", "callback_data": "stealth_off"}
+                    if stealth_active
+                    else {"text": "🕶️ Скрытность (Blackout)", "style": "primary", "callback_data": "stealth_on"}
+                ),
+            ],
+            [
+                {"text": "Сон", "style": "primary", "callback_data": "sleep_pc"},
+                reboot_btn,
+            ],
+        ]
+
+        if state_val in ("BOOTING", "DEGRADED") and sys_val != "online":
+            emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
+            if ICONS.get("power"):
+                emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
+            rows.append([emerg_btn])
+
+        rows.append(self.back_button("menu"))
+        return {"inline_keyboard": rows}
+
+    def stealth_menu_markup(self, active: bool = False):
+        if active:
+            toggle_btn = {"text": "☀️ Выйти из скрытности", "style": "danger", "callback_data": "stealth_off"}
+        else:
+            toggle_btn = {"text": "🕶️ Включить скрытность", "style": "primary", "callback_data": "stealth_on"}
         return {
             "inline_keyboard": [
-                [shutdown_btn],
-                [lock_btn],
-                [
-                    screen_btn,
-                    {"text": "Свернуть окна", "style": "primary", "callback_data": "minimize_windows"},
-                ],
-                [
-                    {"text": "Сон", "style": "primary", "callback_data": "sleep_pc"},
-                    reboot_btn,
-                ],
+                [toggle_btn],
                 self.back_button("menu"),
             ]
         }
@@ -626,14 +655,17 @@ class TelegramBotApi:
             "inline_keyboard": [
                 [reboot_unlock_btn],
                 [reboot_plain_btn],
-                [self.back_button("power_menu")],
+                self.back_button("power_menu"),
             ]
         }
 
     def apps_menu_markup(self):
         return {
             "inline_keyboard": [
-                [{"text": "Запустить рабочий сетап", "style": "success", "icon_custom_emoji_id": ICONS.get("apps") or ICONS.get("game"), "callback_data": "workspace_start_direct"}],
+                [
+                    {"text": "Рабочий сетап", "style": "success", "icon_custom_emoji_id": ICONS.get("apps"), "callback_data": "workspace_start_direct"},
+                    {"text": "Игровой сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("game"), "callback_data": "game_start_direct"},
+                ],
                 [
                     {"text": "Telegram", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_telegram") or ICONS.get("telegram"), "callback_data": "app:Telegram"},
                     {"text": "Музыка", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_yandex_music") or ICONS.get("music"), "callback_data": "app:Музыка"},
@@ -648,34 +680,115 @@ class TelegramBotApi:
                 ],
                 [
                     {"text": "Antigravity", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"), "callback_data": "app:Antigravity"},
+                    {"text": "🔮 Профили AG", "style": "primary", "icon_custom_emoji_id": ICONS.get("gear"), "callback_data": "antigravity_menu"},
+                ],
+                [
                     {"text": "Консоль (Терминал)", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
+                    {"text": "⚡ Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
                 ],
                 self.back_button("menu"),
             ]
         }
 
-    def workspace_vpn_choice_markup(self, active_vpn="incy"):
+    def game_choice_markup(self, prefix="flow_game"):
+        game_icon = ICONS.get("game")
+        cross_icon = ICONS.get("cross")
+        cancel_cb = "flow_unlock_no" if prefix == "flow_game" else "menu"
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🚗 GTA 5 Legacy",
+                        "style": "primary",
+                        "icon_custom_emoji_id": game_icon,
+                        "callback_data": f"{prefix}:gta5",
+                    },
+                ],
+                [
+                    {
+                        "text": "🟥 Roblox",
+                        "style": "primary",
+                        "icon_custom_emoji_id": game_icon,
+                        "callback_data": f"{prefix}:roblox",
+                    },
+                ],
+                [
+                    {
+                        "text": "🚗 GTA SA",
+                        "style": "primary",
+                        "icon_custom_emoji_id": game_icon,
+                        "callback_data": f"{prefix}:gtasa",
+                    },
+                ],
+                [
+                    {
+                        "text": "Отмена",
+                        "style": "danger",
+                        "icon_custom_emoji_id": cross_icon,
+                        "callback_data": cancel_cb,
+                    }
+                ],
+            ]
+        }
+
+    def game_vpn_choice_markup(self, game_key, prefix="flow_game_vpn"):
         happ_label = "Happ (VPN)"
         incy_label = "INCY (VPN)"
         happ_icon = ICONS.get("app_happ") or ICONS.get("network")
         incy_icon = ICONS.get("app_incy") or ICONS.get("network")
+        cross_icon = ICONS.get("cross")
+        cancel_cb = "flow_unlock_no" if "flow" in prefix else "menu"
         return {
             "inline_keyboard": [
                 [
                     {
                         "text": incy_label,
-                        "style": "success" if active_vpn == "incy" else "primary",
+                        "style": "primary",
                         "icon_custom_emoji_id": incy_icon,
-                        "callback_data": "workspace_vpn:incy",
+                        "callback_data": f"{prefix}:{game_key}:incy",
                     },
                     {
                         "text": happ_label,
-                        "style": "success" if active_vpn == "happ" else "primary",
+                        "style": "primary",
                         "icon_custom_emoji_id": happ_icon,
-                        "callback_data": "workspace_vpn:happ",
+                        "callback_data": f"{prefix}:{game_key}:happ",
                     },
                 ],
-                [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
+                [
+                    {
+                        "text": "Отмена",
+                        "style": "danger",
+                        "icon_custom_emoji_id": cross_icon,
+                        "callback_data": cancel_cb,
+                    }
+                ],
+            ]
+        }
+
+    def workspace_vpn_choice_markup(self, active_vpn="incy", prefix="workspace_vpn"):
+        happ_label = "Happ (VPN)"
+        incy_label = "INCY (VPN)"
+        happ_icon = ICONS.get("app_happ") or ICONS.get("network")
+        incy_icon = ICONS.get("app_incy") or ICONS.get("network")
+        cross_icon = ICONS.get("cross")
+        cancel_cb = "flow_unlock_no" if "flow" in prefix else "menu"
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": incy_label,
+                        "style": "success" if active_vpn == "incy" and prefix == "workspace_vpn" else "primary",
+                        "icon_custom_emoji_id": incy_icon,
+                        "callback_data": f"{prefix}:incy",
+                    },
+                    {
+                        "text": happ_label,
+                        "style": "success" if active_vpn == "happ" and prefix == "workspace_vpn" else "primary",
+                        "icon_custom_emoji_id": happ_icon,
+                        "callback_data": f"{prefix}:happ",
+                    },
+                ],
+                [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": cross_icon, "callback_data": cancel_cb}],
             ]
         }
 
@@ -684,6 +797,7 @@ class TelegramBotApi:
             "inline_keyboard": [
                 [{"text": "Обновить состояние", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "telemetry_now"}],
                 [{"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"}],
+                [{"text": "📊 Активность за день", "style": "primary", "icon_custom_emoji_id": ICONS.get("clock"), "callback_data": "menu_activity"}],
                 [{"text": "Графики", "style": "primary", "icon_custom_emoji_id": ICONS.get("chart"), "callback_data": "history_menu"}],
                 self.back_button("settings_menu"),
             ]
@@ -975,6 +1089,7 @@ class TelegramBotApi:
         power_id = ICONS.get("power")
         user_id = ICONS.get("user")
         green_pulse = ICONS.get("status_active") or "5345809221961167372"
+        yellow_pulse = ICONS.get("status_warning") or ICONS.get("pulse_yellow") or "5359432244043754958"
         red_pulse = ICONS.get("status_inactive") or "5345825096160291312"
         clock_id = ICONS.get("clock")
 
@@ -989,7 +1104,7 @@ class TelegramBotApi:
         if state_val in ("READY", "VERIFIED", "ONLINE"):
             status_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji>'
         elif state_val in ("BOOTING", "STARTING", "CONNECTING", "DEGRADED", "LOCKED"):
-            status_icon = f'<tg-emoji emoji-id="{clock_id}">🟡</tg-emoji>' if clock_id else "🟡"
+            status_icon = f'<tg-emoji emoji-id="{yellow_pulse}">🟡</tg-emoji>'
         else:
             status_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji>'
 
@@ -998,7 +1113,7 @@ class TelegramBotApi:
             sess_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji> '
             sess_ru = f"{sess_icon}Разблокирована"
         elif sess_str in ("locked", "login_screen"):
-            sess_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
+            sess_icon = f'<tg-emoji emoji-id="{yellow_pulse}">🟡</tg-emoji> '
             sess_ru = f"{sess_icon}Заблокирована"
         elif sess_str in ("unknown", "none", ""):
             sess_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
@@ -1023,11 +1138,11 @@ class TelegramBotApi:
             esp_icon = f'<tg-emoji emoji-id="{green_pulse}">🟢</tg-emoji> '
             esp_ru = f"{esp_icon}В сети"
         elif esp_str == "offline":
-            esp_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
-            esp_ru = f"{esp_icon}Не в сети"
+            esp_icon = f'<tg-emoji emoji-id="{yellow_pulse}">🟡</tg-emoji> '
+            esp_ru = f"{esp_icon}Не в сети (отключена)"
         else:
-            esp_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
-            esp_ru = f"{esp_icon}Оффлайн"
+            esp_icon = f'<tg-emoji emoji-id="{yellow_pulse}">🟡</tg-emoji> '
+            esp_ru = f"{esp_icon}Недоступна"
 
         clean_label = str(getattr(pc_state, "label", "Готов к работе") or "Готов к работе")
         for e in ("🟢", "🟡", "🔴", "⚪", "⚪️"):
@@ -1079,4 +1194,404 @@ class TelegramBotApi:
             f"{net_tag}<b>Рабочий сетап — Выбор VPN</b>\n\n"
             f"Выберите VPN-туннель для подключения:"
         )
+
+    def launch_card_text(
+        self,
+        stage: str,
+        elapsed_seconds: int = 0,
+        session_status: str = "unknown",
+        system_status: str = "offline",
+        target_mode: str = None,
+        target_detail: str = None,
+        unlock_attempts: int = 0,
+        win_online_elapsed: int = None,
+        logon_ready_elapsed: int = None,
+        unlocked_elapsed: int = None,
+        is_delayed: bool = False,
+    ) -> str:
+        power_id = ICONS.get("power")
+        pc_id = ICONS.get("pc")
+        check_id = ICONS.get("check")
+        spinner_id = ICONS.get("spinner")
+        clock_id = ICONS.get("clock")
+        lock_id = ICONS.get("lock")
+        apps_id = ICONS.get("apps")
+        game_id = ICONS.get("game")
+        cross_id = ICONS.get("cross")
+
+        power_tag = f'<tg-emoji emoji-id="{power_id}">⚡</tg-emoji> ' if power_id else "⚡ "
+        pc_tag = f'<tg-emoji emoji-id="{pc_id}">💻</tg-emoji> ' if pc_id else "💻 "
+        check_tag = f'<tg-emoji emoji-id="{check_id}">✅</tg-emoji>' if check_id else "✅"
+        spinner_tag = f'<tg-emoji emoji-id="{spinner_id}">⚪</tg-emoji>' if spinner_id else "🔄"
+        clock_tag = f'<tg-emoji emoji-id="{clock_id}">🕒</tg-emoji>' if clock_id else "⏳"
+        lock_tag = f'<tg-emoji emoji-id="{lock_id}">🔒</tg-emoji>' if lock_id else "🔒"
+        cross_tag = f'<tg-emoji emoji-id="{cross_id}">❌</tg-emoji>' if cross_id else "❌"
+
+        def _fmt(sec):
+            if sec is None:
+                return "--:--"
+            s = max(0, int(sec))
+            return f"{s // 60:02d}:{s % 60:02d}"
+
+        if target_mode == "workspace":
+            vpn_name = target_detail or "INCY VPN"
+            mode_label = f"Разблок + Сетап ({vpn_name})"
+            note_line = "\n<i>Запуск начнётся сразу после разблокировки.</i>\n"
+        elif target_mode == "game":
+            g_name = target_detail or "Игра"
+            mode_label = f"Разблок + Игра ({g_name})"
+            note_line = "\n<i>Запуск начнётся сразу после разблокировки.</i>\n"
+        elif target_mode == "unlock":
+            mode_label = "Только авторазблок"
+            note_line = ""
+        elif target_mode is None and stage == "POWERING_ON":
+            mode_label = "Ожидание выбора режима"
+            note_line = ""
+        else:
+            mode_label = "Без авторазблокировки"
+            note_line = ""
+
+        sess_clean = str(session_status or "").lower()
+        if sess_clean == "unlocked":
+            status_desc = "Windows разблокирована"
+        elif stage == "UNLOCK_FAILED":
+            status_desc = "Сбой ввода пароля"
+        elif stage == "UNLOCKING" and sess_clean in ("login_screen", "locked"):
+            status_desc = f"Ввод пароля (попытка {max(1, unlock_attempts)}/2)..."
+        elif system_status == "online":
+            status_desc = "Windows в сети, ожидание экрана входа..."
+        else:
+            status_desc = "Загрузка ядра и служб Windows..."
+
+        log_lines = []
+
+        # Step 1: ESP Relay Pulse
+        log_lines.append(f"{check_tag} 00:00 · Подача питания (ESP8266)")
+
+        # Step 2: Windows System Agent
+        if system_status == "online" or win_online_elapsed is not None:
+            t_win = _fmt(win_online_elapsed if win_online_elapsed is not None else elapsed_seconds)
+            log_lines.append(f"{check_tag} {t_win} · Windows в сети (System Agent)")
+        else:
+            log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Загрузка Windows (⏱ {elapsed_seconds}с)")
+
+        # Step 3: Logon Screen Ready
+        if sess_clean in ("login_screen", "locked", "unlocked") or logon_ready_elapsed is not None:
+            t_logon = _fmt(logon_ready_elapsed if logon_ready_elapsed is not None else elapsed_seconds)
+            log_lines.append(f"{check_tag} {t_logon} · Экран входа готов")
+        elif system_status == "online":
+            log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Инициализация экрана входа...")
+        else:
+            log_lines.append(f"{clock_tag} --:-- · Экран входа Windows")
+
+        # Step 4: Unlock
+        if sess_clean == "unlocked" or unlocked_elapsed is not None:
+            t_unl = _fmt(unlocked_elapsed if unlocked_elapsed is not None else elapsed_seconds)
+            log_lines.append(f"{check_tag} {t_unl} · Сессия разблокирована")
+        elif stage == "UNLOCK_FAILED":
+            log_lines.append(f"{cross_tag} {_fmt(elapsed_seconds)} · Ошибка ввода пароля")
+        elif stage == "UNLOCKING":
+            if sess_clean in ("login_screen", "locked"):
+                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Ввод пароля в Windows...")
+            else:
+                log_lines.append(f"{clock_tag} {_fmt(elapsed_seconds)} · Авторазблок в очереди")
+        elif target_mode is None:
+            log_lines.append(f"{lock_tag} --:-- · Разблокировка (ожидание решения)")
+        else:
+            log_lines.append(f"{lock_tag} --:-- · Разблокировка пропущена")
+
+        # Step 5: Setup / Game (if targeted)
+        if target_mode == "workspace":
+            app_tag = f'<tg-emoji emoji-id="{apps_id}">🗂️</tg-emoji>' if apps_id else "📱"
+            if sess_clean == "unlocked":
+                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Запуск сетапа ({target_detail or 'INCY'})...")
+            else:
+                log_lines.append(f"{app_tag} --:-- · Рабочий сетап ({target_detail or 'INCY'})")
+        elif target_mode == "game":
+            g_tag = f'<tg-emoji emoji-id="{game_id}">🎮</tg-emoji>' if game_id else "🎮"
+            if sess_clean == "unlocked":
+                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Запуск игры ({target_detail or 'Игра'})...")
+            else:
+                log_lines.append(f"{g_tag} --:-- · Игровой сетап ({target_detail or 'Игра'})")
+
+        log_quote = "<blockquote>\n" + "\n".join(log_lines) + "\n</blockquote>"
+
+        delay_warning = ""
+        if is_delayed or (elapsed_seconds >= 60 and system_status != "online"):
+            delay_warning = "\n\n⚠️ <i>Загрузка занимает больше минуты. Если ПК завис, доступно аварийное выключение.</i>"
+
+        return (
+            f"{power_tag}<b>Запуск компьютера</b>\n\n"
+            f"{pc_tag}<b>Инициализация</b>\n"
+            f" ├ Время старта: ⏱ {elapsed_seconds} сек\n"
+            f" ├ Статус: <i>{status_desc}</i>\n"
+            f" └ Режим: <i>{mode_label}</i>\n"
+            f"{note_line}\n"
+            f"{log_quote}"
+            f"{delay_warning}"
+        )
+
+    def launch_card_markup(
+        self,
+        stage: str = "POWERING_ON",
+        target_mode: str = None,
+        target_label: str = None,
+        show_emergency: bool = False,
+    ) -> dict:
+        apps_icon = ICONS.get("apps")
+        lock_icon = ICONS.get("lock")
+        game_icon = ICONS.get("game")
+        cross_icon = ICONS.get("cross")
+        check_icon = ICONS.get("check")
+        power_icon = ICONS.get("power")
+        alert_icon = ICONS.get("alert") or power_icon
+
+        rows = []
+        if target_mode is None and stage == "POWERING_ON":
+            hero_btn = {
+                "text": "Разблок + Сетап",
+                "style": "success",
+                "callback_data": "flow_unlock_and_workspace",
+            }
+            if apps_icon:
+                hero_btn["icon_custom_emoji_id"] = apps_icon
+            rows.append([hero_btn])
+
+            unlock_btn = {
+                "text": "Только разблок",
+                "style": "primary",
+                "callback_data": "flow_unlock_yes",
+            }
+            if lock_icon:
+                unlock_btn["icon_custom_emoji_id"] = lock_icon
+
+            game_btn = {
+                "text": "Разблок + Игра",
+                "style": "primary",
+                "callback_data": "flow_unlock_and_game",
+            }
+            if game_icon:
+                game_btn["icon_custom_emoji_id"] = game_icon
+            rows.append([unlock_btn, game_btn])
+
+            skip_btn = {
+                "text": "Без разблокировки",
+                "style": "danger",
+                "callback_data": "flow_unlock_no",
+            }
+            if cross_icon:
+                skip_btn["icon_custom_emoji_id"] = cross_icon
+            rows.append([skip_btn])
+        else:
+            badge_text = target_label or "Разблок запланирован"
+            badge_btn = {
+                "text": badge_text,
+                "style": "success",
+                "callback_data": "noop",
+            }
+            if check_icon:
+                badge_btn["icon_custom_emoji_id"] = check_icon
+            rows.append([badge_btn])
+
+            cancel_btn = {
+                "text": "Отмена",
+                "style": "danger",
+                "callback_data": "flow_unlock_no",
+            }
+            if cross_icon:
+                cancel_btn["icon_custom_emoji_id"] = cross_icon
+            rows.append([cancel_btn])
+
+        if show_emergency:
+            emerg_btn = {
+                "text": "⚡ Аварийное выключение",
+                "style": "danger",
+                "callback_data": "emergency_power_off",
+            }
+            if alert_icon:
+                emerg_btn["icon_custom_emoji_id"] = alert_icon
+            rows.append([emerg_btn])
+
+        return {"inline_keyboard": rows}
+
+    def emergency_power_off_confirm_text(self) -> str:
+        alert_tag = f'<tg-emoji emoji-id="{ICONS.get("alert")}">⚠️</tg-emoji> ' if ICONS.get("alert") else "⚠️ "
+        return (
+            f"{alert_tag}<b>Аварийное выключение ПК</b>\n\n"
+            "Зажать кнопку питания на 5 секунд через ESP8266?\n\n"
+            "<i>Это приведет к принудительному обесточиванию материнской платы (Hard Power Off).\n"
+            "Используйте только если Windows зависла или не отвечает на команды.</i>"
+        )
+
+    def emergency_power_off_confirm_markup(self) -> dict:
+        power_icon = ICONS.get("power")
+        cross_icon = ICONS.get("cross")
+
+        force_btn = {
+            "text": "⚡ Да, выключить принудительно",
+            "style": "danger",
+            "callback_data": "emergency_power_off_confirm",
+        }
+        if power_icon:
+            force_btn["icon_custom_emoji_id"] = power_icon
+
+        cancel_btn = {
+            "text": "✖ Отмена",
+            "style": "primary",
+            "callback_data": "power_menu",
+        }
+        if cross_icon:
+            cancel_btn["icon_custom_emoji_id"] = cross_icon
+
+        return {
+            "inline_keyboard": [
+                [force_btn],
+                [cancel_btn],
+            ]
+        }
+
+    def antigravity_card_text(self, data: dict) -> str:
+        accounts = data.get("accounts", [])
+        active = data.get("active") or {}
+        is_running = data.get("is_running", False)
+
+        tag_ag = f'<tg-emoji emoji-id="{ICONS.get("apps")}"></tg-emoji> ' if ICONS.get("apps") else ""
+        lines = [
+            f"{tag_ag}<b>Antigravity • Управление аккаунтами</b>\n",
+        ]
+
+        if not accounts:
+            lines.append("<i>Список аккаунтов пуст или не удалось прочитать базу.</i>")
+            return "\n".join(lines)
+
+        active_email = active.get("email", "—")
+        active_name = active.get("name", "—")
+        ide_status = "В сети (запущена)" if is_running else "Остановлена"
+        reset_time = active.get("reset_time") or "—"
+        if reset_time and "T" in reset_time:
+            # Format 2026-10-15T03:23:09Z -> 15.10 03:23 UTC
+            try:
+                date_part, time_part = reset_time.split("T")
+                y, m, d = date_part.split("-")
+                hh, mm = time_part.split(":")[:2]
+                reset_time = f"{d}.{m} {hh}:{mm} UTC"
+            except Exception:
+                pass
+
+        lines.append("<b>Активный профиль:</b>")
+        lines.append(f"├ 👤 <b>{html.escape(active_name)}</b> (<code>{html.escape(active_email)}</code>)")
+        lines.append(f"├ 🖥️ IDE: <b>{ide_status}</b>")
+        lines.append(f"└ ⏳ Сброс квот: <code>{reset_time}</code>\n")
+
+        # Quotas breakdown for active profile
+        quotas = active.get("models_quota", {})
+        if quotas:
+            lines.append("<b>Остаток квот активного аккаунта:</b>")
+            # Highlight key models
+            model_keys = [
+                ("gemini-3.1-pro-high", "Gemini 3.1 Pro"),
+                ("gemini-3.7-flash-high", "Gemini 3.7 Flash"),
+                ("gemini-3.5-flash-low", "Gemini 3.5 Flash"),
+                ("gemini-3.1-flash-lite", "Flash Lite"),
+            ]
+            items = []
+            for k, label in model_keys:
+                if k in quotas:
+                    pct = quotas[k].get("percentage", 100)
+                    items.append((label, pct))
+            if not items:
+                # Fallback to any models
+                for k, v in list(quotas.items())[:4]:
+                    items.append((v.get("name", k), v.get("percentage", 100)))
+
+            for i, (m_label, pct) in enumerate(items):
+                prefix = "└" if i == len(items) - 1 else "├"
+                bar = "🟩" if pct >= 50 else ("🟨" if pct > 15 else "🟥")
+                lines.append(f"{prefix} {bar} {m_label}: <b>{pct}%</b>")
+            lines.append("")
+
+        # Other available accounts summary
+        others = [a for a in accounts if not a.get("is_active")]
+        if others:
+            lines.append(f"<b>Резервные аккаунты ({len(others)}):</b>")
+            for i, o in enumerate(others):
+                prefix = "└" if i == len(others) - 1 else "├"
+                o_name = o.get("name") or o.get("email", "").split("@")[0]
+                o_pct = o.get("min_quota", 100)
+                lines.append(f"{prefix} 👤 {html.escape(o_name)}: <b>{o_pct}%</b> квоты")
+            lines.append("")
+
+        lines.append("<i>⚡ Выберите аккаунт ниже для мгновенного переключения:</i>")
+        return "\n".join(lines)
+
+    def antigravity_card_markup(self, data: dict) -> dict:
+        accounts = data.get("accounts", [])
+        rows = []
+
+        refresh_icon = ICONS.get("refresh")
+        check_icon = ICONS.get("check")
+        back_icon = ICONS.get("back")
+        gear_icon = ICONS.get("gear")
+        power_icon = ICONS.get("power")
+
+        # 1. Accounts grid (buttons to switch)
+        for acc in accounts:
+            is_active = acc.get("is_active", False)
+            acc_id = acc.get("id", "")
+            name = acc.get("name") or acc.get("email", "").split("@")[0]
+            pct = acc.get("min_quota", 100)
+
+            if is_active:
+                btn = {
+                    "text": f"✓ {name} (Активен)",
+                    "style": "success",
+                    "callback_data": "ag_noop",
+                }
+                if check_icon:
+                    btn["icon_custom_emoji_id"] = check_icon
+            else:
+                btn = {
+                    "text": f"🔄 {name} ({pct}%)",
+                    "style": "primary",
+                    "callback_data": f"ag_switch:{acc_id}",
+                }
+            rows.append([btn])
+
+        # 2. Auto-switch & Restart actions
+        action_row = [
+            {
+                "text": "⚡ Авто-выбор лучшего",
+                "style": "primary",
+                "callback_data": "ag_switch:auto",
+            },
+            {
+                "text": "🔄 Перезапуск IDE",
+                "style": "secondary",
+                "callback_data": "ag_restart",
+            },
+        ]
+        rows.append(action_row)
+
+        # 3. Bottom controls
+        bottom_row = [
+            {
+                "text": "📊 Обновить",
+                "style": "primary",
+                "callback_data": "ag_refresh",
+            },
+            {
+                "text": "« Меню",
+                "style": "secondary",
+                "callback_data": "main_menu",
+            },
+        ]
+        if refresh_icon:
+            bottom_row[0]["icon_custom_emoji_id"] = refresh_icon
+        if back_icon:
+            bottom_row[1]["icon_custom_emoji_id"] = back_icon
+
+        rows.append(bottom_row)
+        return {"inline_keyboard": rows}
+
+
 

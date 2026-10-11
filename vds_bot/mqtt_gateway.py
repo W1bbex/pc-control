@@ -180,9 +180,16 @@ class MqttGateway:
                 boot_id = data.get("boot_id")
                 ts = data.get("ts")
             except Exception:
+                data = {}
                 current, session, boot_id, ts = payload, "unknown", None, None
                 
             try:
+                if isinstance(data, dict):
+                    if data.get("event") == "graceful_shutdown" or data.get("state") in ("shutdown", "graceful_shutdown"):
+                        self.health.set_graceful_shutdown(ts=ts, reason=data.get("reason", "windows_shutdown"))
+                        self._emit("graceful_shutdown", data)
+                    elif data.get("event") == "stealth_exit":
+                        self._emit("stealth_exit", data)
                 self.health.update("windows_system", current, boot_id=boot_id, ts=ts, is_retained=message.retain)
                 self.health.update("windows_session", session, ts=ts, is_retained=message.retain)
                 self._emit_health_state()
@@ -197,9 +204,16 @@ class MqttGateway:
                 boot_id = data.get("boot_id")
                 ts = data.get("ts")
             except Exception:
+                data = {}
                 current, boot_id, ts = payload, None, None
                 
             try:
+                if isinstance(data, dict):
+                    if data.get("event") == "graceful_shutdown" or data.get("state") in ("shutdown", "graceful_shutdown"):
+                        self.health.set_graceful_shutdown(ts=ts, reason=data.get("reason", "windows_shutdown"))
+                        self._emit("graceful_shutdown", data)
+                    elif data.get("event") == "stealth_exit":
+                        self._emit("stealth_exit", data)
                 self.health.update("windows_desktop", current, boot_id=boot_id, ts=ts, is_retained=message.retain)
                 self._emit_health_state()
             except Exception as e:

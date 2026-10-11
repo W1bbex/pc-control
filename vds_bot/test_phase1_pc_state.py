@@ -8,9 +8,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import json
 from health_engine import HealthEngine, PCState
 from monitoring import MonitoringManager
 from history import TelemetryHistory
+from mqtt_gateway import MqttGateway, TOPIC_SYSTEM_STATUS, TOPIC_DESKTOP_STATUS
 
 
 class FakeMqtt:
@@ -199,6 +201,87 @@ class TestPhase1PCState(unittest.TestCase):
                 if "matplotlib" in str(e):
                     pass  # Matplotlib might be missing in minimal test env
 
+    def test_11_graceful_shutdown_sets_shutdown_observed(self):
+        """11. Graceful shutdown marks PC as SHUTDOWN_OBSERVED with 'Выключен (штатно)'."""
+        now = time.time()
+        self.health.update("windows_system", "online", ts=now - 50)
+        self.health.update("windows_desktop", "online", ts=now - 50)
+        
+        # Windows initiated graceful shutdown
+        self.health.set_graceful_shutdown(ts=now, reason="windows_shutdown")
+        info = self.health.evaluate_pc_state(telemetry_age=None, now=now)
+        self.assertEqual(info.state, PCState.SHUTDOWN_OBSERVED)
+        self.assertEqual(info.label, "🔴 Выключен (штатно)")
+        self.assertIn("ПК штатно завершил работу через Windows", info.reason)
+
+    def test_12_graceful_shutdown_cleared_by_newer_heartbeat(self):
+        """12. A newer boot heartbeat clears graceful shutdown state."""
+        now = time.time()
+        self.health.set_graceful_shutdown(ts=now, reason="windows_shutdown")
+        self.assertGreater(self.health.graceful_shutdown_until, 0.0)
+
+        # Older or stale heartbeat does not clear it
+        self.health.update("windows_system", "online", ts=now - 10)
+        self.assertGreater(self.health.graceful_shutdown_until, 0.0)
+
+        # Newer heartbeat clears it immediately
+        self.health.update("windows_system", "online", ts=now + 5)
+        self.health.update("windows_session", "login_screen", ts=now + 5)
+        self.assertEqual(self.health.graceful_shutdown_until, 0.0)
+        info = self.health.evaluate_pc_state(telemetry_age=None, now=now + 5)
+        self.assertEqual(info.state, PCState.LOCKED)
+
+    def test_13_mqtt_gateway_handles_graceful_shutdown(self):
+        """13. MqttGateway processes graceful_shutdown payload and emits event."""
+        gateway = MqttGateway.__new__(MqttGateway)
+        gateway.health = HealthEngine()
+        gateway.health.update("mqtt_broker", "online")
+        events = []
+        gateway._emit_health_state = lambda: None
+        gateway._emit = lambda name, data: events.append((name, data))
+
+        now = time.time()
+        payload = json.dumps({
+            "state": "offline",
+            "session": "offline",
+            "event": "graceful_shutdown",
+            "reason": "windows_shutdown",
+            "agent": "system",
+            "ts": now,
+            "boot_id": "boot-test-123"
+        }).encode("utf-8")
+
+        message = type(
+            "Message",
+            (),
+            {
+                "topic": TOPIC_SYSTEM_STATUS,
+                "payload": payload,
+                "retain": True,
+            },
+        )()
+        gateway._on_message(None, None, message)
+
+        self.assertGreater(gateway.health.graceful_shutdown_until, 0.0)
+        info = gateway.health.evaluate_pc_state(telemetry_age=None, now=now)
+        self.assertEqual(info.state, PCState.SHUTDOWN_OBSERVED)
+        self.assertTrue(any(ev[0] == "graceful_shutdown" for ev in events))
+
+    def test_14_esp_offline_results_in_degraded_pc_state(self):
+        """14. When system and desktop are online but ESP is offline, PCState is DEGRADED."""
+        now = time.time()
+        self.health.update("windows_system", "online", ts=now)
+        self.health.update("windows_desktop", "online", ts=now)
+        self.health.update("windows_session", "unlocked", ts=now)
+        self.health.update("telemetry", "fresh", ts=now)
+        self.health.update("esp", "offline", ts=now)
+
+        info = self.health.evaluate_pc_state(telemetry_age=5.0, now=now)
+        self.assertEqual(info.state, PCState.DEGRADED)
+        self.assertEqual(info.label, "🟡 ESP недоступна")
+        self.assertIn("модуль питания ESP8266 недоступен", info.reason)
+
 
 if __name__ == "__main__":
     unittest.main()
+

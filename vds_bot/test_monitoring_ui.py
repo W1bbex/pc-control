@@ -22,6 +22,7 @@ class FakeMqtt:
         self.health.update("windows_desktop", "online", ts=time.time())
         self.health.update("windows_session", "unlocked", ts=time.time())
         self.health.update("telemetry", "fresh", ts=time.time())
+        self.health.update("esp", "online", ts=time.time())
 
 
 class FakeHistory:
@@ -468,6 +469,41 @@ def test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux():
     assert "Linux: " in unreachable_text
 
 
+def test_dashboard_renders_yellow_pulse_when_esp_offline():
+    import monitoring
+    manager = MonitoringManager.__new__(MonitoringManager)
+    fake_mqtt = FakeMqtt()
+    fake_mqtt.health.update("mqtt_broker", "online")
+    fake_mqtt.health.update("windows_system", "online", ts=time.time())
+    fake_mqtt.health.update("windows_desktop", "online", ts=time.time())
+    fake_mqtt.health.update("windows_session", "unlocked", ts=time.time())
+    fake_mqtt.health.update("telemetry", "fresh", ts=time.time())
+    fake_mqtt.health.update("esp", "offline", ts=time.time())
+    fake_mqtt.esp_status = "offline"
+
+    manager.mqtt = fake_mqtt
+    manager.history = FakeHistory()
+    manager.alerts = {}
+    manager.latest_telemetry = None
+    manager.latest_received_at = 0.0
+    manager.latest_desktop_at = 0.0
+
+    manager.process_telemetry({
+        "timestamp": int(time.time()),
+        "user_active": True,
+        "session_seconds": 120,
+        "cpu": {"load_percent": 15, "temp_c": 45},
+        "memory": {"used_percent": 30, "used_gb": 4.8, "total_gb": 16.0},
+        "disks": [{"drive": "C:", "used_percent": 50, "free_gb": 200}],
+        "active_application": "Chrome",
+    })
+
+    dashboard = manager.dashboard_text()
+    assert monitoring.EMOJI_STATUS_WARNING in dashboard
+    assert "В сети (ESP недоступна)" in dashboard
+    assert "Модуль ESP8266 недоступен" in dashboard
+
+
 if __name__ == "__main__":
     test_dashboard_uses_real_nested_agent_schema()
     test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux()
@@ -483,5 +519,6 @@ if __name__ == "__main__":
     test_is_user_in_telegram_on_pc()
     test_dashboard_auto_refresh_every_10s()
     test_dashboard_auto_refresh_every_5s_when_in_pc_control()
+    test_dashboard_renders_yellow_pulse_when_esp_offline()
     print("All UI and monitoring tests passed")
 

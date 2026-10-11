@@ -26,6 +26,29 @@ from power_flow import PowerFlowManager, PowerFlowStage
 from physical_button import PhysicalButtonManager
 from monitoring import MonitoringManager
 from health_engine import PCState
+try:
+    from .routers import (
+        route_message,
+        route_power_callback,
+        route_workspace_callback,
+        route_player_callback,
+        route_console_callback,
+        route_monitoring_callback,
+        route_physical_callback,
+        route_antigravity_callback,
+    )
+except ImportError:
+    from routers import (
+        route_message,
+        route_power_callback,
+        route_workspace_callback,
+        route_player_callback,
+        route_console_callback,
+        route_monitoring_callback,
+        route_physical_callback,
+        route_antigravity_callback,
+    )
+
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -111,6 +134,70 @@ def get_workspace_steps(vpn="incy"):
     ]
 
 
+GAME_INFO = {
+    "gta5": {
+        "id": "game_gta5",
+        "name": "GTA 5 Legacy",
+        "scenario": "Игровой сетап: GTA 5 Legacy",
+        "emoji_id": ICONS.get("game"),
+        "fallback_emoji": "🚗",
+    },
+    "roblox": {
+        "id": "game_roblox",
+        "name": "Roblox",
+        "scenario": "Игровой сетап: Roblox",
+        "emoji_id": ICONS.get("game"),
+        "fallback_emoji": "🟥",
+    },
+    "gtasa": {
+        "id": "game_gtasa",
+        "name": "GTA SA",
+        "scenario": "Игровой сетап: GTA SA",
+        "emoji_id": ICONS.get("game"),
+        "fallback_emoji": "🚗",
+    },
+}
+
+
+def get_game_steps(game_key="gta5", vpn="incy"):
+    vpn_is_happ = str(vpn).lower() == "happ"
+    vpn_item = (
+        {
+            "id": "happ_vpn",
+            "label": "Happ (VPN)",
+            "emoji_id": ICONS.get("app_happ"),
+            "fallback_emoji": "🌐",
+            "icon_key": "app_happ",
+        }
+        if vpn_is_happ
+        else {
+            "id": "incy_vpn",
+            "label": "INCY (VPN)",
+            "emoji_id": ICONS.get("app_incy"),
+            "fallback_emoji": "🌐",
+            "icon_key": "app_incy",
+        }
+    )
+    g_info = GAME_INFO.get(game_key, GAME_INFO["gta5"])
+    return [
+        vpn_item,
+        {
+            "id": "antigravity",
+            "label": "Antigravity",
+            "emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"),
+            "fallback_emoji": "🚀",
+            "icon_key": "terminal",
+        },
+        {
+            "id": g_info["id"],
+            "label": g_info["name"],
+            "emoji_id": g_info["emoji_id"],
+            "fallback_emoji": g_info["fallback_emoji"],
+            "icon_key": "game",
+        },
+    ]
+
+
 def format_workspace_step_line(step, status_str):
     app_emoji_id = step.get("emoji_id")
     fallback = step.get("fallback_emoji", "📱")
@@ -163,6 +250,14 @@ LED_WHITE_PRESETS = {
 
 
 class PcControlBotApp:
+    @property
+    def allowed_user_id(self):
+        return getattr(self, "_allowed_user_id", None) or ALLOWED_USER_ID
+
+    @allowed_user_id.setter
+    def allowed_user_id(self, val):
+        self._allowed_user_id = val
+
     def __init__(self):
         if not TELEGRAM_TOKEN or not ALLOWED_USER_ID:
             LOG.error("TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID must be set.")
@@ -203,6 +298,8 @@ class PcControlBotApp:
         self.minimize_ack_result = None
         self.pending_screenshots = {}
         self.pending_telemetry_cmd_ids = {}
+        self.pending_antigravity_cmd_ids = {}
+        self.latest_antigravity_data = None
         self.awaiting_shutdown_time_chat_id = None
         self.shutdown_candidate_ts = None
         self.scheduled_shutdown_ts = None
@@ -215,6 +312,7 @@ class PcControlBotApp:
         self.pending_minimize_cmd_id = None
         self.workspace_card_msg_id = None
         self.app_statuses = {}
+        self.active_stealth_card = None
 
         self.active_player_message_id = None
         self.active_player_chat_id = None
@@ -238,6 +336,7 @@ class PcControlBotApp:
         self.physical_btn.on_trigger_unlock_and_workspace_cb = self.handle_physical_unlock_and_workspace_trigger
         self.physical_btn.on_state_change_cb = self.save_state
         self.power_flow.on_workspace_start_cb = self.start_async_workspace_setup
+        self.power_flow.on_game_start_cb = self.start_async_game_setup
 
         self.load_state()
 
@@ -399,10 +498,12 @@ class PcControlBotApp:
 
     def _power_menu_markup(self):
         pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
+        stealth_active = bool(self.monitoring.latest_telemetry.get("stealth_mode")) if self.monitoring.latest_telemetry else False
         return self.ui.power_menu_markup(
             pc_state=pc_state,
             session=self.mqtt.system_session,
             system_status=self.mqtt.system_status,
+            stealth_active=stealth_active,
         )
 
     def _check_shutdown_confirmation(self, now=None):
@@ -466,7 +567,8 @@ class PcControlBotApp:
             format_workspace_step_line(step, self.app_statuses.get(step['id'], '⏳ В очереди'))
             for step in steps
         ]
-        text = "<b>🚀 Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
+        card_title = getattr(self, "workspace_card_title", "<b>🚀 Запуск рабочего сетапа...</b>")
+        text = f"{card_title}\n\n" + "\n".join(lines)
         cancel_btn = {"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}
         if ICONS.get("cross"):
             cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
@@ -518,13 +620,27 @@ class PcControlBotApp:
                             self.last_auto_led_state = "on"
                             LOG.info("Auto-LED: PC came online/awake (sys=%s, desk=%s, sess=%s) -> LED_ON sent to cooler", sys_status, desk_status, session)
 
+        elif event_type == "graceful_shutdown":
+            LOG.info("Graceful shutdown event received from Windows: %s", data)
+            self._clear_pending_shutdown()
+            if hasattr(self.power_flow, "reset_flow"):
+                self.power_flow.reset_flow()
+            if hasattr(self.mqtt, "publish_esp_action"):
+                if self.mqtt.publish_esp_action("LED_OFF"):
+                    self.last_auto_led_state = "off"
+                    LOG.info("Auto-LED: Graceful shutdown -> LED_OFF sent to cooler")
+
         elif event_type == "physical_input":
             self.physical_btn.handle_event(data, ALLOWED_USER_ID)
 
         elif event_type == "telemetry":
+            prev_stealth = bool(self.monitoring.latest_telemetry.get("stealth_mode")) if self.monitoring.latest_telemetry else False
+            new_stealth = bool(data.get("stealth_mode")) if isinstance(data, dict) else False
             alerts = self.monitoring.process_telemetry(data)
             for alert_text in alerts:
-                self.ui.send_message(ALLOWED_USER_ID, alert_text)
+                self.ui.send_message(self.allowed_user_id, alert_text)
+            if prev_stealth and not new_stealth and getattr(self, "active_stealth_card", None):
+                self.on_stealth_exit({"reason": "telemetry_diff"})
             now = time.time()
             if self._is_user_in_telegram_on_pc() and (now - getattr(self, "last_dashboard_auto_refresh", 0.0) >= 10.0):
                 self._check_dashboard_auto_refresh(now)
@@ -642,6 +758,12 @@ class PcControlBotApp:
                             step_id = "incy_vpn"
                         elif "antigravity" in an:
                             step_id = "antigravity"
+                        elif "gta5" in an or "gta 5" in an:
+                            step_id = "game_gta5"
+                        elif "roblox" in an:
+                            step_id = "game_roblox"
+                        elif "gtasa" in an or "gta sa" in an or "san andreas" in an:
+                            step_id = "game_gtasa"
 
                     if step_id:
                         if state_val in {"verified", "already_running_verified", "ready", "vpn_connected"}:
@@ -698,6 +820,54 @@ class PcControlBotApp:
                         message_id=req_msg_id,
                     )
 
+            pending_ag = getattr(self, "pending_antigravity_cmd_ids", {})
+            if cmd_id in pending_ag:
+                target = pending_ag.pop(cmd_id)
+                req_chat_id, req_msg_id, action_kind = target
+
+                if action_kind == "list":
+                    if result == "executed" and isinstance(ack_data, dict):
+                        self.latest_antigravity_data = ack_data
+                        self.ui.send_message(
+                            req_chat_id,
+                            self.ui.antigravity_card_text(ack_data),
+                            reply_markup=self.ui.antigravity_card_markup(ack_data),
+                            message_id=req_msg_id,
+                        )
+                    else:
+                        err = (ack_data or {}).get("error", "Не удалось загрузить аккаунты")
+                        self.ui.send_message(req_chat_id, f"❌ Ошибка получения профилей Antigravity: {err}")
+
+                elif action_kind == "switch":
+                    if result == "executed" and isinstance(ack_data, dict):
+                        switched_email = ack_data.get("email", "—")
+                        restarted = ack_data.get("restarted_ide", False)
+                        msg = f"✅ Профиль Antigravity переключен на <b>{switched_email}</b>!"
+                        if restarted:
+                            msg += "\n🖥️ <i>IDE Antigravity успешно перезапущена с новым токеном.</i>"
+                        self.ui.send_message(req_chat_id, msg)
+                        try:
+                            from vds_bot.routers.antigravity_router import open_antigravity_menu
+                            open_antigravity_menu(self, req_chat_id, message_id=req_msg_id)
+                        except Exception:
+                            pass
+                    else:
+                        err = (ack_data or {}).get("error", "Сбой при переключении")
+                        self.ui.send_message(req_chat_id, f"❌ Ошибка смены профиля Antigravity: {err}")
+
+                elif action_kind == "restart":
+                    if result == "executed":
+                        self.ui.send_message(req_chat_id, "🔄 <b>Antigravity IDE перезапущена</b>")
+                    else:
+                        self.ui.send_message(req_chat_id, "❌ Не удалось перезапустить IDE.")
+
+                elif action_kind == "export":
+                    if result == "executed" and isinstance(ack_data, dict):
+                        cnt = ack_data.get("accounts_count", 0)
+                        self.ui.send_message(req_chat_id, f"📦 <b>Экспорт выполнен успешно:</b> {cnt} аккаунтов сохранены в портативный формат.")
+                    else:
+                        self.ui.send_message(req_chat_id, "❌ Ошибка экспорта профилей.")
+
         elif event_type == "media_status":
             self.latest_media_state = data
             self._handle_media_status_event(data)
@@ -705,6 +875,61 @@ class PcControlBotApp:
 
         elif event_type == "activity_response":
             self._handle_activity_response_event(data)
+
+        elif event_type == "stealth_exit":
+            self.on_stealth_exit(data)
+
+    def on_stealth_exit(self, data=None):
+        """
+        Handles local stealth mode exit event (triggered via hotkey Win+W+1 or watchdog).
+        Updates telemetry cache, updates the stale card's button from 'Выйти' to 'Включить',
+        and sends a push notification to Telegram.
+        """
+        LOG.info("Handling stealth_exit event: %s", data)
+        if self.monitoring.latest_telemetry:
+            self.monitoring.latest_telemetry["stealth_mode"] = False
+
+        card = getattr(self, "active_stealth_card", None)
+        self.active_stealth_card = None
+
+        if card and isinstance(card, (tuple, list)) and len(card) == 2:
+            chat_id, msg_id = card
+            # Edit the stale message so the callback button changes from "Выйти" to "Включить"
+            try:
+                self.ui.send_message(
+                    chat_id,
+                    "<b>🔓 Режим скрытности отключен локально</b>\n\n"
+                    "• Дисплеи разбужены\n"
+                    "• Поглощение ввода снято\n"
+                    "• Звук восстановлен\n\n"
+                    "<i>Локальный выход: <code>Win+W+1</code></i>",
+                    reply_markup=self.ui.stealth_menu_markup(active=False),
+                    message_id=msg_id,
+                )
+            except Exception as err:
+                LOG.warning("Failed editing active stealth card %s: %s", msg_id, err)
+
+            # Send a push notification so Telegram rings/vibrates
+            try:
+                self.ui.send_message(
+                    self.allowed_user_id,
+                    "🔓 <b>Режим скрытности отключен локально</b> (хоткей <code>Win+W+1</code>)",
+                )
+            except Exception as err:
+                LOG.warning("Failed sending stealth exit alert: %s", err)
+        else:
+            # If no previous card was tracked, send a new notification with the 'Включить' button
+            try:
+                self.ui.send_message(
+                    self.allowed_user_id,
+                    "🔓 <b>Режим скрытности отключен локально</b> (хоткей <code>Win+W+1</code>)\n\n"
+                    "• Дисплеи разбужены\n"
+                    "• Ввод мыши и клавиатуры восстановлен\n"
+                    "• Звук восстановлен",
+                    reply_markup=self.ui.stealth_menu_markup(active=False),
+                )
+            except Exception as err:
+                LOG.warning("Failed sending stealth exit notification: %s", err)
 
     def _handle_media_status_event(self, data):
         msg_id = getattr(self, "active_player_message_id", None)
@@ -924,835 +1149,20 @@ class PcControlBotApp:
         if data != "menu" and not data.startswith("player_"):
             self.current_menu_view = data
 
-        # 1. Quick Navigation Callbacks
-        if data == "menu":
-            self.ui.answer_callback(callback_id)
-            if self.power_flow.stage in (
-                PowerFlowStage.WAITING_WORKSPACE_DECISION,
-                PowerFlowStage.UNLOCK_FAILED,
-            ):
-                self.power_flow.reset_flow()
-            self.current_menu_view = "main"
-            self.active_main_menu_message_id = message_id
-            self.save_state()
-            self.ui.send_message(chat_id, self.monitoring.dashboard_text(), reply_markup=self._main_menu_markup(), message_id=message_id)
+        # Modular Router Delegation
+        if route_power_callback(self, data, chat_id, message_id, callback_id):
             return
-
-        if data == "settings_menu":
-            self.ui.answer_callback(callback_id)
-            self.current_menu_view = "settings_menu"
-            gear_icon = ICONS.get("gear")
-            prefix = f'<tg-emoji emoji-id="{gear_icon}">⚙️</tg-emoji> ' if gear_icon else ""
-            text = (
-                f"{prefix}<b>Настройки и сервисы</b>\n\n"
-                "Выбери нужный раздел:"
-            )
-            self.ui.send_message(
-                chat_id,
-                text,
-                reply_markup=self.ui.settings_menu_markup(),
-                message_id=message_id,
-            )
+        if route_workspace_callback(self, data, chat_id, message_id, callback_id):
             return
-
-        if data == "menu_player":
-            self.ui.answer_callback(callback_id)
-            if message_id:
-                try:
-                    self.ui.delete_message(chat_id, message_id)
-                except Exception:
-                    pass
-
-            media_state = getattr(self, "latest_media_state", None) or getattr(self.mqtt, "last_media_state", {})
-            self._send_player_card(chat_id, media_state, business_connection_id=None)
-            self.mqtt.send_media_command("refresh")
+        if route_player_callback(self, data, chat_id, message_id, callback_id, business_connection_id=business_connection_id):
             return
-
-        if data.startswith("player_"):
-            action = data.replace("player_", "")
-            self.active_player_message_id = message_id
-            self.active_player_chat_id = chat_id
-            self.active_player_business_connection_id = None if chat_id == ALLOWED_USER_ID else business_connection_id
-
-            if action != "toggle_like":
-                self.ui.answer_callback(callback_id)
-
-            # Optimistic state update for instant UI button feedback (<50ms)
-            media_state = dict(getattr(self, "latest_media_state", None) or getattr(self.mqtt, "last_media_state", {}) or {})
-            optimistic_changed = False
-
-            if action == "toggle_play":
-                self.mqtt.send_media_command("toggle_play")
-                if media_state:
-                    media_state["is_playing"] = not media_state.get("is_playing", False)
-                    optimistic_changed = True
-            elif action == "seek_fwd_10":
-                self.mqtt.send_media_command("seek", delta=10)
-                if media_state:
-                    dur = float(media_state.get("duration") or 0.0)
-                    cur_pos = float(media_state.get("position") or 0.0)
-                    media_state["position"] = min(dur, cur_pos + 10.0) if dur > 0 else cur_pos + 10.0
-                    optimistic_changed = True
-            elif action == "seek_back_10":
-                self.mqtt.send_media_command("seek", delta=-10)
-                if media_state:
-                    cur_pos = float(media_state.get("position") or 0.0)
-                    media_state["position"] = max(0.0, cur_pos - 10.0)
-                    optimistic_changed = True
-            elif action == "next":
-                self.mqtt.send_media_command("next")
-                with self.player_edit_lock:
-                    self.last_player_edit_time = 0.0
-            elif action == "prev":
-                self.mqtt.send_media_command("prev")
-                with self.player_edit_lock:
-                    self.last_player_edit_time = 0.0
-            elif action == "wave":
-                self.mqtt.send_media_command("wave")
-                with self.player_edit_lock:
-                    self.last_player_edit_time = 0.0
-            elif action == "toggle_like":
-                self.mqtt.send_media_command("toggle_like")
-                if media_state:
-                    new_liked = not media_state.get("is_liked", False)
-                    media_state["is_liked"] = new_liked
-                    optimistic_changed = True
-                    toast = "❤️ Добавлено в Мою волну / Любимые" if new_liked else "💔 Удалено из любимых"
-                    self.ui.answer_callback(callback_id, text=toast)
-                else:
-                    self.ui.answer_callback(callback_id)
-
-            if optimistic_changed and message_id:
-                self.latest_media_state = media_state
-                with self.player_edit_lock:
-                    self.last_player_edit_time = time.time()
-                self._render_and_send_player(chat_id, message_id, media_state)
+        if route_console_callback(self, data, chat_id, message_id, callback_id):
             return
-
-        if data == "menu_activity":
-            self.ui.answer_callback(callback_id)
-            today_str = datetime.now(MOSCOW).strftime("%Y-%m-%d")
-            self.pending_activity_chat_id = chat_id
-            self.pending_activity_msg_id = message_id
-            self.mqtt.query_activity("summary", today_str)
-            self.ui.send_message(chat_id, f"📊 Запрашиваю статистику за {today_str}...", message_id=message_id)
+        if route_monitoring_callback(self, data, chat_id, message_id, callback_id):
             return
-
-        if data == "power_menu":
-            self.ui.answer_callback(callback_id)
-            pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
-            text = (
-                self.ui.power_menu_text(
-                    pc_state=pc_state,
-                    session=self.mqtt.system_session,
-                    desktop_status=self.mqtt.desktop_status,
-                    esp_status=self.mqtt.esp_status,
-                )
-                if hasattr(self.ui, "power_menu_text")
-                else ""
-            )
-            if not isinstance(text, str) or not text:
-                text = f"<b>ПК и экран</b>\n\n<b>Состояние:</b> {getattr(pc_state, 'label', 'Готов к работе')}"
-            self.ui.send_message(chat_id, text, reply_markup=self._power_menu_markup(), message_id=message_id)
+        if route_physical_callback(self, data, chat_id, message_id, callback_id):
             return
-
-        if data == "monitoring_menu":
-            self.ui.answer_callback(callback_id)
-            text = self.monitoring.dashboard_text()
-            self.ui.send_message(chat_id, text, reply_markup=self.ui.monitoring_menu_markup(), message_id=message_id)
-            return
-
-        if data == "apps_menu":
-            self.ui.answer_callback(callback_id)
-            self.ui.send_message(chat_id, self.ui.apps_menu_text(), reply_markup=self.ui.apps_menu_markup(), message_id=message_id)
-            return
-
-        if data == "console_open":
-            self.ui.answer_callback(callback_id)
-            self.console_active_chat_id = chat_id
-            self.current_menu_view = "console"
-            text = self.ui.console_card_text(target=self.console_target, shell=self.console_shell)
-            markup = self.ui.console_menu_markup(target=self.console_target, shell=self.console_shell)
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return
-
-        if data == "console_close":
-            self.ui.answer_callback(callback_id)
-            self.console_active_chat_id = None
-            self.current_menu_view = "main"
-            self.ui.send_message(chat_id, self.monitoring.dashboard_text(), reply_markup=self._main_menu_markup(), message_id=message_id)
-            return
-
-        if data == "console_toggle_shell":
-            self.ui.answer_callback(callback_id)
-            self.console_shell = "cmd" if self.console_shell == "powershell" else "powershell"
-            self.save_state()
-            text = self.ui.console_card_text(target=self.console_target, shell=self.console_shell)
-            markup = self.ui.console_menu_markup(target=self.console_target, shell=self.console_shell)
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return
-
-        if data == "console_toggle_target":
-            self.ui.answer_callback(callback_id)
-            self.console_target = "system" if self.console_target == "desktop" else "desktop"
-            self.save_state()
-            text = self.ui.console_card_text(target=self.console_target, shell=self.console_shell)
-            markup = self.ui.console_menu_markup(target=self.console_target, shell=self.console_shell)
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return
-
-        if data.startswith("console_quick:"):
-            q_cmd = data.split(":", 1)[1]
-            self.ui.answer_callback(callback_id, f"Выполняю {q_cmd}...")
-            self.execute_console_command(chat_id, q_cmd, target=self.console_target, shell=self.console_shell)
-            return
-
-        if data == "sound_menu":
-            self.ui.answer_callback(callback_id)
-            vol = None
-            if hasattr(self, "monitoring") and self.monitoring.latest_telemetry:
-                vol = self.monitoring.latest_telemetry.get("volume")
-            self.ui.send_message(
-                chat_id,
-                self.ui.sound_menu_text(volume=vol),
-                reply_markup=self.ui.sound_menu_markup(),
-                message_id=message_id,
-            )
-            return
-
-        if data == "physical_button":
-            self.ui.answer_callback(callback_id)
-            self.physical_btn.mode = None
-            self.physical_btn.active_message_id = None
-            self.physical_btn.input_message_id = None
-            text = self.physical_btn.physical_control_text()
-            markup = self.physical_btn.physical_control_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return
-
-        if data == "led_menu":
-            self.ui.answer_callback(callback_id)
-            text = (
-                "<b>💡 Калибровка белого цвета кулера</b>\n\n"
-                "Кулер: <i>Ocypus Gamma A40 WH ARGB</i>\n"
-                "Пин управления: <code>D2 (ESP8266)</code>\n\n"
-                "<b>⚡ Быстрые режимы:</b>\n"
-                "👁 <b>Для глаз:</b> <code>255, 150, 125</code> (Идеал вживую)\n"
-                "📸 <b>Для камеры:</b> <code>228, 245, 255</code> (Под сенсор камеры)\n\n"
-                "<b>🎨 Палитра оттенков (1..12):</b>\n"
-                "1️⃣ <code>255, 150, 165</code> — Холодный снежный (зелень срезана)\n"
-                "2️⃣ <code>255, 140, 160</code> — Арктический холодный (без циана)\n"
-                "3️⃣ <code>255, 130, 155</code> — Ледяной кристалл\n"
-                "4️⃣ <code>255, 120, 150</code> — Глубокий холодный\n"
-                "5️⃣ <code>255, 160, 160</code> — Симметричный чистый (G=B)\n"
-                "6️⃣ <code>255, 145, 145</code> — Симметричный нейтральный\n"
-                "7️⃣ <code>255, 130, 130</code> — Сбалансированный белый\n"
-                "8️⃣ <code>255, 115, 115</code> — Мягкий белый\n"
-                "9️⃣ <code>255, 165, 140</code> — Светлый нейтральный\n"
-                "🔟 <code>255, 150, 125</code> — ⭐️ <b>Идеальный белый (Калибровка)</b>\n"
-                "1️⃣1️⃣ <code>255, 135, 100</code> — Естественный дневной\n"
-                "1️⃣2️⃣ <code>255, 120, 75</code> — Тёплый ламповый\n\n"
-                "<i>Нажимай кнопки 1..12 ниже — оттенок меняется мгновенно!</i>"
-            )
-            self.ui.send_message(chat_id, text, reply_markup=self.ui.led_menu_markup(), message_id=message_id)
-            return
-
-        if data.startswith("led_action:"):
-            if getattr(self.mqtt, "esp_status", None) != "online":
-                self.ui.answer_callback(callback_id, "❌ Модуль управления кулером (ESP8266) не в сети!", alert=True)
-                return
-            action = data.split(":", 1)[1]
-            if action == "on":
-                self.mqtt.publish_esp_action("LED_ON")
-                self.ui.answer_callback(callback_id, "💡 Подсветка включена")
-            elif action == "off":
-                self.mqtt.publish_esp_action("LED_OFF")
-                self.ui.answer_callback(callback_id, "🌑 Подсветка выключена")
-            elif action.startswith("bright:"):
-                level = action.split(":", 1)[1]
-                self.mqtt.publish_esp_action("LED_BRIGHTNESS", value=level)
-                self.ui.answer_callback(callback_id, f"🔆 Яркость: {level}")
-            elif action.startswith("color:"):
-                rgb = action.split(":", 1)[1]
-                self.mqtt.publish_esp_action("LED_COLOR", value=rgb)
-                self.ui.answer_callback(callback_id, "🎨 Оттенок изменён")
-            elif action.startswith("preset:"):
-                preset_id = action.split(":", 1)[1]
-                if preset_id in LED_WHITE_PRESETS:
-                    rgb, name = LED_WHITE_PRESETS[preset_id]
-                    self.mqtt.publish_esp_action("LED_COLOR", value=rgb)
-                    self.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
-            return
-
-        # Screenshot & Graphs buttons
-        if data == "screenshot":
-            if self.mqtt.desktop_status != "online":
-                self.ui.answer_callback(callback_id, "Desktop-агент недоступен — скриншот сделать нельзя.", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Делаю скриншот...")
-            cmd_id = self.mqtt.publish_desktop_action("screenshot")
-            if not cmd_id:
-                self.ui.send_message(chat_id, "❌ Не удалось отправить запрос скриншота: MQTT недоступен.")
-                return
-            self.pending_screenshots[cmd_id] = {"chat_id": chat_id, "requested_at": time.time()}
-            return
-
-        if data == "history_menu":
-            self.ui.answer_callback(callback_id)
-            stats = self.monitoring.history.stats()
-            text = self.ui.history_menu_text(count=stats.get("count", 0))
-            self.ui.send_message(chat_id, text, reply_markup=self.ui.history_menu_markup(), message_id=message_id)
-            return
-
-        if data.startswith("history:"):
-            period = data.split(":", 1)[1]
-            periods = {
-                "1h": (3600, "1 час"),
-                "6h": (6 * 3600, "6 часов"),
-                "24h": (24 * 3600, "24 часа"),
-                "7d": (7 * 86400, "7 дней"),
-                "30d": (30 * 86400, "30 дней"),
-            }
-            if period not in periods:
-                self.ui.answer_callback(callback_id, "Неизвестный период", alert=True)
-                return
-            seconds, title = periods[period]
-            self.ui.answer_callback(callback_id, "Строю график...")
-
-            def _build_and_send_chart():
-                try:
-                    chart_bytes, count = self.monitoring.history.render_chart(seconds, title)
-                except ValueError:
-                    self.ui.send_message(
-                        chat_id,
-                        "<b>📈 Графики</b>\n\nНедостаточно данных: подожди, пока агент соберёт хотя бы две точки телеметрии.",
-                        reply_markup=self.ui.history_menu_markup(),
-                    )
-                    return
-                except Exception:
-                    LOG.exception("Could not render telemetry chart")
-                    self.ui.send_message(
-                        chat_id,
-                        "<b>📈 Графики</b>\n\nНе удалось построить график. Состояние ПК продолжает работать.",
-                        reply_markup=self.ui.history_menu_markup(),
-                    )
-                    return
-                self.ui.send_photo(chat_id, chart_bytes, caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
-
-            threading.Thread(target=_build_and_send_chart, daemon=True, name="chart-renderer").start()
-            return
-
-        if data == "telemetry_now":
-            if self.mqtt.desktop_status != "online":
-                self.ui.answer_callback(callback_id, "Desktop-агент пока недоступен — свежую телеметрию получить нельзя.", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Обновляю состояние...")
-            cmd_id = self.mqtt.publish_desktop_action("telemetry")
-            self.pending_telemetry_cmd_ids[cmd_id] = (chat_id, message_id)
-            return
-
-        # 2. Boot & Unlock Flow Callbacks
-        if data == "power_on":
-            pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
-            state_str = getattr(getattr(pc_state, "state", None), "value", str(getattr(pc_state, "state", "")))
-            if (
-                state_str in ("READY", "DEGRADED", "LOCKED", "BOOTING")
-                or self.mqtt.system_status == "online"
-                or self.mqtt.desktop_status == "online"
-            ):
-                self.ui.answer_callback(callback_id, "Компьютер уже включен!", alert=True)
-                return
-
-            if getattr(self.mqtt, "esp_status", None) != "online":
-                self.ui.answer_callback(callback_id, "❌ Модуль питания (ESP8266) не в сети!", alert=True)
-                self.power_flow.start_power_on(chat_id)
-                return
-
-            self.physical_btn.revoke_morse_eligibility()
-            self.save_state()
-            self.ui.answer_callback(callback_id, "Запускаю ПК...")
-            self.power_flow.start_power_on(chat_id)
-            return
-
-        if data in {"flow_unlock_yes", "flow_unlock_no", "flow_unlock_and_workspace"}:
-            if data == "flow_unlock_and_workspace":
-                self.ui.answer_callback(callback_id, "🚀 Сетап запустится после разблокировки!")
-            else:
-                self.ui.answer_callback(callback_id)
-            self.power_flow.handle_unlock_decision(data, chat_id)
-            return
-
-        if data == "noop":
-            self.ui.answer_callback(callback_id)
-            return
-
-        if data == "flow_unlock_retry":
-            self.ui.answer_callback(callback_id, "Повторяю разблокировку...")
-            self.power_flow.handle_unlock_retry(chat_id)
-            return
-
-        if data == "flow_unlock_cancel":
-            self.ui.answer_callback(callback_id)
-            self.power_flow.handle_unlock_cancel(chat_id)
-            return
-
-        # 3. Workspace Flow Callbacks
-        if data in {"flow_workspace_yes", "flow_workspace_no"}:
-            if data == "flow_workspace_yes":
-                self.ui.answer_callback(callback_id)
-                text = self.ui.workspace_vpn_choice_text() if hasattr(self.ui, "workspace_vpn_choice_text") else ""
-                if not isinstance(text, str) or not text:
-                    text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
-                markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
-                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-                return
-            self.ui.answer_callback(callback_id)
-            self.power_flow.handle_workspace_decision(data, chat_id, self.start_async_workspace_setup)
-            return
-
-        if data in {"workspace_vpn:incy", "workspace_vpn:happ"}:
-            selected_vpn = data.split(":", 1)[1]
-            self.chosen_vpn = selected_vpn
-            vpn_name = "INCY" if selected_vpn == "incy" else "Happ"
-            self.ui.answer_callback(callback_id, f"Выбран {vpn_name} VPN! Запускаю...")
-            self.power_flow.chat_id = chat_id
-            self.power_flow.message_id = message_id
-            self.power_flow.stage = PowerFlowStage.WORKSPACE_RUNNING
-            self.power_flow.workspace_cancelled = False
-            self.power_flow.active_workspace_id = f"ws-{int(time.time())}"
-            self.power_flow.save_state()
-            self.start_async_workspace_setup(
-                chat_id,
-                card_message_id=message_id,
-                workspace_id=self.power_flow.active_workspace_id,
-                vpn=selected_vpn,
-            )
-            return
-
-        if data == "workspace_start_direct":
-            pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
-            if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
-                self.ui.answer_callback(callback_id)
-                text = self.ui.workspace_vpn_choice_text() if hasattr(self.ui, "workspace_vpn_choice_text") else ""
-                if not isinstance(text, str) or not text:
-                    text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
-                markup = self.ui.workspace_vpn_choice_markup(active_vpn=getattr(self, "chosen_vpn", "incy"))
-                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            elif pc_state.state == "LOCKED":
-                self.ui.answer_callback(callback_id)
-                text = "<b>Windows не разблокирована.</b>\n\nРазблокировать сейчас?"
-                markup = {
-                    "inline_keyboard": [
-                        [
-                            {
-                                "text": "Разблокировать и запустить",
-                                "style": "success",
-                                "icon_custom_emoji_id": ICONS.get("apps"),
-                                "callback_data": "flow_unlock_and_workspace",
-                            },
-                        ],
-                        [
-                            {
-                                "text": "Отмена",
-                                "style": "danger",
-                                "icon_custom_emoji_id": ICONS.get("cross"),
-                                "callback_data": "menu",
-                            },
-                        ]
-                    ]
-                }
-                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            else:
-                self.ui.answer_callback(callback_id)
-                text = f"<b>{pc_state.label}</b>\n\n{pc_state.reason}\n\nВключить ПК сейчас?"
-                markup = {
-                    "inline_keyboard": [
-                        [
-                            {
-                                "text": "Включить ПК",
-                                "style": "success",
-                                "icon_custom_emoji_id": ICONS.get("power"),
-                                "callback_data": "power_on",
-                            },
-                        ],
-                        [
-                            {
-                                "text": "Отмена",
-                                "style": "danger",
-                                "icon_custom_emoji_id": ICONS.get("cross"),
-                                "callback_data": "menu",
-                            },
-                        ]
-                    ]
-                }
-                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return
-
-        if data == "flow_workspace_cancel":
-            self.ui.answer_callback(callback_id, "Отменяю...")
-            self.power_flow.cancel_workspace(chat_id)
-            self.workspace_cancel_event.set()
-            return
-
-        # 4. Manual Actions
-        if data == "unlock_windows_manual":
-            pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
-            if pc_state.state in ("SHUTDOWN_OBSERVED", "UNREACHABLE") or self.mqtt.system_status != "online":
-                self.ui.answer_callback(callback_id, "ПК недоступен. Сначала включи его.", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Разблокирую...")
-            self.power_flow.start_manual_unlock(chat_id, message_id=message_id)
-            return
-
-        if data == "lock_windows":
-            self.ui.answer_callback(callback_id, "Блокирую...")
-            self.mqtt.publish_desktop_action("lock")
-            self.mqtt.publish_system_action("lock")
-            return
-
-        if data == "toggle_screen":
-            self.ui.answer_callback(callback_id, "Переключаю экран...")
-            self.mqtt.publish_desktop_action("screen_off")
-            return
-
-        if data == "minimize_windows":
-            self.ui.answer_callback(callback_id, "Сворачиваю окна...")
-            self.mqtt.publish_desktop_action("minimize_all")
-            return
-
-        if data == "sleep_pc":
-            self.ui.answer_callback(callback_id)
-            markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "Да, перевести в сон", "style": "primary", "callback_data": "sleep_confirm"},
-                        {"text": "✖ Отмена", "callback_data": "menu"},
-                    ]
-                ]
-            }
-            self.ui.send_message(
-                chat_id,
-                "<b>💤 Перевод ПК в спящий режим</b>\n\nВы уверены?",
-                reply_markup=markup,
-                message_id=message_id,
-            )
-            return
-
-        if data == "sleep_confirm":
-            self.ui.answer_callback(callback_id, "Отправляю в сон...")
-            if self.mqtt.system_status == "online":
-                self.mqtt.publish_system_action("sleep")
-            elif getattr(self.mqtt, "desktop_status", None) == "online":
-                self.mqtt.publish_desktop_action("sleep")
-            if hasattr(self.mqtt, "publish_esp_action"):
-                self.mqtt.publish_esp_action("LED_OFF")
-            return
-
-        if data == "hibernate_pc":
-            self.ui.answer_callback(callback_id, "Перевожу в гибернацию...")
-            if self.mqtt.system_status == "online":
-                self.mqtt.publish_system_action("hibernate")
-            elif getattr(self.mqtt, "desktop_status", None) == "online":
-                self.mqtt.publish_desktop_action("hibernate")
-            if hasattr(self.mqtt, "publish_esp_action"):
-                self.mqtt.publish_esp_action("LED_OFF")
-            return
-
-        if data.startswith("volume:"):
-            value = data.split(":", 1)[1]
-            if value == "toggle":
-                args = {"toggle": True}
-            elif value in {"25", "50", "75", "100"}:
-                args = {"percent": int(value)}
-            else:
-                self.ui.answer_callback(callback_id, "Неизвестный уровень громкости", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Меняю громкость...")
-            self.mqtt.publish_desktop_action("volume", args)
-            return
-
-        if data == "reboot_pc":
-            self.ui.answer_callback(callback_id)
-            self.ui.send_message(
-                chat_id,
-                "<b>🔄 Перезагрузка ПК</b>\n\nВыберите тип перезагрузки:\n\n"
-                "• <b>Перезагрузка + Разблок</b> — ПК перезагрузится, дождётся экрана входа, введёт пароль и предложит рабочий сетап.\n"
-                "• <b>Только перезагрузка</b> — обычный рестарт без авторазблокировки.",
-                reply_markup=self.ui.reboot_menu_markup(),
-                message_id=message_id,
-            )
-            return
-
-        if data == "reboot_unlock":
-            if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
-                self.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Перезагружаю с авторазблоком...")
-            if self.mqtt.system_status == "online":
-                self.mqtt.publish_system_action("restart")
-            elif getattr(self.mqtt, "desktop_status", None) == "online":
-                self.mqtt.publish_desktop_action("restart")
-            if hasattr(self.mqtt, "publish_esp_action"):
-                self.mqtt.publish_esp_action("LED_OFF")
-            self.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=True)
-            return
-
-        if data == "reboot_confirm":
-            if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
-                self.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Перезагружаю...")
-            if self.mqtt.system_status == "online":
-                self.mqtt.publish_system_action("restart")
-            elif getattr(self.mqtt, "desktop_status", None) == "online":
-                self.mqtt.publish_desktop_action("restart")
-            if hasattr(self.mqtt, "publish_esp_action"):
-                self.mqtt.publish_esp_action("LED_OFF")
-            self.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=False)
-            return
-
-        if data == "flow_reboot_cancel":
-            self.ui.answer_callback(callback_id, "Ожидание отменено")
-            self.power_flow.reset_flow()
-            self.ui.send_message(
-                chat_id,
-                "<b>Ожидание перезагрузки отменено.</b>",
-                reply_markup=self._power_menu_markup(),
-                message_id=message_id,
-            )
-            return
-
-        if data == "shutdown_pc":
-            self.ui.answer_callback(callback_id)
-            self.ui.send_message(
-                chat_id,
-                "<b>Выключение ПК</b>\n\nВыключить сейчас или запланировать по московскому времени?",
-                reply_markup=self.ui.shutdown_menu_markup(self.scheduled_shutdown_ts),
-                message_id=message_id,
-            )
-            return
-
-        if data == "shutdown_now_confirm":
-            self.ui.answer_callback(callback_id)
-            self._request_shutdown(chat_id, source="manual")
-            return
-
-        if data == "shutdown_at_time":
-            self.ui.answer_callback(callback_id)
-            self.awaiting_shutdown_time_chat_id = chat_id
-            self.ui.send_message(
-                chat_id,
-                "<b>Выключение по времени</b>\n\nОтправь время в формате <code>HH:MM</code>. Часовой пояс — Москва.\nНапример: <code>23:45</code>",
-                reply_markup={"inline_keyboard": [self.ui.back_button("shutdown_pc")]},
-                message_id=message_id,
-            )
-            return
-
-        if data.startswith("shutdown_after:"):
-            try:
-                minutes = int(data.split(":", 1)[1])
-            except ValueError:
-                self.ui.answer_callback(callback_id, "Некорректный таймер", alert=True)
-                return
-            self.ui.answer_callback(callback_id)
-            target = datetime.now(MOSCOW) + timedelta(minutes=minutes)
-            self._show_shutdown_schedule_confirmation(chat_id, target, message_id)
-            return
-
-        if data.startswith("shutdown_schedule_confirm:"):
-            try:
-                target_ts = float(data.rsplit(":", 1)[1])
-            except ValueError:
-                self.ui.answer_callback(callback_id, "Некорректное время", alert=True)
-                return
-            self.ui.answer_callback(callback_id, "Таймер установлен")
-            self._set_shutdown_schedule(chat_id, target_ts, message_id)
-            return
-
-        if data == "shutdown_schedule_cancel":
-            self.ui.answer_callback(callback_id, "Таймер отменён")
-            self.scheduled_shutdown_ts = None
-            self.shutdown_candidate_ts = None
-            self.awaiting_shutdown_time_chat_id = None
-            self.save_state()
-            self.ui.send_message(
-                chat_id,
-                "<b>Таймер выключения отменён.</b>",
-                reply_markup=self._power_menu_markup(),
-                message_id=message_id,
-            )
-            return
-
-        if data.startswith("app:"):
-            app_name = data.split(":", 1)[1]
-            if getattr(self.mqtt, "desktop_status", None) != "online":
-                self.ui.answer_callback(
-                    callback_id,
-                    "ПК заблокирован или выключен. Разблокируйте Windows для запуска программ.",
-                    alert=True,
-                )
-                return
-            self.ui.answer_callback(callback_id, f"Запускаю {app_name}...")
-            self.mqtt.publish_desktop_action("launch_app", {"app": app_name})
-            return
-
-        # 5. Physical Button Management Callbacks
-        if data == "physical_test":
-            self.ui.answer_callback(callback_id)
-            self.physical_btn.mode = "test"
-            self.physical_btn.input_entries = ["Ожидаю нажатия на кнопку..."]
-            text = "<b>🕹 Физическая кнопка — диагностика</b>\n\nОжидаю нажатия..."
-            res = self.ui.send_message(chat_id, text, reply_markup={"inline_keyboard": [self.ui.back_button("physical_button")]}, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.input_message_id = res["message_id"]
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data in ("physical_record_begin", "physical_password_begin"):
-            self.ui.answer_callback(callback_id)
-            self.mqtt.publish_esp_action("START_PHYSICAL_RECORDING")
-            self.physical_btn.mode = "record_password"
-            self.physical_btn.password_draft = []
-            self.physical_btn.last_press_info = None
-            text = self.physical_btn.password_record_text()
-            markup = self.physical_btn.password_record_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data.startswith("physical_record_save:"):
-            seq = data.split(":", 1)[1]
-            self.ui.answer_callback(callback_id, "Сохраняю...")
-            self.physical_btn.mode = None
-            self.physical_btn.active_message_id = None
-            self.physical_btn.start_save_password(seq, chat_id, self.save_state)
-            return
-
-        if data.startswith("physical_add:"):
-            self.ui.answer_callback(callback_id)
-            symbol = data.split(":", 1)[1]
-            if len(self.physical_btn.password_draft) < 12:
-                self.physical_btn.password_draft.append(symbol)
-                self.physical_btn.last_press_info = "Введено в боте"
-            text = self.physical_btn.password_record_text()
-            markup = self.physical_btn.password_record_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data == "physical_back":
-            self.ui.answer_callback(callback_id)
-            if self.physical_btn.password_draft:
-                self.physical_btn.password_draft.pop()
-            text = self.physical_btn.password_record_text()
-            markup = self.physical_btn.password_record_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data == "physical_clear":
-            self.ui.answer_callback(callback_id, "Очищено")
-            self.physical_btn.password_draft = []
-            self.physical_btn.last_press_info = None
-            text = self.physical_btn.password_record_text()
-            markup = self.physical_btn.password_record_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data == "physical_save":
-            self.ui.answer_callback(callback_id, "Сохраняю...")
-            self.physical_btn.mode = None
-            self.physical_btn.active_message_id = None
-            seq = "".join(self.physical_btn.password_draft)
-            self.physical_btn.start_save_password(seq, chat_id, self.save_state)
-            return
-
-        if data == "physical_cancel_record":
-            self.ui.answer_callback(callback_id, "Отменено")
-            self.physical_btn.mode = None
-            self.physical_btn.active_message_id = None
-            self.physical_btn.password_draft = []
-            self.physical_btn.last_press_info = None
-            text = self.physical_btn.physical_control_text()
-            markup = self.physical_btn.physical_control_markup()
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return
-
-        if data == "physical_password_delete":
-            self.ui.answer_callback(callback_id, "Удаляю...")
-            self.physical_btn.start_delete_password(chat_id)
-            return
-
-        if data == "physical_unlock":
-            self.ui.answer_callback(callback_id, "Разблокирую...")
-            self.physical_btn.start_unlock_input(chat_id)
-            return
-
-        if data == "physical_unlock_pattern_begin":
-            self.ui.answer_callback(callback_id)
-            self.physical_btn.mode = "record_unlock_pattern"
-            self.physical_btn.unlock_draft = list(self.physical_btn.saved_unlock_pattern or "CC")
-            self.physical_btn.last_press_info = None
-            text = self.physical_btn.unlock_builder_text()
-            markup = self.physical_btn.unlock_builder_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data.startswith("unlock_pat_add:"):
-            self.ui.answer_callback(callback_id)
-            symbol = data.split(":", 1)[1]
-            if len(self.physical_btn.unlock_draft) < 8:
-                self.physical_btn.unlock_draft.append(symbol)
-                self.physical_btn.last_press_info = "Введено в боте"
-            text = self.physical_btn.unlock_builder_text()
-            markup = self.physical_btn.unlock_builder_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data == "unlock_pat_back":
-            self.ui.answer_callback(callback_id)
-            if self.physical_btn.unlock_draft:
-                self.physical_btn.unlock_draft.pop()
-            text = self.physical_btn.unlock_builder_text()
-            markup = self.physical_btn.unlock_builder_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data == "unlock_pat_reset":
-            self.ui.answer_callback(callback_id)
-            self.physical_btn.unlock_draft = ["C", "C"]
-            self.physical_btn.last_press_info = "Сброс"
-            text = self.physical_btn.unlock_builder_text()
-            markup = self.physical_btn.unlock_builder_markup()
-            res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            if res and res.get("message_id"):
-                self.physical_btn.active_message_id = res["message_id"]
-            return
-
-        if data == "unlock_pat_save":
-            self.ui.answer_callback(callback_id, "Сохраняю...")
-            self.physical_btn.mode = None
-            self.physical_btn.active_message_id = None
-            seq = "".join(self.physical_btn.unlock_draft)
-            self.physical_btn.saved_unlock_pattern = seq
-            self.save_state()
-            pat_disp = self.physical_btn.format_password_display(seq)
-            text = (
-                f"<b>✅ Жест разблокировки сохранён!</b>\n\n<blockquote><b>{pat_disp}</b></blockquote>\n"
-                "Теперь при вводе этой комбинации на кнопке (в течение 5 минут после морзе-включения) Windows автоматически разблокируется."
-            )
-            self.ui.send_message(chat_id, text, reply_markup=self.physical_btn.physical_control_markup(), message_id=message_id)
+        if route_antigravity_callback(self, data, chat_id, message_id, callback_id):
             return
 
         self.ui.answer_callback(callback_id)
@@ -1984,6 +1394,193 @@ class PcControlBotApp:
         self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)
         self.power_flow.reset_flow()
 
+    def start_async_game_setup(self, chat_id, card_message_id=None, game="gta5", vpn=None, workspace_id=None):
+        if not hasattr(self, "_workspace_start_lock"):
+            self._workspace_start_lock = threading.Lock()
+        with self._workspace_start_lock:
+            if getattr(self, "_workspace_running", False):
+                LOG.warning("Setup runner is already active, ignoring duplicate start request")
+                return
+            self._workspace_running = True
+
+        selected_vpn = vpn or getattr(self, "chosen_vpn", None) or "incy"
+
+        def _runner():
+            try:
+                self.run_game_setup_steps(chat_id, card_message_id, game=game, vpn=selected_vpn, workspace_id=workspace_id)
+            finally:
+                self._workspace_running = False
+
+        threading.Thread(
+            target=_runner,
+            name="game-runner-thread",
+            daemon=True,
+        ).start()
+
+    def run_game_setup_steps(self, chat_id, card_message_id=None, game="gta5", vpn=None, workspace_id=None):
+        active_vpn = vpn or getattr(self, "chosen_vpn", None) or "incy"
+        self.chosen_vpn = active_vpn
+        g_info = GAME_INFO.get(game, GAME_INFO["gta5"])
+        game_name = g_info["name"]
+        scenario_name = g_info["scenario"]
+
+        steps = get_game_steps(game, active_vpn)
+        self.current_workspace_steps = steps
+        self.workspace_card_title = f"<b>🎮 Запуск игрового сетапа ({game_name})...</b>"
+        self.app_statuses = {step["id"]: "⏳ В очереди" for step in steps}
+        self.workspace_cancel_event.clear()
+
+        vpn_ev = getattr(self, "vpn_ready_event", None)
+        if vpn_ev:
+            vpn_ev.clear()
+        happ_ev = getattr(self, "happ_ready_event", None)
+        if happ_ev:
+            happ_ev.clear()
+
+        self.workspace_executed_event.clear()
+        self.workspace_execution_result = None
+
+        def render_checklist():
+            lines = [
+                format_workspace_step_line(step, self.app_statuses.get(step['id'], '⏳ В очереди'))
+                for step in self.current_workspace_steps
+            ]
+            return f"<b>🎮 Запуск игрового сетапа ({game_name})...</b>\n\n" + "\n".join(lines)
+
+        cancel_btn = {"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}
+        if ICONS.get("cross"):
+            cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
+        markup = {"inline_keyboard": [[cancel_btn]]}
+
+        res = self.ui.send_message(chat_id, render_checklist(), reply_markup=markup, message_id=card_message_id)
+        msg_id = res["message_id"] if res and res.get("message_id") else card_message_id
+        self.workspace_card_msg_id = msg_id
+
+        # 0. Wait up to 15s for desktop agent to be online if needed
+        if self.mqtt.desktop_status != "online":
+            LOG.info("Desktop agent not online yet, waiting up to 15s...")
+            for _ in range(30):
+                if self.workspace_cancel_event.is_set():
+                    self.power_flow.reset_flow()
+                    return
+                if self.mqtt.desktop_status == "online":
+                    break
+                time.sleep(0.5)
+
+        if self.mqtt.desktop_status != "online":
+            LOG.warning("Desktop agent still not online after 15s wait.")
+            error_text = render_checklist() + "\n\n<b>Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
+            error_markup = {
+                "inline_keyboard": [
+                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                    [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
+                ]
+            }
+            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+            return
+
+        # 1. Issue launch_app command to agent.py
+        ws_id = workspace_id or f"game-ws-{int(time.time())}"
+        cmd_id = self.mqtt.publish_desktop_action(
+            "launch_app",
+            {"app": scenario_name, "workspace_id": ws_id, "vpn": active_vpn},
+            timeout=120,
+        )
+        self.active_workspace_cmd_id = cmd_id
+
+        # 2. Wait for Happ / INCY VPN readiness
+        vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
+        vpn_ready = self._wait_event_or_cancel(vpn_event, 55.0) if vpn_event else True
+
+        if self.workspace_cancel_event.is_set():
+            LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
+            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+            self.power_flow.reset_flow()
+            return
+
+        vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
+        vpn_name = "INCY" if active_vpn == "incy" else "Happ"
+
+        if not vpn_ready and (vpn_event and not vpn_event.is_set()):
+            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+            self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
+            error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск игры отменён в целях безопасности."
+            error_markup = {
+                "inline_keyboard": [
+                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
+                ]
+            }
+            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+            return
+
+        # 3. Wait for full execution ACK from agent.py (up to 65 seconds)
+        ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 65.0)
+
+        if self.workspace_cancel_event.is_set():
+            LOG.info("Runner thread detected cancellation during game execution wait. Halting.")
+            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+            self.power_flow.reset_flow()
+            return
+
+        if not ws_executed or self.workspace_execution_result == "failed":
+            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+            error_text = render_checklist() + f"\n\n<b>Ошибка запуска {game_name}.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
+            error_markup = {
+                "inline_keyboard": [
+                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
+                ]
+            }
+            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+            return
+
+        # 4. Strict verification check: every step must be strictly verified
+        unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
+        if unverified:
+            notice_text = render_checklist() + f"\n\n<b>Игровой сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
+            notice_markup = {
+                "inline_keyboard": [
+                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
+                ]
+            }
+            self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+            return
+
+        # 5. Final Success!
+        final_text = (
+            render_checklist()
+            + f"\n\n<b>✅ Игровой сетап успешно запущен!</b>\n"
+            f"{vpn_name} VPN подключен, Antigravity активен, {game_name} запущена."
+        )
+        final_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "⚡ Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
+                ],
+                [
+                    {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                    {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                ],
+            ]
+        }
+        self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)
+        self.power_flow.reset_flow()
+
     def execute_console_command(self, chat_id, cmd_text, target=None, shell=None):
         if not cmd_text or not cmd_text.strip():
             self.ui.send_message(chat_id, "⚠️ Команда не может быть пустой.")
@@ -2106,172 +1703,7 @@ class PcControlBotApp:
             )
 
     def handle_message(self, message):
-        chat_id = message["chat"]["id"]
-        chat_type = message.get("chat", {}).get("type", "private")
-        from_id = message.get("from", {}).get("id")
-        text = message.get("text", "").strip()
-
-        # Group chats support: only allow player command if user is authorized
-        if chat_type != "private":
-            if from_id != ALLOWED_USER_ID:
-                return
-            if text.lower().startswith(("/player", "!player", "плеер", "музыка")):
-                incoming_msg_id = message.get("message_id")
-                if incoming_msg_id:
-                    try:
-                        self.ui.delete_message(chat_id, incoming_msg_id)
-                    except Exception:
-                        pass
-                media_state = getattr(self, "latest_media_state", None) or getattr(self.mqtt, "last_media_state", {})
-                self._send_player_card(chat_id, media_state, business_connection_id=None)
-                self.mqtt.send_media_command("refresh")
-            return
-
-        if chat_id != ALLOWED_USER_ID:
-            self.ui.send_message(chat_id, "Доступ запрещён.")
-            return
-
-        lower_text = text.lower().strip()
-        if lower_text in {"/start", "/menu", "меню", "меню пк"}:
-            self.console_active_chat_id = None
-            res = self.ui.send_message(
-                chat_id,
-                self.monitoring.dashboard_text(self.latest_media_state or getattr(self.mqtt, "last_media_state", {})),
-                reply_markup=self._main_menu_markup(),
-            )
-            if res and isinstance(res, dict) and "message_id" in res:
-                self.active_main_menu_message_id = res["message_id"]
-                self.current_menu_view = "main"
-                self.save_state()
-            return
-
-        if lower_text in {"/console", "консоль", "терминал"}:
-            self.console_active_chat_id = chat_id
-            self.current_menu_view = "console"
-            text_card = self.ui.console_card_text(target=self.console_target, shell=self.console_shell)
-            markup = self.ui.console_menu_markup(target=self.console_target, shell=self.console_shell)
-            self.ui.send_message(chat_id, text_card, reply_markup=markup)
-            return
-
-        if lower_text in {"/exit", "/quit", "выход"}:
-            if self.console_active_chat_id == chat_id:
-                self.console_active_chat_id = None
-                self.current_menu_view = "main"
-                self.ui.send_message(chat_id, "🚪 <b>Консоль закрыта.</b>", reply_markup=self._main_menu_markup())
-                return
-
-        if lower_text.startswith("/cmd"):
-            parts = text.split(None, 1)
-            if len(parts) > 1 and parts[1].strip():
-                self.execute_console_command(chat_id, parts[1].strip(), target=self.console_target, shell="cmd")
-            else:
-                self.ui.send_message(chat_id, "ℹ️ Использование: <code>/cmd &lt;команда&gt;</code>\nНапример: <code>/cmd dir C:\\</code>")
-            return
-
-        if lower_text.startswith("/ps"):
-            parts = text.split(None, 1)
-            if len(parts) > 1 and parts[1].strip():
-                self.execute_console_command(chat_id, parts[1].strip(), target=self.console_target, shell="powershell")
-            else:
-                self.ui.send_message(chat_id, "ℹ️ Использование: <code>/ps &lt;команда&gt;</code>\nНапример: <code>/ps Get-Process</code>")
-            return
-
-        if getattr(self, "console_active_chat_id", None) == chat_id and not text.startswith("/"):
-            self.execute_console_command(chat_id, text, target=self.console_target, shell=self.console_shell)
-            return
-
-        if lower_text in {"/led", "/led_menu", "подсветка", "кулер"}:
-            text = (
-                "<b>💡 Калибровка белого цвета кулера</b>\n\n"
-                "Кулер: <i>Ocypus Gamma A40 WH ARGB</i>\n"
-                "Пин управления: <code>D2 (ESP8266)</code>\n\n"
-                "<b>⚡ Быстрые режимы:</b>\n"
-                "👁 <b>Для глаз:</b> <code>255, 150, 125</code> (Идеал вживую)\n"
-                "📸 <b>Для камеры:</b> <code>228, 245, 255</code> (Под сенсор камеры)\n\n"
-                "<b>🎨 Палитра оттенков (1..12):</b>\n"
-                "1️⃣ <code>255, 150, 165</code> — Холодный снежный (зелень срезана)\n"
-                "2️⃣ <code>255, 140, 160</code> — Арктический холодный (без циана)\n"
-                "3️⃣ <code>255, 130, 155</code> — Ледяной кристалл\n"
-                "4️⃣ <code>255, 120, 150</code> — Глубокий холодный\n"
-                "5️⃣ <code>255, 160, 160</code> — Симметричный чистый (G=B)\n"
-                "6️⃣ <code>255, 145, 145</code> — Симметричный нейтральный\n"
-                "7️⃣ <code>255, 130, 130</code> — Сбалансированный белый\n"
-                "8️⃣ <code>255, 115, 115</code> — Мягкий белый\n"
-                "9️⃣ <code>255, 165, 140</code> — Светлый нейтральный\n"
-                "🔟 <code>255, 150, 125</code> — ⭐️ <b>Идеальный белый (Калибровка)</b>\n"
-                "1️⃣1️⃣ <code>255, 135, 100</code> — Естественный дневной\n"
-                "1️⃣2️⃣ <code>255, 120, 75</code> — Тёплый ламповый\n\n"
-                "<i>Нажимай кнопки 1..12 ниже — оттенок меняется мгновенно!</i>"
-            )
-            self.ui.send_message(chat_id, text, reply_markup=self.ui.led_menu_markup())
-            return
-
-        if lower_text.startswith(("/led ", "подсветка ")):
-            if getattr(self.mqtt, "esp_status", None) != "online":
-                self.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
-                return
-            parts = lower_text.split(None, 1)
-            arg = parts[1].strip() if len(parts) > 1 else ""
-            if arg in LED_WHITE_PRESETS:
-                rgb, name = LED_WHITE_PRESETS[arg]
-                self.mqtt.publish_esp_action("LED_COLOR", value=rgb)
-                self.ui.send_message(chat_id, f"💡 Выбран оттенок #{arg}: {name} (<code>{rgb}</code>)")
-                return
-
-        if lower_text in {"/led_on", "включить подсветку"}:
-            if getattr(self.mqtt, "esp_status", None) != "online":
-                self.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
-                return
-            self.mqtt.publish_esp_action("LED_ON")
-            self.ui.send_message(chat_id, "💡 Подсветка кулера включена")
-            return
-
-        if lower_text in {"/led_off", "выключить подсветку"}:
-            if getattr(self.mqtt, "esp_status", None) != "online":
-                self.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
-                return
-            self.mqtt.publish_esp_action("LED_OFF")
-            self.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
-            return
-
-        if lower_text.startswith(("/player", "!player", "/music")) or lower_text in {"плеер", "музыка"}:
-            incoming_msg_id = message.get("message_id")
-            if incoming_msg_id:
-                try:
-                    self.ui.delete_message(chat_id, incoming_msg_id)
-                except Exception:
-                    pass
-            media_state = getattr(self, "latest_media_state", None) or getattr(self.mqtt, "last_media_state", {})
-            self._send_player_card(chat_id, media_state, business_connection_id=None)
-            self.mqtt.send_media_command("refresh")
-            return
-
-        if text.lower().startswith("/activity") or text.lower() in {"активность"}:
-            today_str = datetime.now(MOSCOW).strftime("%Y-%m-%d")
-            self.pending_activity_chat_id = chat_id
-            self.mqtt.query_activity("summary", today_str)
-            self.ui.send_message(chat_id, f"📊 Запрашиваю статистику за {today_str}...")
-            return
-
-        time_text = text
-        if text.lower().startswith("/shutdown "):
-            time_text = text.split(None, 1)[1].strip()
-        if self.awaiting_shutdown_time_chat_id == chat_id or text.lower().startswith("/shutdown "):
-            try:
-                hour_text, minute_text = time_text.split(":", 1)
-                hour, minute = int(hour_text), int(minute_text)
-                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                    raise ValueError
-            except (ValueError, TypeError):
-                self.ui.send_message(chat_id, "❌ Введи время как <code>HH:MM</code>, например <code>23:45</code>.")
-                return
-
-            now = datetime.now(MOSCOW)
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            self.awaiting_shutdown_time_chat_id = None
-            self._show_shutdown_schedule_confirmation(chat_id, target)
+        route_message(self, message)
 
     def _show_shutdown_schedule_confirmation(self, chat_id, target, message_id=None):
         self.shutdown_candidate_ts = target.timestamp()
@@ -2422,12 +1854,15 @@ class PcControlBotApp:
 
         self._check_dashboard_auto_refresh(now)
 
-        # Power flow runtime timeout watchdog (cancels zombie flows after 5m)
-        if hasattr(self, "power_flow") and hasattr(self.power_flow, "check_timeout"):
+        # Power flow tick (live-log countdown/spinner and runtime timeout watchdog)
+        if hasattr(self, "power_flow"):
             try:
-                self.power_flow.check_timeout(now)
+                if hasattr(self.power_flow, "tick"):
+                    self.power_flow.tick(now)
+                elif hasattr(self.power_flow, "check_timeout"):
+                    self.power_flow.check_timeout(now)
             except Exception:
-                LOG.exception("power_flow.check_timeout failed in scheduler_tick")
+                LOG.exception("power_flow.tick failed in scheduler_tick")
 
         # Auto-LED cooler power watchdog (cuts fan power if PC is turned off, asleep, or frozen)
         telem_age = self.monitoring.telemetry_age()
@@ -2461,17 +1896,26 @@ class PcControlBotApp:
         if self.pending_shutdown_cmd_id and self.pending_shutdown_started_at:
             confirmed = self._check_shutdown_confirmation(now)
             if not confirmed and (now - float(self.pending_shutdown_started_at) >= SHUTDOWN_CONFIRM_TIMEOUT_SECONDS):
+                emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
+                if ICONS.get("power"):
+                    emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
+                timeout_markup = {
+                    "inline_keyboard": [
+                        [emerg_btn],
+                        self.ui.back_button("power_menu"),
+                    ]
+                }
                 if self.shutdown_acknowledged:
                     self.ui.send_message(
                         ALLOWED_USER_ID,
                         "<b>⚠️ Связь потеряна, состояние ПК неизвестно.</b>\n\nКоманда выключения была принята Windows, но подтверждение завершения работы не получено за 2 минуты.",
-                        reply_markup=self._power_menu_markup(),
+                        reply_markup=timeout_markup,
                     )
                 else:
                     self.ui.send_message(
                         ALLOWED_USER_ID,
                         "<b>❌ Выключение не подтверждено.</b>\n\nWindows не ответила на команду выключения за 2 минуты.",
-                        reply_markup=self._power_menu_markup(),
+                        reply_markup=timeout_markup,
                     )
                 self._clear_pending_shutdown()
 
@@ -2573,14 +2017,17 @@ class PcControlBotApp:
             if updates:
                 for update in updates:
                     self.offset = int(update["update_id"]) + 1
-                    if "message" in update:
-                        self.handle_message(update["message"])
-                    elif "business_message" in update:
-                        self.handle_business_message(update["business_message"])
-                    elif "business_connection" in update:
-                        self.handle_business_connection(update["business_connection"])
-                    elif "callback_query" in update:
-                        self.handle_callback(update["callback_query"])
+                    try:
+                        if "message" in update:
+                            self.handle_message(update["message"])
+                        elif "business_message" in update:
+                            self.handle_business_message(update["business_message"])
+                        elif "business_connection" in update:
+                            self.handle_business_connection(update["business_connection"])
+                        elif "callback_query" in update:
+                            self.handle_callback(update["callback_query"])
+                    except Exception:
+                        LOG.exception("Error processing Telegram update %s", update.get("update_id"))
                 self.save_state()
         except Exception:
             LOG.exception("Telegram polling exception")
@@ -2594,6 +2041,10 @@ class PcControlBotApp:
                     "commands": [
                         {"command": "menu", "description": "🖥 Главное меню"},
                         {"command": "player", "description": "🎵 Музыкальный плеер"},
+                        {"command": "stealth", "description": "🕶️ Режим скрытности (Blackout)"},
+                        {"command": "activity", "description": "📊 Активность за день"},
+                        {"command": "antigravity", "description": "🔮 Профили Antigravity"},
+                        {"command": "esc", "description": "⚡ Нажатие Escape (1..20x)"},
                         {"command": "console", "description": "💻 Консоль Windows"},
                     ]
                 },

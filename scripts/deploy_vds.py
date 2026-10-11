@@ -40,6 +40,14 @@ MANIFEST_FILES = [
     "telegram_ui.py",
     "requirements.txt",
     "resources/icons.json",
+    "routers/__init__.py",
+    "routers/command_router.py",
+    "routers/console_router.py",
+    "routers/monitoring_router.py",
+    "routers/physical_router.py",
+    "routers/player_router.py",
+    "routers/power_router.py",
+    "routers/workspace_router.py",
 ]
 
 
@@ -76,12 +84,9 @@ def run_ssh(cmd, check=True, input_bytes=None):
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=10",
+        VDS_HOST,
+        cmd,
     ]
-    bind_ip = get_bind_ip()
-    if bind_ip and not bind_ip.startswith("172.18."):
-        ssh_args.extend(["-b", bind_ip])
-
-    ssh_args.extend([VDS_HOST, cmd])
     res = subprocess.run(
         ssh_args,
         input=input_bytes,
@@ -90,6 +95,29 @@ def run_ssh(cmd, check=True, input_bytes=None):
     )
     res.stdout = res.stdout.decode("utf-8", errors="replace") if isinstance(res.stdout, bytes) else (res.stdout or "")
     res.stderr = res.stderr.decode("utf-8", errors="replace") if isinstance(res.stderr, bytes) else (res.stderr or "")
+
+    if res.returncode != 0:
+        bind_ip = get_bind_ip()
+        if bind_ip and not bind_ip.startswith("172.18."):
+            retry_args = [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=10",
+                "-b", bind_ip,
+                VDS_HOST,
+                cmd,
+            ]
+            retry_res = subprocess.run(
+                retry_args,
+                input=input_bytes,
+                capture_output=True,
+                text=False,
+            )
+            retry_res.stdout = retry_res.stdout.decode("utf-8", errors="replace") if isinstance(retry_res.stdout, bytes) else (retry_res.stdout or "")
+            retry_res.stderr = retry_res.stderr.decode("utf-8", errors="replace") if isinstance(retry_res.stderr, bytes) else (retry_res.stderr or "")
+            if retry_res.returncode == 0:
+                return retry_res
 
     if check and res.returncode != 0:
         raise RuntimeError(
@@ -197,9 +225,10 @@ def rollback_to_previous():
         f"    cp {prev_dir}/$f {REMOTE_BASE}/$f; "
         f"  fi; "
         f"done && "
-        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources 2>/dev/null || true && "
+        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
         f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
         f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "
+        f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && chmod 0644 {REMOTE_BASE}/routers/*; fi && "
         f"systemctl restart pc-control-bot.service"
     )
     run_ssh(restore_cmd)
@@ -230,9 +259,10 @@ def deploy_and_verify(release_tag, remote_release_dir):
         f"  cp {remote_release_dir}/$f {REMOTE_BASE}/$f; "
         f"done && "
         f"echo '{release_tag}' > {REMOTE_BASE}/current_release && "
-        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources 2>/dev/null || true && "
+        f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
         f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
         f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "
+        f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && chmod 0644 {REMOTE_BASE}/routers/*; fi && "
         f"systemctl restart pc-control-bot.service"
     )
     run_ssh(deploy_cmd)
