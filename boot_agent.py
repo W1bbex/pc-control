@@ -290,7 +290,6 @@ class WTSINFOEX_LEVEL1_W(ctypes.Structure):
     _fields_ = [
         ("SessionId", wintypes.ULONG),
         ("SessionState", wintypes.ULONG),
-        ("State", wintypes.LONG),
         ("SessionFlags", wintypes.LONG),
     ]
 
@@ -566,6 +565,7 @@ class SystemAgent:
         self.previous_net_time = time.time()
         self._last_reconnect_attempt = 0.0
         self._shutdown_detected = False
+        self.boot_id = AGENT_BOOT_ID
         self.load_state()
         self.setup_mqtt_client()
 
@@ -772,11 +772,9 @@ class SystemAgent:
     @staticmethod
     def get_local_ip():
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.connect(("1.1.1.1", 53))
-            address = sock.getsockname()[0]
-            sock.close()
-            return address
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("1.1.1.1", 53))
+                return sock.getsockname()[0]
         except OSError:
             return "unknown"
 
@@ -969,32 +967,44 @@ class SystemAgent:
 
     @staticmethod
     def top_processes():
-        for process in psutil.process_iter(["pid"]):
+        tracked = {}
+        for process in psutil.process_iter(["pid", "name"]):
             try:
                 process.cpu_percent(None)
+                tracked[process.pid] = process
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         time.sleep(0.7)
 
         processes = []
-        for process in psutil.process_iter(["pid", "name", "memory_info"]):
-            if process.info["pid"] == 0:
+        for pid, process in tracked.items():
+            if pid == 0:
                 continue
             try:
                 cpu_percent = process.cpu_percent(None)
                 cpu_percent /= max(1, psutil.cpu_count() or 1)
+                mem = process.info.get("memory_info") if hasattr(process, "info") and process.info else None
+                if mem is None:
+                    try:
+                        mem = process.memory_info()
+                    except Exception:
+                        mem = None
+                rss_bytes = getattr(mem, "rss", 0) if mem else 0
+                name = process.info.get("name") if hasattr(process, "info") and process.info else None
+                if not name:
+                    try:
+                        name = process.name()
+                    except Exception:
+                        name = "unknown"
                 processes.append(
                     {
-                        "pid": process.info["pid"],
-                        "name": process.info["name"] or "unknown",
+                        "pid": pid,
+                        "name": name or "unknown",
                         "cpu_percent": round(cpu_percent, 1),
-                        "memory_mb": round(
-                            process.info["memory_info"].rss / 1_000_000,
-                            1,
-                        ),
+                        "memory_mb": round(rss_bytes / 1_000_000, 1),
                     }
                 )
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, TypeError):
                 continue
         processes.sort(
             key=lambda item: (item["cpu_percent"], item["memory_mb"]),
@@ -1441,7 +1451,7 @@ class SystemAgent:
                                 "agent": "system",
                                 "session": "unknown",
                                 "ts": time.time(),
-                                "boot_id": self.boot_id,
+                                "boot_id": getattr(self, "boot_id", AGENT_BOOT_ID),
                             }
                             pub_info = self.mqtt.publish(
                                 TOPIC_STATUS,
@@ -1477,12 +1487,15 @@ class SystemAgent:
 
     def _ensure_hosts_mapping(self):
         try:
-            hosts_path = Path(r"C:\Windows\System32\drivers\etc\hosts")
+            target_ip = os.getenv("API_HOSTS_IP", self.config.get("api_hosts_ip", "")).strip()
+            if not target_ip:
+                return
+            sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+            hosts_path = Path(sys_root) / "System32" / "drivers" / "etc" / "hosts"
             if not hosts_path.exists():
                 return
             content = hosts_path.read_text(encoding="utf-8", errors="replace")
-            target_ip = "203.0.113.10"
-            target_domain = "mqtt.example.com"
+            target_domain = self.config.get("api_hosts_domain", "mqtt.example.com").strip()
 
             lines = content.splitlines()
             found = False
@@ -1564,7 +1577,7 @@ class SystemAgent:
                     "agent": "system",
                     "session": "unknown",
                     "ts": time.time(),
-                    "boot_id": self.boot_id,
+                    "boot_id": getattr(self, "boot_id", AGENT_BOOT_ID),
                 }
                 if getattr(self, "_shutdown_detected", False):
                     status_payload["event"] = "graceful_shutdown"

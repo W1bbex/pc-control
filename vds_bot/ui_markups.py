@@ -689,7 +689,7 @@ class UiMarkupsMixin:
             {
                 "text": "« Меню",
                 "style": "secondary",
-                "callback_data": "main_menu",
+                "callback_data": "menu",
             },
         ]
         if refresh_icon:

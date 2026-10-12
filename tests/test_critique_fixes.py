@@ -88,9 +88,10 @@ def test_vds_bot_command_timeout_cleans_pending_telemetry():
 
 
 def test_agent_top_processes_not_duplicated():
-    """Verify action == 'top_processes' occurs exactly once in agent.py."""
+    """Verify action == 'top_processes' occurs exactly once across agent dispatchers."""
+    dispatcher_file = Path(__file__).resolve().parent.parent / "desktop" / "action_dispatcher.py"
     agent_file = Path(__file__).resolve().parent.parent / "agent.py"
-    source = agent_file.read_text(encoding="utf-8")
+    source = (dispatcher_file.read_text(encoding="utf-8") if dispatcher_file.exists() else "") + agent_file.read_text(encoding="utf-8")
     count = source.count('if action == "top_processes":')
     assert count == 1, f"Expected 1 occurrence of 'if action == \"top_processes\":', found {count}"
 
@@ -251,4 +252,79 @@ def test_boot_agent_network_rates_none_safe():
         rates = agent.network_rates()
         assert rates["download_mbps"] == 0.0
         assert rates["upload_mbps"] == 0.0
+
+
+def test_boot_agent_wtsinfoex_struct_offsets():
+    """Verify WTSINFOEX_LEVEL1_W has correct field alignment without redundant State field."""
+    import boot_agent
+    import ctypes
+
+    struct_cls = boot_agent.WTSINFOEX_LEVEL1_W
+    assert ctypes.sizeof(struct_cls) == 12, f"Expected 12 bytes, got {ctypes.sizeof(struct_cls)}"
+    assert struct_cls.SessionFlags.offset == 8, f"Expected SessionFlags offset 8, got {struct_cls.SessionFlags.offset}"
+
+
+def test_stealth_guard_vk_codes_mapping():
+    """Verify VK codes for Shift and Ctrl are not inverted."""
+    from core.stealth_guard import MODIFIER_VK_MAP
+
+    assert MODIFIER_VK_MAP[0xA0] == "shift"  # VK_LSHIFT
+    assert MODIFIER_VK_MAP[0xA1] == "shift"  # VK_RSHIFT
+    assert MODIFIER_VK_MAP[0xA2] == "ctrl"   # VK_LCONTROL
+    assert MODIFIER_VK_MAP[0xA3] == "ctrl"   # VK_RCONTROL
+
+
+def test_media_manager_none_artist_title_safety():
+    """Verify _resolve_track does not crash with TypeError when title or artist is None."""
+    import threading
+    from core.media_manager import MediaManager
+
+    mm = MediaManager.__new__(MediaManager)
+    mm._lock = threading.Lock()
+    mm._sync_likes_if_needed = lambda: None
+    mm.liked_track_ids = set()
+
+    res1 = mm._resolve_track("Прямой эфир", None)
+    assert res1[0] == "Прямой эфир"
+
+    res2 = mm._resolve_track(None, "Исполнитель")
+    assert res2[1] == "Исполнитель"
+
+
+def test_ui_markups_antigravity_menu_callback():
+    """Verify back button in Antigravity menu sends 'menu' callback instead of dead 'main_menu'."""
+    from vds_bot.ui_markups import UiMarkupsMixin
+
+    ui = UiMarkupsMixin()
+    markup = ui.antigravity_card_markup({"accounts": []})
+    keyboard = markup.get("inline_keyboard", [])
+    all_callbacks = [btn.get("callback_data") for row in keyboard for btn in row]
+    assert "menu" in all_callbacks, f"'menu' callback not found in {all_callbacks}"
+    assert "main_menu" not in all_callbacks
+
+
+def test_telegram_ui_edit_media_sanitizes_reply_markup():
+    """Verify edit_message_media sanitizes invalid custom emoji fields in reply_markup."""
+    import json
+    from unittest.mock import MagicMock
+    from vds_bot.telegram_ui import TelegramBotApi
+
+    ui = TelegramBotApi.__new__(TelegramBotApi)
+    ui.api_url = "https://api.telegram.org/bot123456:fake"
+    ui.session = MagicMock()
+    mock_post = MagicMock()
+    mock_post.json.return_value = {"ok": True, "result": {}}
+    ui.session.post.return_value = mock_post
+
+    dirty_markup = {
+        "inline_keyboard": [[
+            {"text": "Test", "callback_data": "t", "icon_custom_emoji_id": None}
+        ]]
+    }
+    ui.edit_message_media(12345, 67890, "https://example.com/pic.jpg", reply_markup=dirty_markup)
+    called_data = ui.session.post.call_args[1]["data"]
+    parsed_markup = json.loads(called_data["reply_markup"])
+    btn = parsed_markup["inline_keyboard"][0][0]
+    assert "icon_custom_emoji_id" not in btn
+
 

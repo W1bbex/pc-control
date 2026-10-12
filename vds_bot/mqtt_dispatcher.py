@@ -321,7 +321,10 @@ class MqttDispatcherMixin:
                             msg += "\n🖥️ <i>IDE Antigravity успешно перезапущена с новым токеном.</i>"
                         self.ui.send_message(req_chat_id, msg)
                         try:
-                            from vds_bot.routers.antigravity_router import open_antigravity_menu
+                            try:
+                                from vds_bot.routers.antigravity_router import open_antigravity_menu
+                            except ImportError:
+                                from routers.antigravity_router import open_antigravity_menu
                             open_antigravity_menu(self, req_chat_id, message_id=req_msg_id)
                         except Exception:
                             pass

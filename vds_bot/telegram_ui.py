@@ -285,7 +285,8 @@ class TelegramBotApi(UiTemplatesMixin):
             "message_id": message_id,
         }
         if reply_markup is not None:
-            data["reply_markup"] = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
+            clean_markup = self._sanitize_reply_markup(reply_markup)
+            data["reply_markup"] = json.dumps(clean_markup) if isinstance(clean_markup, dict) else clean_markup
         if business_connection_id:
             data["business_connection_id"] = business_connection_id
 

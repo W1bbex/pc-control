@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
+"""Desktop agent for Windows PC Control.
+
+Thin modular coordinator delegating to desktop mixins and services.
+"""
 
 import ctypes
-from ctypes import wintypes
-import glob
 import io
 import json
 import logging
 import logging.handlers
 import os
-import platform
 import queue
 import signal
-import shutil
 import socket
 import ssl
-import subprocess
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
 
 import certifi
@@ -26,109 +24,41 @@ import paho.mqtt.client as mqtt
 from PIL import ImageGrab
 import psutil
 
-BASE_DIR = Path(__file__).resolve().parent
-CORE_DIR = BASE_DIR / "core"
-if str(CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(CORE_DIR))
+from desktop.constants import (
+    AGENT_BOOT_ID,
+    AGENT_START_TIME,
+    AGENT_VERSION,
+    BASE_DIR,
+    CONFIG_PATH,
+    CORE_DIR,
+    DATA_DIR,
+    ICONS,
+    LOG_DIR,
+    PROTECTED_PROCESSES,
+    REAL_BOOT_TIME,
+    STATE_PATH,
+    TOPIC_ACK,
+    TOPIC_ACTIVITY_QUERY,
+    TOPIC_ACTIVITY_RESPONSE,
+    TOPIC_COMMAND,
+    TOPIC_MEDIA_COMMAND,
+    TOPIC_MEDIA_STATUS,
+    TOPIC_SCREENSHOT,
+    TOPIC_STATUS,
+    TOPIC_TELEMETRY,
+    get_real_boot_time,
+)
+from desktop.sensors import SensorHelper
+from desktop.telemetry import TelemetryMixin
+from desktop.vpn_manager import VpnManagerMixin
+from desktop.stealth import StealthMixin
+from desktop.launcher import LauncherMixin
+from desktop.action_dispatcher import ActionDispatcherMixin
 
 from core.activity_logger import ActivityTracker
 from core.antigravity_switcher import AntigravityAccountManager
 from core.app_emoji_manager import AppEmojiManager
 from core.stealth_guard import StealthManager
-
-AGENT_VERSION = "2.0"
-AGENT_BOOT_ID = f"desktop-{uuid.uuid4().hex[:12]}"
-
-DATA_DIR = BASE_DIR / "data"
-CONFIG_PATH = BASE_DIR / "config.json"
-_data_state = DATA_DIR / "state.json"
-_root_state = BASE_DIR / "state.json"
-STATE_PATH = _data_state if _data_state.exists() or not _root_state.exists() else _root_state
-LOG_DIR = BASE_DIR / "logs"
-
-def _load_env_file(path: Path):
-    if not path.exists():
-        return
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(path)
-    except Exception:
-        pass
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = k.strip()
-            v = v.strip().strip("'\"")
-            if k and k not in os.environ:
-                os.environ[k] = v
-    except Exception:
-        pass
-
-_load_env_file(BASE_DIR / ".env")
-
-DEFAULT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-DEFAULT_USER_ID = int(os.getenv("TELEGRAM_USER_ID", "0"))
-
-AGENT_START_TIME = time.time()
-
-def _load_canonical_icons():
-    candidate = BASE_DIR / "resources" / "icons.json"
-    if candidate.exists():
-        try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-ICONS = _load_canonical_icons()
-
-
-def get_real_boot_time():
-    """Returns actual boot timestamp using Windows Kernel-Boot event log or psutil fallback."""
-    try:
-        import win32evtlog
-        import xml.etree.ElementTree as ET
-        from datetime import datetime
-        query_str = '*[System[Provider[@Name="Microsoft-Windows-Kernel-Boot"] and (EventID=27 or EventID=20)]]'
-        query = win32evtlog.EvtQuery(
-            'System',
-            win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryReverseDirection,
-            query_str
-        )
-        try:
-            events = win32evtlog.EvtNext(query, 1)
-            if events:
-                try:
-                    xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
-                    root = ET.fromstring(xml_data)
-                    for elem in root.iter():
-                        if elem.tag.endswith('TimeCreated') and 'SystemTime' in elem.attrib:
-                            st = elem.attrib['SystemTime']
-                            dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
-                            return dt.timestamp()
-                finally:
-                    try:
-                        win32evtlog.EvtClose(events[0])
-                    except Exception:
-                        pass
-        finally:
-            try:
-                win32evtlog.EvtClose(query)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        return psutil.boot_time()
-    except Exception:
-        return time.time()
-
-
-REAL_BOOT_TIME = get_real_boot_time()
 
 
 def load_agent_config(path: Path = CONFIG_PATH) -> dict:
@@ -142,31 +72,6 @@ def load_agent_config(path: Path = CONFIG_PATH) -> dict:
     if windows_password:
         config.setdefault("unlock", {})["password"] = windows_password
     return config
-
-TOPIC_COMMAND = "pc/main/windows/command"
-TOPIC_ACK = "pc/main/windows/ack"
-TOPIC_STATUS = "pc/main/windows/status"
-TOPIC_TELEMETRY = "pc/main/windows/telemetry"
-TOPIC_SCREENSHOT = "pc/main/windows/screenshot"
-TOPIC_MEDIA_STATUS = "pc/main/windows/media/status"
-TOPIC_MEDIA_COMMAND = "pc/main/windows/media/command"
-TOPIC_ACTIVITY_QUERY = "pc/main/windows/activity/query"
-TOPIC_ACTIVITY_RESPONSE = "pc/main/windows/activity/response"
-
-PROTECTED_PROCESSES = {
-    "csrss.exe",
-    "dwm.exe",
-    "lsass.exe",
-    "services.exe",
-    "smss.exe",
-    "system",
-    "wininit.exe",
-    "winlogon.exe",
-    "python.exe",
-    "pythonw.exe",
-    "svchost.exe",
-    "spoolsv.exe",
-}
 
 
 def configure_logging():
@@ -208,7 +113,7 @@ LOG = configure_logging()
 
 
 def patch_paho_sockpair():
-    """Protect paho-mqtt against Windows socketpair crashes (WinError 10054 / 1236) on sleep/reset."""
+    """Protect paho-mqtt against Windows socketpair crashes on sleep/reset."""
     orig_loop = mqtt.Client._loop
 
     def safe_loop(self, timeout=1.0):
@@ -251,96 +156,19 @@ def acquire_single_instance():
     return mutex
 
 
-class SensorHelper:
-    def __init__(self, executable: Path):
-        self.executable = executable
-        self.admin_snapshot = executable.parent / "admin-sensors.json"
-        self.process = None
-        self.latest = []
-        self.lock = threading.Lock()
+class PCControlAgent(
+    TelemetryMixin,
+    VpnManagerMixin,
+    StealthMixin,
+    LauncherMixin,
+    ActionDispatcherMixin,
+):
+    """Main Windows desktop agent coordinator."""
 
-    def start(self):
-        if not self.executable.exists():
-            LOG.warning("Sensor helper is not installed")
-            return
-
-        try:
-            self.process = subprocess.Popen(
-                [str(self.executable)],
-                cwd=str(self.executable.parent),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            threading.Thread(
-                target=self._read_stdout,
-                name="sensor-reader",
-                daemon=True,
-            ).start()
-            threading.Thread(
-                target=self._read_stderr,
-                name="sensor-errors",
-                daemon=True,
-            ).start()
-            LOG.info("Hardware sensor helper started")
-        except Exception:
-            LOG.exception("Could not start hardware sensor helper")
-
-    def _read_stdout(self):
-        for line in self.process.stdout:
-            try:
-                sensors = json.loads(line)
-                if isinstance(sensors, list):
-                    with self.lock:
-                        self.latest = sensors
-            except json.JSONDecodeError:
-                LOG.warning("Invalid sensor helper output")
-
-    def _read_stderr(self):
-        for line in self.process.stderr:
-            LOG.warning("Sensor helper: %s", line.rstrip())
-
-    def _find_admin_snapshot(self) -> Path:
-        for candidate in (
-            BASE_DIR / "data" / "admin-sensors.json",
-            self.executable.parent / "admin-sensors.json",
-            BASE_DIR / "hardware" / "admin-sensors.json",
-        ):
-            if candidate.exists():
-                return candidate
-        return BASE_DIR / "data" / "admin-sensors.json"
-
-    def snapshot(self):
-        target = self._find_admin_snapshot()
-        try:
-            age = time.time() - target.stat().st_mtime
-            if age < 15:
-                data = json.loads(
-                    target.read_text(encoding="utf-8")
-                )
-                if isinstance(data, list):
-                    return data
-        except (FileNotFoundError, PermissionError, OSError):
-            pass
-        except Exception:
-            LOG.exception("Could not read elevated sensor snapshot")
-
-        with self.lock:
-            return list(self.latest)
-
-    def stop(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-
-
-class PCControlAgent:
     def __init__(self):
         self.config = load_agent_config(CONFIG_PATH)
         self.stop_event = threading.Event()
+        self.boot_id = AGENT_BOOT_ID
 
         tg_conf = self.config.get("telegram", {})
         telegram_token = os.getenv("TELEGRAM_BOT_TOKEN") or tg_conf.get("token") or tg_conf.get("bot_token") or ""
@@ -397,8 +225,10 @@ class PCControlAgent:
         self.current_session_exe = None
         self.current_session_start = None
         self.current_session_emoji_id = None
+        self.in_pc_control_chat = False
 
         from core.media_manager import MediaManager
+
         self.media_manager = MediaManager(
             token=telegram_token,
             user_id=telegram_user_id,
@@ -469,7 +299,7 @@ class PCControlAgent:
             LOG.exception("Failed to recover MQTT in desktop ensure_mqtt_connection")
 
     def publish_media_status(self, state):
-        if not self.mqtt_online:
+        if not getattr(self, "mqtt_online", False):
             return
         try:
             payload = json.dumps(state, ensure_ascii=False)
@@ -489,12 +319,16 @@ class PCControlAgent:
             self.processed_ids = []
 
     def save_state(self):
-        temporary = STATE_PATH.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps({"processed_ids": self.processed_ids[-50:]}),
-            encoding="utf-8",
-        )
-        os.replace(temporary, STATE_PATH)
+        try:
+            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary = STATE_PATH.with_suffix(f".tmp.{os.getpid()}")
+            temporary.write_text(
+                json.dumps({"processed_ids": self.processed_ids[-50:]}),
+                encoding="utf-8",
+            )
+            os.replace(temporary, STATE_PATH)
+        except Exception:
+            LOG.exception("Could not save state")
 
     def remember_command(self, command_id):
         with self.state_lock:
@@ -544,6 +378,7 @@ class PCControlAgent:
                     self.media_manager.execute_command(action, **kwargs)
                 except Exception:
                     LOG.exception("Failed executing media command")
+
             threading.Thread(target=_run_media_cmd, name="mqtt-media-cmd", daemon=True).start()
             return
 
@@ -554,6 +389,7 @@ class PCControlAgent:
                     qtype = req.get("type", "summary")
                     qval = req.get("val", "")
                     from core.activity_db import get_activity_db
+
                     db = get_activity_db()
                     if qtype == "summary":
                         res = db.get_day_summary(qval)
@@ -567,6 +403,7 @@ class PCControlAgent:
                     self.mqtt.publish(TOPIC_ACTIVITY_RESPONSE, payload=resp_payload, qos=1)
                 except Exception:
                     LOG.exception("Failed handling activity query")
+
             threading.Thread(target=_run_activity_query, name="mqtt-activity-query", daemon=True).start()
             return
 
@@ -600,10 +437,10 @@ class PCControlAgent:
             pass
 
     def publish_status(self, force=False):
-        if not self.mqtt_online:
+        if not getattr(self, "mqtt_online", False):
             return
         now = time.time()
-        if not force and now - self.last_status_publish < 5:
+        if not force and now - getattr(self, "last_status_publish", 0) < 5:
             return
         payload = {
             "state": "online",
@@ -623,378 +460,6 @@ class PCControlAgent:
             retain=True,
         )
         self.last_status_publish = now
-
-    @staticmethod
-    def get_cpu_name():
-        try:
-            import winreg
-
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-            ) as key:
-                return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
-        except Exception:
-            return platform.processor() or "Unknown CPU"
-
-    @staticmethod
-    def get_local_ip():
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.connect(("1.1.1.1", 53))
-            address = sock.getsockname()[0]
-            sock.close()
-            return address
-        except OSError:
-            return "unknown"
-
-    @staticmethod
-    def get_session_seconds():
-        # First priority: find creation time of explorer.exe in the user session
-        try:
-            for p in psutil.process_iter(["name", "create_time"]):
-                if p.info["name"] and p.info["name"].lower() == "explorer.exe":
-                    ct = p.info.get("create_time")
-                    if ct:
-                        return max(0, int(time.time() - ct))
-        except Exception:
-            pass
-        # Second priority: time since this desktop agent started
-        return max(0, int(time.time() - AGENT_START_TIME))
-
-    @staticmethod
-    def get_idle_seconds():
-        class LastInputInfo(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", ctypes.c_uint),
-                ("dwTime", ctypes.c_uint),
-            ]
-
-        info = LastInputInfo()
-        info.cbSize = ctypes.sizeof(info)
-        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
-            return None
-        elapsed_ms = (ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
-        return max(0, int(elapsed_ms / 1000))
-
-    @staticmethod
-    def get_foreground_window_safe():
-        try:
-            return ctypes.windll.user32.GetForegroundWindow() or None
-        except Exception:
-            return None
-
-    def get_active_application_info(self):
-        desktop_emoji = ICONS.get("screen") or ICONS.get("apps", "5330015235644368681")
-        try:
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-            hwnd = self.get_foreground_window_safe()
-            if not hwnd:
-                return "Рабочий стол", desktop_emoji, None
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if not pid.value:
-                return "Рабочий стол", desktop_emoji, None
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            hproc = kernel32.OpenProcess(0x1000, False, pid.value)
-            name = None
-            if hproc:
-                try:
-                    buf = ctypes.create_unicode_buffer(1024)
-                    size = wintypes.DWORD(1024)
-                    if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                        name = os.path.basename(buf.value)
-                finally:
-                    kernel32.CloseHandle(hproc)
-
-            title = None
-            tlen = user32.GetWindowTextLengthW(hwnd)
-            if tlen:
-                tbuf = ctypes.create_unicode_buffer(tlen + 1)
-                user32.GetWindowTextW(hwnd, tbuf, tlen + 1)
-                title = tbuf.value or None
-
-            # If foreground window is explorer.exe, check if it's the desktop or taskbar
-            if not name or name.lower() == "explorer.exe":
-                cls_buf = ctypes.create_unicode_buffer(256)
-                user32.GetClassNameW(hwnd, cls_buf, 256)
-                cls_name = cls_buf.value
-                if cls_name in ("Progman", "WorkerW", "Shell_TrayWnd") or not name:
-                    return "Рабочий стол", desktop_emoji, title
-
-            emoji_id = None
-            if name and hasattr(self, "emoji_manager"):
-                key = name.lower()
-                cached = self.emoji_manager.cache.get(key)
-                if cached:
-                    emoji_id = cached.get("emoji_id")
-            final_app = name or "Рабочий стол"
-            final_emoji = emoji_id or (desktop_emoji if not name or name.lower() == "explorer.exe" else None)
-            return final_app, final_emoji, title
-        except Exception:
-            return "Рабочий стол", desktop_emoji, None
-
-    @staticmethod
-    def query_gpu():
-        command = [
-            "nvidia-smi",
-            "--query-gpu=name,temperature.gpu,utilization.gpu,"
-            "memory.used,memory.total,fan.speed,power.draw,"
-            "clocks.gr,clocks.mem",
-            "--format=csv,noheader,nounits",
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                check=True,
-            )
-            values = [
-                item.strip()
-                for item in completed.stdout.splitlines()[0].split(",")
-            ]
-
-            def optional_number(value):
-                if value.upper() in {"N/A", "[N/A]", "NOT SUPPORTED"}:
-                    return None
-                return float(value)
-
-            return {
-                "name": values[0],
-                "temp_c": float(values[1]),
-                "load_percent": float(values[2]),
-                "vram_used_mb": float(values[3]),
-                "vram_total_mb": float(values[4]),
-                "fan_percent": optional_number(values[5]),
-                "power_w": optional_number(values[6]),
-                "clock_mhz": optional_number(values[7]),
-                "memory_clock_mhz": optional_number(values[8]),
-            }
-        except Exception:
-            LOG.exception("Could not query NVIDIA GPU")
-            return None
-
-    @staticmethod
-    def get_volume():
-        import pythoncom
-
-        pythoncom.CoInitialize()
-        try:
-            from pycaw.pycaw import AudioUtilities
-
-            endpoint = AudioUtilities.GetSpeakers().EndpointVolume
-            return {
-                "percent": round(endpoint.GetMasterVolumeLevelScalar() * 100),
-                "muted": bool(endpoint.GetMute()),
-            }
-        except Exception:
-            return None
-        finally:
-            pythoncom.CoUninitialize()
-
-    def set_volume(self, percent=None, mute=None, toggle=False):
-        import pythoncom
-
-        pythoncom.CoInitialize()
-        try:
-            from pycaw.pycaw import AudioUtilities
-
-            endpoint = AudioUtilities.GetSpeakers().EndpointVolume
-
-            if toggle:
-                endpoint.SetMute(not bool(endpoint.GetMute()), None)
-            elif mute is not None:
-                endpoint.SetMute(bool(mute), None)
-
-            if percent is not None:
-                value = max(0, min(100, int(percent))) / 100.0
-                endpoint.SetMasterVolumeLevelScalar(value, None)
-
-            return {
-                "percent": round(
-                    endpoint.GetMasterVolumeLevelScalar() * 100
-                ),
-                "muted": bool(endpoint.GetMute()),
-            }
-        finally:
-            pythoncom.CoUninitialize()
-
-    def network_rates(self):
-        now = time.time()
-        current = psutil.net_io_counters()
-        if current is None or self.previous_net is None:
-            return {
-                "download_mbps": 0.0,
-                "upload_mbps": 0.0,
-                "received_gb": 0.0,
-                "sent_gb": 0.0,
-            }
-        elapsed = max(0.1, now - self.previous_net_time)
-
-        received = max(0, current.bytes_recv - self.previous_net.bytes_recv)
-        sent = max(0, current.bytes_sent - self.previous_net.bytes_sent)
-
-        self.previous_net = current
-        self.previous_net_time = now
-
-        return {
-            "download_mbps": round(received * 8 / elapsed / 1_000_000, 2),
-            "upload_mbps": round(sent * 8 / elapsed / 1_000_000, 2),
-            "received_gb": round(current.bytes_recv / 1_000_000_000, 2),
-            "sent_gb": round(current.bytes_sent / 1_000_000_000, 2),
-        }
-
-    def collect_telemetry(self):
-        now = time.time()
-        memory = psutil.virtual_memory()
-        frequency = psutil.cpu_freq()
-
-        disks = []
-        seen_devices = set()
-        get_drive_type = ctypes.windll.kernel32.GetDriveTypeW
-        drive_fixed = 3
-        for partition in psutil.disk_partitions(all=False):
-            if partition.device in seen_devices:
-                continue
-            if get_drive_type(partition.mountpoint) != drive_fixed:
-                continue
-            seen_devices.add(partition.device)
-            try:
-                usage = psutil.disk_usage(partition.mountpoint)
-                disks.append(
-                    {
-                        "drive": partition.device.rstrip("\\"),
-                        "total_gb": round(usage.total / 1_000_000_000, 1),
-                        "free_gb": round(usage.free / 1_000_000_000, 1),
-                        "used_percent": round(usage.percent, 1),
-                    }
-                )
-            except OSError:
-                continue
-
-        sensors = self.sensor_helper.snapshot()
-        temperatures = [
-            sensor
-            for sensor in sensors
-            if (
-                sensor.get("type") in ("Temperature", "Fan", "Power")
-                and float(sensor.get("value", 0)) != 0
-            )
-        ][:60]
-
-        cpu_temperature = next(
-            (
-                float(sensor["value"])
-                for sensor in temperatures
-                if (
-                    sensor.get("hardware_type") == "Cpu"
-                    and sensor.get("type") == "Temperature"
-                    and float(sensor.get("value", 0)) > 5
-                )
-            ),
-            None,
-        )
-        idle_seconds = self.get_idle_seconds()
-        active_app, active_emoji, active_title = self.get_active_application_info()
-
-        # Check if user is currently inside PC Control chat in Telegram/AyuGram
-        is_pc_control = False
-        if active_app:
-            app_lower = active_app.lower()
-            if any(client in app_lower for client in ("telegram", "ayugram", "kotatogram", "64gram", "unigram")):
-                title_lower = (active_title or "").lower()
-                if "pc control" in title_lower or "your_pc_bot" in title_lower:
-                    is_pc_control = True
-        self.in_pc_control_chat = is_pc_control
-
-        telemetry = {
-            "timestamp": int(now),
-            "ts": now,
-            "agent_mode": "desktop",
-            "host": socket.gethostname(),
-            "os": platform.system().lower(),
-            "windows": platform.platform(),
-            "local_ip": self.get_local_ip(),
-            "uptime_seconds": max(0, int(time.time() - REAL_BOOT_TIME)),
-            "cpu": {
-                "name": self.get_cpu_name(),
-                "load_percent": round(psutil.cpu_percent(interval=None), 1),
-                "temp_c": cpu_temperature,
-                "logical_cores": psutil.cpu_count(),
-                "frequency_mhz": (
-                    round(frequency.current)
-                    if frequency and frequency.current
-                    else None
-                ),
-            },
-            "memory": {
-                "used_gb": round(memory.used / 1_000_000_000, 1),
-                "total_gb": round(memory.total / 1_000_000_000, 1),
-                "used_percent": round(memory.percent, 1),
-            },
-            "gpu": self.query_gpu(),
-            "disks": disks,
-            "network": self.network_rates(),
-            "volume": self.get_volume(),
-            "idle_seconds": idle_seconds,
-            "session_seconds": self.get_session_seconds(),
-            "active_application": active_app,
-            "active_application_emoji_id": active_emoji,
-            "active_window_title": active_title,
-            "in_pc_control_chat": is_pc_control,
-            "user_active": (
-                idle_seconds is not None and idle_seconds < 300
-            ),
-            "sensors": temperatures,
-            "stealth_mode": self.stealth_mgr.is_active(),
-        }
-        self.last_telemetry = telemetry
-        return telemetry
-
-    @staticmethod
-    def top_processes():
-        processes = []
-        for process in psutil.process_iter(["pid", "name"]):
-            if process.info["pid"] == 0:
-                continue
-            try:
-                process.cpu_percent(None)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-        time.sleep(0.7)
-
-        for process in psutil.process_iter(
-            ["pid", "name", "memory_info"]
-        ):
-            if process.info["pid"] == 0:
-                continue
-            try:
-                cpu_percent = process.cpu_percent(None)
-                cpu_percent /= max(1, psutil.cpu_count() or 1)
-                processes.append(
-                    {
-                        "pid": process.info["pid"],
-                        "name": process.info["name"] or "unknown",
-                        "cpu_percent": round(cpu_percent, 1),
-                        "memory_mb": round(
-                            process.info["memory_info"].rss / 1_000_000,
-                            1,
-                        ),
-                    }
-                )
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-        processes.sort(
-            key=lambda item: (item["cpu_percent"], item["memory_mb"]),
-            reverse=True,
-        )
-        return processes[:10]
 
     def make_screenshot(self, command_id):
         image = ImageGrab.grab(all_screens=True)
@@ -1033,1363 +498,6 @@ class PCControlAgent:
             "height": image.height,
         }
 
-    @staticmethod
-    def _run_network_probe(timeout=2.0):
-        probe_targets = [
-            ("1.1.1.1", 53),
-            ("8.8.8.8", 53),
-            ("77.88.8.8", 53),
-        ]
-        for host, port in probe_targets:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(min(1.5, timeout))
-                s.connect((host, port))
-                s.close()
-                return True
-            except Exception:
-                pass
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                "http://www.google.com/generate_204",
-                headers={"User-Agent": "PCControlAgent/2.0"},
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if resp.getcode() in (200, 204):
-                    return True
-        except Exception:
-            pass
-        return False
-
-    @classmethod
-    def check_happ_vpn_active(cls):
-        """
-        Verify that Happ VPN is actively running and connected:
-        1. Process happ.exe is running.
-        2. Interface 'happ-tun' or 'Happ' exists, is up, and has an IPv4 address.
-        3. Network probe succeeds.
-        """
-        try:
-            has_proc = any(
-                (p.info["name"] or "").lower() in ("happ.exe", "flyfrogllc.happ.exe")
-                for p in psutil.process_iter(["name"])
-            )
-            if not has_proc:
-                return False
-
-            addrs = psutil.net_if_addrs()
-            stats = psutil.net_if_stats()
-            has_tun = False
-            for iface, if_addrs in addrs.items():
-                if "happ" in iface.lower():
-                    if_stat = stats.get(iface)
-                    if if_stat and not if_stat.isup:
-                        continue
-                    if any(
-                        a.family == socket.AF_INET
-                        and a.address
-                        and not a.address.startswith("169.254")
-                        for a in if_addrs
-                    ):
-                        has_tun = True
-                        break
-            if not has_tun:
-                return False
-
-            return cls._run_network_probe(timeout=2.5)
-        except Exception as e:
-            LOG.warning("Error checking Happ VPN active status: %s", e)
-            return False
-
-    @classmethod
-    def check_incy_vpn_active(cls):
-        """
-        Verify that INCY VPN is actively running and connected:
-        1. Process incy.exe is running.
-        2. Interface 'wwan99' / 'wintun' exists, is up, and has an IPv4 address.
-        3. Network probe succeeds.
-        """
-        try:
-            has_proc = any(
-                (p.info["name"] or "").lower() == "incy.exe"
-                for p in psutil.process_iter(["name"])
-            )
-            if not has_proc:
-                return False
-
-            addrs = psutil.net_if_addrs()
-            stats = psutil.net_if_stats()
-            has_tun = False
-            for iface, if_addrs in addrs.items():
-                if any(k in iface.lower() for k in ("wwan99", "wintun", "incy")):
-                    if_stat = stats.get(iface)
-                    if if_stat and not if_stat.isup:
-                        continue
-                    if any(
-                        a.family == socket.AF_INET
-                        and a.address
-                        and not a.address.startswith("169.254")
-                        for a in if_addrs
-                    ):
-                        has_tun = True
-                        break
-            if not has_tun:
-                return False
-
-            return cls._run_network_probe(timeout=2.5)
-        except Exception as e:
-            LOG.warning("Error checking INCY VPN active status: %s", e)
-            return False
-
-    def connect_incy_vpn(self, cancel_event=None, timeout=None):
-        """
-        Ensure INCY VPN is connected and verified.
-        Ensures autoConnect is set in preferences.json, launches incy.exe if not running,
-        and polls up to timeout for network readiness.
-        """
-        LOG.info("Verifying INCY VPN connection")
-        if self.check_incy_vpn_active():
-            LOG.info("INCY VPN is already active and verified")
-            return {"verified": True, "already_connected": True}
-
-        # Ensure autoConnect: true in preferences.json
-        try:
-            pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
-            if pref_path.exists():
-                with open(pref_path, "r", encoding="utf-8") as f:
-                    prefs = json.load(f)
-                if not prefs.get("autoConnect"):
-                    prefs["autoConnect"] = True
-                    with open(pref_path, "w", encoding="utf-8") as f:
-                        json.dump(prefs, f, indent=2)
-                    LOG.info("Enabled autoConnect in INCY preferences.json")
-        except Exception as e:
-            LOG.warning("Could not update INCY preferences: %s", e)
-
-        # Launch incy.exe if not running
-        is_running = any(
-            (p.info["name"] or "").lower() == "incy.exe"
-            for p in psutil.process_iter(["name"])
-        )
-        if not is_running:
-            incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
-            resolved_exe = os.path.expandvars(str(incy_cmd))
-            if Path(resolved_exe).exists():
-                LOG.info("Launching INCY: %s", resolved_exe)
-                subprocess.Popen(
-                    [resolved_exe],
-                    cwd=str(Path(resolved_exe).parent),
-                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                )
-
-        if timeout is None:
-            timeout = max(45, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 45))))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if cancel_event and cancel_event.is_set():
-                return {"cancelled": True}
-            if self.check_incy_vpn_active():
-                LOG.info("INCY VPN connection successfully verified via network probe")
-                return {"verified": True}
-            time.sleep(0.5)
-
-        if self.check_incy_vpn_active():
-            LOG.info("INCY VPN connection verified at deadline")
-            return {"verified": True}
-
-        LOG.warning("INCY VPN verification timed out after %ds", timeout)
-        return {"verified": False, "reason": "vpn_verification_timeout"}
-
-    def connect_happ_vpn(self, cancel_event=None, timeout=None):
-        """
-        Verify Happ VPN connection.
-        If already connected -> skips clicking and returns immediately.
-        Otherwise restores window, clicks connect button, and awaits real verification.
-        """
-        LOG.info("Automating HAPP VPN connection")
-        if self.check_happ_vpn_active():
-            LOG.info("HAPP VPN is already active and verified; skipping button click")
-            return {"verified": True, "already_connected": True}
-
-        # Attach to active input desktop if possible
-        hdesk = None
-        hdesk_orig = None
-        try:
-            hdesk_orig = ctypes.windll.user32.GetThreadDesktop(ctypes.windll.kernel32.GetCurrentThreadId())
-            hdesk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x01FF)
-            if hdesk:
-                ctypes.windll.user32.SetThreadDesktop(hdesk)
-        except Exception:
-            pass
-
-        try:
-            deadline = time.monotonic() + 15.0
-            clicked = False
-            window_title = None
-
-            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-
-            while time.monotonic() < deadline:
-                if cancel_event and cancel_event.is_set():
-                    return {"cancelled": True}
-                if self.check_happ_vpn_active():
-                    LOG.info("HAPP VPN became active during window check; skipping click")
-                    return {"verified": True, "already_connected": True}
-
-                # Find Happ windows via ctypes EnumWindows
-                happ_windows = []
-                def _enum_cb(hwnd, _):
-                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-                    if length > 0:
-                        buff = ctypes.create_unicode_buffer(length + 1)
-                        ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
-                        if "happ" in buff.value.lower():
-                            rect = wintypes.RECT()
-                            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                            happ_windows.append((hwnd, buff.value, rect))
-                    return True
-
-                proc_cb = EnumWindowsProc(_enum_cb)
-                ctypes.windll.user32.EnumWindows(proc_cb, 0)
-
-                if not happ_windows:
-                    time.sleep(0.5)
-                    continue
-
-                for hwnd, title, rect in happ_windows:
-                    try:
-                        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                        ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    except Exception:
-                        pass
-
-                time.sleep(0.4)
-
-                # Re-query
-                happ_windows.clear()
-                ctypes.windll.user32.EnumWindows(EnumWindowsProc(_enum_cb), 0)
-                if not happ_windows:
-                    time.sleep(0.5)
-                    continue
-
-                target_hwnd, target_title, target_rect = max(
-                    happ_windows,
-                    key=lambda item: (item[2].right - item[2].left) * (item[2].bottom - item[2].top),
-                )
-                w_width = target_rect.right - target_rect.left
-                w_height = target_rect.bottom - target_rect.top
-                if w_width < 300 or w_height < 200:
-                    time.sleep(0.5)
-                    continue
-
-                # In Happ 4.3.0, the connect power button is at ~0.77 * width, ~0.35 * height
-                button_x = target_rect.left + round(w_width * 0.77)
-                button_y = target_rect.top + round(w_height * 0.35)
-
-                try:
-                    import pyautogui
-                    pyautogui.click(button_x, button_y)
-                    clicked = True
-                    window_title = target_title
-                    LOG.info("Clicked HAPP connect button at (%s, %s) in window %r", button_x, button_y, target_title)
-                    break
-                except Exception as click_err:
-                    LOG.warning("Failed clicking HAPP button with pyautogui: %s", click_err)
-                    # Fallback to mouse_event
-                    ctypes.windll.user32.SetCursorPos(button_x, button_y)
-                    time.sleep(0.1)
-                    ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0)  # LEFTDOWN
-                    time.sleep(0.05)
-                    ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0)  # LEFTUP
-                    clicked = True
-                    window_title = target_title
-                    LOG.info("Clicked HAPP connect button via mouse_event at (%s, %s)", button_x, button_y)
-                    break
-
-            if not clicked:
-                if self.check_happ_vpn_active():
-                    LOG.info("HAPP VPN active despite window click skipped; verified")
-                    return {"verified": True, "already_connected": True}
-                LOG.warning("HAPP window was not ready after 15s")
-                return {"verified": False, "reason": "window_not_found"}
-
-            verify_timeout = max(35, int(self.config.get("happ_ready_delay_seconds", self.config.get("vpn_ready_delay_seconds", 35))))
-            verify_deadline = time.monotonic() + verify_timeout
-            while time.monotonic() < verify_deadline:
-                if cancel_event and cancel_event.is_set():
-                    return {"cancelled": True}
-                if self.check_happ_vpn_active():
-                    LOG.info("HAPP VPN connection successfully verified via network probe")
-                    return {"verified": True, "window": window_title}
-                time.sleep(0.5)
-
-            if self.check_happ_vpn_active():
-                LOG.info("HAPP VPN connection verified at deadline")
-                return {"verified": True, "window": window_title}
-
-            LOG.warning("HAPP VPN connection verification timed out after %ds", verify_timeout)
-            return {"verified": False, "reason": "vpn_verification_timeout"}
-        finally:
-            if hdesk:
-                try:
-                    if hdesk_orig:
-                        ctypes.windll.user32.SetThreadDesktop(hdesk_orig)
-                    ctypes.windll.user32.CloseDesktop(hdesk)
-                except Exception:
-                    pass
-
-    @staticmethod
-    def minimize_all_windows():
-        """Minimize every app window with safe retries for windows opening late."""
-        com_initialized = False
-        try:
-            import pythoncom
-            import win32com.client
-
-            pythoncom.CoInitialize()
-            com_initialized = True
-            shell = win32com.client.Dispatch("Shell.Application")
-
-            # Pass 1: Immediate minimize
-            LOG.info("Minimizing windows (Pass 1/3)...")
-            shell.MinimizeAll()
-
-            # Pass 2: Retry after ~2 seconds
-            time.sleep(2.0)
-            LOG.info("Minimizing windows (Pass 2/3)...")
-            shell.MinimizeAll()
-
-            # Pass 3: Final retry after ~2 more seconds (~4s total)
-            time.sleep(2.0)
-            LOG.info("Minimizing windows (Pass 3/3)...")
-            shell.MinimizeAll()
-        except Exception as error:
-            LOG.warning("Shell minimize failed, using Win+M fallback: %s", error)
-            import pyautogui
-
-            LOG.info("Minimizing windows via Win+M fallback (Pass 1)...")
-            pyautogui.hotkey("win", "m")
-            time.sleep(2.0)
-            LOG.info("Minimizing windows via Win+M fallback (Pass 2)...")
-            pyautogui.hotkey("win", "m")
-            time.sleep(2.0)
-            LOG.info("Minimizing windows via Win+M fallback (Pass 3)...")
-            pyautogui.hotkey("win", "m")
-        finally:
-            if com_initialized:
-                pythoncom.CoUninitialize()
-        LOG.info("Minimized all windows after workspace launch (completed 3 passes)")
-
-    @staticmethod
-    def turn_off_displays():
-        """Request that Windows powers down every attached display only."""
-        hwnd_broadcast = 0xFFFF
-        wm_syscommand = 0x0112
-        sc_monitorpower = 0xF170
-        monitor_off = 2
-        result = ctypes.windll.user32.SendMessageTimeoutW(
-            hwnd_broadcast,
-            wm_syscommand,
-            sc_monitorpower,
-            monitor_off,
-            0x0002,  # SMTO_ABORTIFHUNG
-            2000,
-            None,
-        )
-        if not result:
-            raise RuntimeError("Windows did not accept the display power command")
-        LOG.info("Requested display power-off")
-        return {"displays": "off"}
-
-    @staticmethod
-    def wake_displays():
-        """Request that Windows powers up displays and wake up GPU swapchain."""
-        hwnd_broadcast = 0xFFFF
-        wm_syscommand = 0x0112
-        sc_monitorpower = 0xF170
-        monitor_on = -1
-        try:
-            ctypes.windll.user32.SendMessageTimeoutW(
-                hwnd_broadcast,
-                wm_syscommand,
-                sc_monitorpower,
-                monitor_on,
-                0x0002,
-                1000,
-                None,
-            )
-        except Exception:
-            pass
-        try:
-            import pyautogui
-            pyautogui.moveRel(1, 0, duration=0)
-            pyautogui.moveRel(-1, 0, duration=0)
-        except Exception:
-            pass
-        LOG.info("Requested display wake-up")
-        return {"displays": "on"}
-
-    def handle_stealth_action(self, state: str = "toggle", hotkey=None, timeout=None) -> dict:
-        """Handle stealth / blackout mode activation or deactivation."""
-        if state == "toggle":
-            target = "off" if self.stealth_mgr.is_active() else "on"
-        else:
-            target = str(state).lower()
-
-        if target in ("on", "activate", "true", "1"):
-            if self.stealth_mgr.mute_audio:
-                try:
-                    vol = self.get_volume()
-                    self._prev_mute_state = vol.get("muted") if isinstance(vol, dict) else False
-                    self.set_volume(mute=True)
-                except Exception as err:
-                    LOG.warning("Failed to mute audio for stealth mode: %s", err)
-
-            self._stealth_is_active = True
-            self.stealth_mgr.activate(hotkey=hotkey, timeout_minutes=timeout)
-            time.sleep(0.3)
-
-            if self.stealth_mgr.turn_off_displays:
-                try:
-                    self.turn_off_displays()
-                except Exception as err:
-                    LOG.warning("Failed to power off displays for stealth mode: %s", err)
-
-            return {"stealth": "active", "active": True}
-        else:
-            self._stealth_is_active = False
-            self._stealth_offline_since = None
-            self.stealth_mgr.deactivate()
-
-            if self.stealth_mgr.mute_audio and self._prev_mute_state is not None:
-                try:
-                    self.set_volume(mute=self._prev_mute_state)
-                except Exception as err:
-                    LOG.warning("Failed to restore audio mute state: %s", err)
-                self._prev_mute_state = None
-
-            self.wake_displays()
-            return {"stealth": "inactive", "active": False}
-
-    def check_stealth_process_exit(self):
-        """
-        Detects if stealth overlay exited locally (via secret hotkey Win+W+1 or 5x Escape).
-        Automatically restores audio mute state, wakes displays, and publishes stealth_exit event to MQTT.
-        """
-        was_active = self._stealth_is_active or (self._prev_mute_state is not None)
-        if was_active and not self.stealth_mgr.is_active():
-            LOG.info("Stealth process exited locally (via hotkey/watchdog). Restoring audio, display, and notifying Telegram...")
-            self._stealth_is_active = False
-            if self.stealth_mgr.mute_audio and self._prev_mute_state is not None:
-                try:
-                    self.set_volume(mute=self._prev_mute_state)
-                except Exception as err:
-                    LOG.warning("Failed to restore audio mute state: %s", err)
-            self._prev_mute_state = None
-            self._stealth_offline_since = None
-            self.wake_displays()
-
-            # Publish stealth_exit event and updated telemetry to notify VDS bot
-            try:
-                now = time.time()
-                payload = {
-                    "state": "online",
-                    "event": "stealth_exit",
-                    "reason": "local_hotkey",
-                    "stealth_mode": False,
-                    "ts": now,
-                    "session": self.get_session_state(),
-                    "boot_id": getattr(self, "boot_id", None),
-                }
-                self.mqtt.publish(TOPIC_STATUS, json.dumps(payload), qos=1)
-                self.publish_telemetry()
-                LOG.info("Published stealth_exit event and updated telemetry to MQTT.")
-            except Exception as err:
-                LOG.warning("Failed to publish stealth_exit event: %s", err)
-
-    def check_stealth_offline_watchdog(self):
-        """
-        If stealth/blackout mode is active and the agent is offline from MQTT/network
-        continuously for longer than configured offline timeout (default 10 min),
-        emergency deactivates the overlay and unblocks mouse/keyboard input,
-        while keeping displays powered off (DPMS black screen).
-        """
-        if not self.stealth_mgr.is_active():
-            self._stealth_offline_since = None
-            return
-
-        is_offline = not self.mqtt_online
-
-        if is_offline:
-            now = time.time()
-            if self._stealth_offline_since is None:
-                self._stealth_offline_since = now
-                LOG.warning("Stealth mode: network/MQTT offline detected. Starting emergency offline watchdog.")
-            else:
-                elapsed = now - self._stealth_offline_since
-                offline_timeout_min = self.config.get("stealth_mode", {}).get("offline_timeout_minutes", 10)
-                offline_timeout_sec = max(60, int(offline_timeout_min) * 60)
-                if elapsed >= offline_timeout_sec:
-                    LOG.warning(
-                        "Stealth mode offline watchdog triggered (%.1f minutes continuously offline). "
-                        "Emergency exit: dismissing overlay, unblocking input, keeping displays dark.",
-                        elapsed / 60.0,
-                    )
-                    # Dismiss overlay to unblock mouse & keyboard
-                    self._stealth_is_active = False
-                    self.stealth_mgr.deactivate()
-
-                    # Restore audio mute state if it was muted
-                    if self.stealth_mgr.mute_audio and self._prev_mute_state is not None:
-                        try:
-                            self.set_volume(mute=self._prev_mute_state)
-                        except Exception as err:
-                            LOG.warning("Failed to restore audio mute state: %s", err)
-                        self._prev_mute_state = None
-
-                    # Do NOT wake displays! Re-assert DPMS power-off:
-                    if self.stealth_mgr.turn_off_displays:
-                        try:
-                            self.turn_off_displays()
-                        except Exception as err:
-                            LOG.warning("Failed to power off displays on emergency stealth exit: %s", err)
-
-                    self._stealth_offline_since = None
-        else:
-            if self._stealth_offline_since is not None:
-                LOG.info("Stealth mode: network/MQTT connection restored. Resetting emergency watchdog.")
-                self._stealth_offline_since = None
-
-    @staticmethod
-    def send_key_esc(count=1, delay=0.3):
-        """
-        Simulate pressing the Escape (ESC) key on Windows using hardware scan codes.
-        Works in desktop applications, fullscreen DirectX/DirectInput games (GTA, Roblox), etc.
-        """
-        count = max(1, min(int(count), 50))
-        delay = max(0.05, float(delay))
-        user32 = ctypes.windll.user32
-
-        VK_ESCAPE = 0x1B
-        SCAN_ESCAPE = 0x01
-        KEYEVENTF_KEYUP = 0x0002
-
-        for i in range(count):
-            try:
-                user32.keybd_event(VK_ESCAPE, SCAN_ESCAPE, 0, 0)
-                time.sleep(0.05)
-                user32.keybd_event(VK_ESCAPE, SCAN_ESCAPE, KEYEVENTF_KEYUP, 0)
-            except Exception as e:
-                LOG.warning("keybd_event failed: %s, falling back to pyautogui", e)
-                try:
-                    import pyautogui
-                    pyautogui.press("esc")
-                except Exception:
-                    pass
-            if i < count - 1:
-                time.sleep(delay)
-
-        LOG.info("Simulated ESC key press (count=%d)", count)
-        return {"action": "press_esc", "count": count, "success": True}
-
-    def launch_app(self, app_key, workspace_id=None, progress_callback=None, vpn=None):
-        app_config = self.config.get("apps", {}).get(app_key)
-        if not app_config:
-            app_config = self.config.get("scenarios", {}).get(app_key)
-        if not app_config:
-            raise ValueError("Application is not configured")
-
-        if isinstance(app_config, str) and app_config in self.config.get("scenarios", {}):
-            app_config = self.config["scenarios"][app_config]
-
-        scenario = app_config if isinstance(app_config, dict) else {}
-        minimize_after = bool(scenario.get("minimize_after", False))
-        inter_app_delay = max(0.0, float(scenario.get("inter_app_delay_seconds", 1.5)))
-        raw_steps = scenario.get("steps") if scenario else app_config
-        selected_vpn = str(vpn or self.config.get("default_vpn", "incy")).lower().strip()
-
-        cancel_event = None
-        if scenario and workspace_id:
-            cancel_event = threading.Event()
-            with self.workspace_lock:
-                self.workspace_cancellations[workspace_id] = cancel_event
-
-        normalized_steps = []
-        if isinstance(raw_steps, list):
-            for item in raw_steps:
-                if isinstance(item, dict):
-                    normalized_steps.append(item)
-                elif isinstance(item, list):
-                    exe_name = Path(item[0]).stem if item else "app"
-                    normalized_steps.append({
-                        "id": exe_name.lower(),
-                        "label": exe_name,
-                        "command": item,
-                        "required": True,
-                        "verification": {"type": "process_name", "targets": [Path(item[0]).name.lower()]} if item else {},
-                    })
-                elif isinstance(item, str):
-                    exe_name = Path(item).stem
-                    normalized_steps.append({
-                        "id": exe_name.lower(),
-                        "label": exe_name,
-                        "command": [item],
-                        "required": True,
-                        "verification": {"type": "process_name", "targets": [Path(item).name.lower()]},
-                    })
-        elif isinstance(raw_steps, str):
-            exe_name = Path(raw_steps).stem
-            normalized_steps.append({
-                "id": exe_name.lower(),
-                "label": exe_name,
-                "command": [raw_steps],
-                "required": True,
-                "verification": {"type": "process_name", "targets": [Path(raw_steps).name.lower()]},
-            })
-
-        launched = []
-        verified_steps = []
-        try:
-            for idx, step in enumerate(normalized_steps):
-                if cancel_event and cancel_event.is_set():
-                    LOG.info("Workspace launch cancelled before step %s (%s)", idx + 1, step.get("id"))
-                    return {
-                        "app": app_key,
-                        "launched": launched,
-                        "verified_steps": verified_steps,
-                        "cancelled": True,
-                        "desktop_minimized": False,
-                    }
-
-                step_id = step.get("id") or step.get("step_id", f"step_{idx}")
-                label = step.get("label", step_id)
-                raw_cmd = step.get("command") or ([step.get("executable")] if step.get("executable") else [])
-                cmd = [os.path.expandvars(str(c)) for c in raw_cmd]
-                required = bool(step.get("required", True))
-                verification = step.get("verification") or {}
-                if isinstance(verification, str):
-                    ver_type = verification
-                    targets = []
-                else:
-                    ver_type = verification.get("type", "process_name")
-                    targets = [t.lower() for t in verification.get("targets", [])]
-
-                if not cmd:
-                    continue
-                executable = cmd[0]
-
-                is_vpn = (
-                    step_id in ("happ_vpn", "incy_vpn", "vpn")
-                    or ver_type in ("happ_vpn", "incy_vpn", "vpn")
-                    or any(k in str(executable).lower() for k in ("happ.exe", "incy.exe"))
-                )
-
-                if is_vpn:
-                    if selected_vpn == "happ":
-                        step_id = "happ_vpn"
-                        label = "Happ (VPN)"
-                        configured_path = self.config.get("apps", {}).get("Happ", r"C:\Program Files\FlyFrogLLC\Happ\Happ.exe")
-                        executable = str(configured_path)
-                        cmd = [os.path.expandvars(executable)]
-                        is_happ = True
-                        is_incy = False
-                    else:
-                        step_id = "incy_vpn"
-                        label = "INCY (VPN)"
-                        configured_path = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
-                        executable = str(configured_path)
-                        cmd = [os.path.expandvars(executable)]
-                        is_happ = False
-                        is_incy = True
-                else:
-                    is_happ = (ver_type == "happ_vpn") or ("happ.exe" in str(executable).lower())
-                    is_incy = (ver_type == "incy_vpn") or ("incy.exe" in str(executable).lower())
-
-                if "*" in str(executable) or "?" in str(executable):
-                    matched = glob.glob(str(executable))
-                    if matched:
-                        executable = sorted(matched, key=os.path.getmtime, reverse=True)[0]
-                        cmd[0] = executable
-
-                resolved_exe = shutil.which(executable)
-                if resolved_exe:
-                    executable = resolved_exe
-                elif not Path(executable).exists():
-                    raise FileNotFoundError(executable)
-
-                # Check if already running and verified
-                if is_happ or is_incy:
-                    is_active = self.check_happ_vpn_active() if is_happ else self.check_incy_vpn_active()
-                    if is_active:
-                        LOG.info("Step %s (%s) is already running and VPN is verified", step_id, label)
-                        launched.append(f"{label} (already running verified)")
-                        verified_steps.append(step_id)
-                        if progress_callback:
-                            progress_callback({
-                                "step_id": step_id,
-                                "app": label,
-                                "state": "already_running_verified",
-                            })
-                        if idx < len(normalized_steps) - 1:
-                            time.sleep(inter_app_delay)
-                        continue
-                else:
-                    target_names = targets if targets else [Path(executable).name.lower()]
-                    app_already_running = any(
-                        (p.info["name"] or "").lower() in target_names
-                        for p in psutil.process_iter(["name"])
-                    )
-                    if app_already_running:
-                        LOG.info("Step %s (%s) is already running verified", step_id, label)
-                        launched.append(f"{label} (already running verified)")
-                        verified_steps.append(step_id)
-                        if progress_callback:
-                            progress_callback({
-                                "step_id": step_id,
-                                "app": label,
-                                "state": "already_running_verified",
-                            })
-                        if idx < len(normalized_steps) - 1:
-                            time.sleep(inter_app_delay)
-                        continue
-
-                # Launch application
-                if progress_callback:
-                    progress_callback({
-                        "step_id": step_id,
-                        "app": label,
-                        "state": "starting",
-                    })
-
-                try:
-                    process = subprocess.Popen(
-                        cmd,
-                        cwd=str(Path(executable).parent),
-                        creationflags=subprocess.DETACHED_PROCESS
-                        | subprocess.CREATE_NEW_PROCESS_GROUP,
-                    )
-                except OSError as e:
-                    if e.winerror == 740:
-                        LOG.warning("WinError 740 for %s, falling back to shell=True", executable)
-                        process = subprocess.Popen(
-                            cmd,
-                            cwd=str(Path(executable).parent),
-                            shell=True,
-                            creationflags=subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP,
-                        )
-                    else:
-                        raise
-
-                time.sleep(0.3)
-                if process.poll() not in (None, 0):
-                    raise RuntimeError(f"Application exited immediately: {executable}")
-                launched.append(label)
-
-                # Verification for VPN (HAPP or INCY)
-                if is_happ or is_incy:
-                    if progress_callback:
-                        progress_callback({
-                            "step_id": step_id,
-                            "app": label,
-                            "state": "connecting",
-                        })
-                    vpn_res = (
-                        self.connect_happ_vpn(cancel_event=cancel_event)
-                        if is_happ
-                        else self.connect_incy_vpn(cancel_event=cancel_event)
-                    )
-                    if vpn_res.get("cancelled"):
-                        return {
-                            "app": app_key,
-                            "launched": launched,
-                            "verified_steps": verified_steps,
-                            "cancelled": True,
-                            "desktop_minimized": False,
-                        }
-                    if not vpn_res.get("verified"):
-                        if progress_callback:
-                            progress_callback({
-                                "step_id": step_id,
-                                "app": label,
-                                "state": "failed",
-                                "error": vpn_res.get("reason", "vpn_failed"),
-                            })
-                        if required:
-                            LOG.error("Required VPN step %s failed; halting scenario", step_id)
-                            return {
-                                "app": app_key,
-                                "launched": launched,
-                                "verified_steps": verified_steps,
-                                "failed_step": step_id,
-                                "success": False,
-                                "reason": "vpn_verification_failed",
-                                "desktop_minimized": False,
-                            }
-                    else:
-                        verified_steps.append(step_id)
-                        if progress_callback:
-                            progress_callback({
-                                "step_id": step_id,
-                                "app": label,
-                                "state": "verified",
-                            })
-                else:
-                    # Verification for ordinary apps
-                    time.sleep(0.5)
-                    target_names = targets if targets else [Path(executable).name.lower()]
-                    ver_timeout = float(verification.get("timeout", 1.0)) if isinstance(verification, dict) else 1.0
-                    ver_deadline = time.time() + max(0.5, ver_timeout)
-                    process_verified = False
-                    while True:
-                        process_verified = (process.poll() is None) or any(
-                            (p.info["name"] or "").lower() in target_names
-                            for p in psutil.process_iter(["name"])
-                        )
-                        if process_verified or time.time() >= ver_deadline:
-                            break
-                        if cancel_event and cancel_event.is_set():
-                            break
-                        time.sleep(0.5)
-                    if process_verified:
-                        verified_steps.append(step_id)
-                        if progress_callback:
-                            progress_callback({
-                                "step_id": step_id,
-                                "app": label,
-                                "state": "verified",
-                            })
-                    else:
-                        if progress_callback:
-                            progress_callback({
-                                "step_id": step_id,
-                                "app": label,
-                                "state": "failed",
-                            })
-                        if required:
-                            LOG.error("Required app step %s failed verification; halting scenario", step_id)
-                            return {
-                                "app": app_key,
-                                "launched": launched,
-                                "verified_steps": verified_steps,
-                                "failed_step": step_id,
-                                "success": False,
-                                "reason": f"step_{step_id}_failed_verification",
-                                "desktop_minimized": False,
-                            }
-
-                if idx < len(normalized_steps) - 1:
-                    time.sleep(inter_app_delay)
-
-            if minimize_after:
-                self.minimize_all_windows()
-
-            return {
-                "app": app_key,
-                "launched": launched,
-                "verified_steps": verified_steps,
-                "success": True,
-                "desktop_minimized": minimize_after,
-            }
-        finally:
-            if cancel_event and workspace_id:
-                with self.workspace_lock:
-                    self.workspace_cancellations.pop(workspace_id, None)
-
-    def cancel_workspace(self, workspace_id):
-        with self.workspace_lock:
-            cancel_event = self.workspace_cancellations.get(workspace_id)
-        if not cancel_event:
-            return {"workspace_id": workspace_id, "state": "not_running"}
-        cancel_event.set()
-        return {"workspace_id": workspace_id, "state": "cancelling"}
-
-
-    @staticmethod
-    def kill_process(process_name):
-        if not process_name:
-            raise ValueError("Process name is required")
-        normalized = str(process_name).lower().strip()
-        if normalized in PROTECTED_PROCESSES:
-            raise PermissionError("Protected Windows process")
-        killed = []
-        for process in psutil.process_iter(["pid", "name"]):
-            try:
-                if (process.info["name"] or "").lower() == normalized:
-                    process.terminate()
-                    killed.append(process.info["pid"])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        return {"name": process_name, "terminated_pids": killed}
-
-    @staticmethod
-    def kill_process_by_pid(pid):
-        process = psutil.Process(int(pid))
-        name = (process.name() or "").lower()
-        if process.pid == os.getpid() or name in PROTECTED_PROCESSES:
-            raise PermissionError("Protected Windows process")
-        original_name = process.name()
-        process.terminate()
-        return {"name": original_name, "terminated_pid": int(pid)}
-
-    def restart_service(self, service_key):
-        service_name = self.config.get("services", {}).get(service_key)
-        if not service_name:
-            raise ValueError("Service is not configured")
-        subprocess.run(
-            ["sc.exe", "stop", service_name],
-            capture_output=True,
-            timeout=20,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        time.sleep(2)
-        completed = subprocess.run(
-            ["sc.exe", "start", service_name],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stdout or completed.stderr)
-        return {"service": service_key}
-
-    def execute_action(self, command_id, action, args):
-        try:
-            if action == "telemetry":
-                data = self.collect_telemetry()
-                self.acknowledge(command_id, "executed", data)
-                return
-
-            if action == "top_processes":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    {"processes": self.top_processes()},
-                )
-                return
-
-            if action == "screenshot":
-                data = self.make_screenshot(command_id)
-                self.acknowledge(command_id, "executed", data)
-                return
-
-            if action == "lock":
-                self.acknowledge(command_id, "executed")
-                ctypes.windll.user32.LockWorkStation()
-                return
-
-            if action == "sleep":
-                try:
-                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-sleep-{int(time.time())}|{int(time.time())+30}", qos=1)
-                except Exception:
-                    pass
-                self.acknowledge(command_id, "executed")
-                time.sleep(1)
-                ctypes.windll.powrprof.SetSuspendState(False, False, False)
-                return
-
-            if action == "hibernate":
-                try:
-                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-hib-{int(time.time())}|{int(time.time())+30}", qos=1)
-                except Exception:
-                    pass
-                self.acknowledge(command_id, "executed")
-                time.sleep(1)
-                subprocess.Popen(["shutdown.exe", "/h"])
-                return
-
-            if action == "shutdown":
-                try:
-                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-shut-{int(time.time())}|{int(time.time())+30}", qos=1)
-                except Exception:
-                    pass
-                self.acknowledge(command_id, "executed")
-                time.sleep(1)
-                subprocess.Popen(
-                    [
-                        "shutdown.exe",
-                        "/s",
-                        "/t",
-                        "5",
-                        "/c",
-                        "PC CONTROL: удалённое выключение",
-                    ]
-                )
-                return
-
-            if action == "restart":
-                try:
-                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-rst-{int(time.time())}|{int(time.time())+30}", qos=1)
-                except Exception:
-                    pass
-                self.acknowledge(command_id, "executed")
-                time.sleep(1)
-                subprocess.Popen(
-                    [
-                        "shutdown.exe",
-                        "/r",
-                        "/t",
-                        "5",
-                        "/c",
-                        "PC CONTROL: удалённая перезагрузка",
-                    ]
-                )
-                return
-
-            if action == "launch_app":
-                def report_progress(data):
-                    self.acknowledge(command_id, "progress", data)
-
-                ws_id = str(args.get("workspace_id", "")) or command_id
-                res = self.launch_app(
-                    args.get("app"),
-                    workspace_id=ws_id,
-                    progress_callback=report_progress,
-                    vpn=args.get("vpn"),
-                )
-                if isinstance(res, dict) and res.get("success") is False:
-                    self.acknowledge(command_id, "failed", res)
-                else:
-                    self.acknowledge(command_id, "executed", res)
-                return
-
-            if action == "cancel_workspace":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    self.cancel_workspace(str(args.get("workspace_id", ""))),
-                )
-                return
-
-            if action == "minimize_all":
-                try:
-                    self.minimize_all_windows()
-                    self.acknowledge(command_id, "executed")
-                except Exception as error:
-                    LOG.exception("minimize_all failed")
-                    self.acknowledge(command_id, "failed", {"error": str(error)})
-                return
-
-            if action == "screen_off":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    self.turn_off_displays(),
-                )
-                return
-
-            if action in ("stealth_mode", "blackout_mode"):
-                state = args.get("state", "toggle")
-                res = self.handle_stealth_action(
-                    state=state,
-                    hotkey=args.get("hotkey"),
-                    timeout=args.get("timeout"),
-                )
-                self.acknowledge(command_id, "executed", res)
-                return
-
-            if action == "kill_process":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    self.kill_process(args.get("name", "")),
-                )
-                return
-
-            if action == "kill_pid":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    self.kill_process_by_pid(args.get("pid")),
-                )
-                return
-
-            if action == "restart_service":
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    self.restart_service(args.get("service")),
-                )
-                return
-
-            if action == "volume":
-                data = self.set_volume(
-                    percent=args.get("percent"),
-                    mute=args.get("mute"),
-                    toggle=bool(args.get("toggle", False)),
-                )
-                self.acknowledge(command_id, "executed", data)
-                return
-
-            if action in {"press_esc", "send_key_esc", "send_key"}:
-                key = str(args.get("key", "esc")).lower()
-                count = int(args.get("count", 1))
-                delay = float(args.get("delay", 0.3))
-                if key in {"esc", "escape"}:
-                    res = self.send_key_esc(count=count, delay=delay)
-                    self.acknowledge(command_id, "executed", res)
-                else:
-                    self.acknowledge(command_id, "failed", {"error": f"unsupported key: {key}"})
-                return
-
-            if action in ("cmd", "exec", "powershell"):
-                cmd_text = args.get("command") or args.get("cmd") or ""
-                use_ps = action == "powershell" or args.get("shell") == "powershell"
-                timeout_s = min(int(args.get("timeout", 60)), 300)
-                cwd = args.get("cwd") or os.environ.get("USERPROFILE") or "C:\\"
-
-                if use_ps:
-                    exec_args = [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {cmd_text}",
-                    ]
-                else:
-                    exec_args = ["cmd.exe", "/c", f"chcp 65001 >nul & {cmd_text}"]
-
-                try:
-                    p = subprocess.run(
-                        exec_args,
-                        capture_output=True,
-                        timeout=timeout_s,
-                        cwd=cwd,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                    stdout = p.stdout
-                    stderr = p.stderr
-                    code = p.returncode
-                except subprocess.TimeoutExpired:
-                    stdout = ""
-                    stderr = f"Command timed out after {timeout_s}s"
-                    code = 124
-                except Exception as e:
-                    stdout = ""
-                    stderr = f"Execution error: {e}"
-                    code = -1
-
-                max_len = 8000
-                if len(stdout) > max_len:
-                    stdout = stdout[:max_len] + f"\n... [обрезано {len(stdout) - max_len} симв.]"
-                if len(stderr) > 4000:
-                    stderr = stderr[:4000] + f"\n... [обрезано]"
-
-                self.acknowledge(
-                    command_id,
-                    "executed" if code == 0 else "failed",
-                    {
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "exit_code": code,
-                        "command": cmd_text,
-                        "shell": "powershell" if use_ps else "cmd",
-                    },
-                )
-                return
-
-            if action == "antigravity_list":
-                accounts = self.antigravity_manager.list_accounts()
-                active = self.antigravity_manager.get_active_account()
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    {
-                        "accounts": accounts,
-                        "active": active,
-                        "is_running": self.antigravity_manager.is_ide_running(),
-                    },
-                )
-                return
-
-            if action == "antigravity_switch":
-                acc_id = args.get("account_id")
-                restart = bool(args.get("restart", True))
-                if acc_id == "auto":
-                    best = self.antigravity_manager.find_best_account()
-                    if not best:
-                        self.acknowledge(command_id, "failed", {"error": "Нет доступных аккаунтов с остатком квоты"})
-                        return
-                    acc_id = best["id"]
-
-                res = self.antigravity_manager.switch_account(acc_id, restart_ide=restart)
-                self.acknowledge(command_id, "executed", res)
-                return
-
-            if action == "antigravity_restart":
-                was_running = self.antigravity_manager.is_ide_running()
-                if was_running:
-                    self.antigravity_manager.kill_ide()
-                restarted = self.antigravity_manager.launch_ide()
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    {"success": True, "restarted": restarted},
-                )
-                return
-
-            if action == "antigravity_export":
-                bundle = self.antigravity_manager.export_accounts()
-                self.acknowledge(
-                    command_id,
-                    "executed",
-                    {"accounts_count": len(bundle.get("accounts", [])), "exported_at": bundle.get("exported_at")},
-                )
-                return
-
-            self.acknowledge(command_id, "unknown_action")
-
-        except PermissionError as error:
-            LOG.warning("Permission denied for %s: %s", action, error)
-            self.acknowledge(command_id, "permission_denied", {"error": str(error)})
-        except Exception as error:
-            LOG.exception("Action failed: %s", action)
-            self.acknowledge(command_id, "failed", {"error": str(error)})
-
-    def process_command(self, command):
-        if not isinstance(command, dict):
-            LOG.warning("Ignoring non-object command payload")
-            return
-        command_id = str(command.get("id", ""))
-        action = str(command.get("action", ""))
-        try:
-            expires = int(command.get("expires", 0))
-        except (TypeError, ValueError):
-            LOG.warning("Ignoring command with invalid expiry: %s", command_id)
-            if command_id and len(command_id) <= 80:
-                self.acknowledge(command_id, "invalid_command")
-            return
-        args = command.get("args") or {}
-        if not isinstance(args, dict):
-            LOG.warning("Ignoring command with invalid args: %s", command_id)
-            if command_id and len(command_id) <= 80:
-                self.acknowledge(command_id, "invalid_command")
-            return
-        now = int(time.time())
-
-        if expires < now - 30 or expires > now + 300:
-            self.acknowledge(command_id, "expired")
-            return
-        if not self.remember_command(command_id):
-            self.acknowledge(command_id, "duplicate_ignored")
-            return
-
-        LOG.info("Executing action=%s id=%s", action, command_id)
-        threading.Thread(
-            target=self.execute_action,
-            args=(command_id, action, args),
-            name=f"action-{action}",
-            daemon=True,
-        ).start()
-
-    def publish_telemetry(self):
-        with self.state_lock:
-            telemetry = self.collect_telemetry()
-            payload = json.dumps(telemetry, ensure_ascii=False)
-        self.mqtt.publish(
-            TOPIC_TELEMETRY,
-            payload=payload,
-            qos=0,
-            retain=True,
-        )
-
-    def publish_active_app_update(self, proc_name, emoji_id, title=None):
-        if not self.mqtt_online:
-            return
-        try:
-            with self.state_lock:
-                if not self.last_telemetry:
-                    self.last_telemetry = self.collect_telemetry()
-                self.last_telemetry["active_application"] = proc_name
-                self.last_telemetry["active_application_emoji_id"] = emoji_id
-                self.last_telemetry["active_window_title"] = title
-
-                is_pc_control = False
-                if proc_name:
-                    app_lower = proc_name.lower()
-                    if any(client in app_lower for client in ("telegram", "ayugram", "kotatogram", "64gram", "unigram")):
-                        title_lower = (title or "").lower()
-                        if "pc control" in title_lower or "your_pc_bot" in title_lower:
-                            is_pc_control = True
-                self.last_telemetry["in_pc_control_chat"] = is_pc_control
-                self.in_pc_control_chat = is_pc_control
-
-                now = time.time()
-                self.last_telemetry["timestamp"] = int(now)
-                self.last_telemetry["ts"] = now
-                payload = json.dumps(self.last_telemetry, ensure_ascii=False)
-
-            self.mqtt.publish(TOPIC_TELEMETRY, payload=payload, qos=0, retain=True)
-            LOG.info("Instant active app telemetry published: %s (title: %r, emoji: %s)", proc_name, title, emoji_id)
-        except Exception:
-            LOG.exception("Failed to publish instant active app telemetry")
-
-    def _handle_active_app_change(self, exe_path, exe_name, title):
-        from core.app_emoji_manager import IGNORED_PROCESSES
-        from core.activity_db import get_activity_db
-        key = exe_name.lower()
-        if key in IGNORED_PROCESSES:
-            return
-
-        with self.state_lock:
-            if self.current_session_app and key == self.current_session_app.lower():
-                self.current_session_title = title
-                return
-
-            now = time.time()
-            # 1. Close and record previous app session to SQLite
-            if self.current_session_app and self.current_session_start:
-                try:
-                    get_activity_db().record_session(
-                        app_name=self.current_session_app,
-                        window_title=self.current_session_title,
-                        exe_path=self.current_session_exe,
-                        started_at=self.current_session_start,
-                        ended_at=now,
-                        emoji_id=self.current_session_emoji_id
-                    )
-                except Exception:
-                    LOG.exception("Failed to record session to SQLite")
-
-            # 2. Instant lookup from cache (0.01 ms)
-            emoji_id = self.emoji_manager.cache.get(key, {}).get("emoji_id")
-
-            # 3. Open new session in memory
-            self.current_session_app = exe_name
-            self.current_session_title = title
-            self.current_session_exe = exe_path
-            self.current_session_start = now
-            self.current_session_emoji_id = emoji_id
-
-        # 4. INSTANT MQTT push to VDS (2-5 ms) so bot dashboard updates in real time!
-        self.publish_active_app_update(exe_name, emoji_id, title)
-
-        # 5. Asynchronously extract icon to sticker pack ONLY if new / not cached
-        if not emoji_id and exe_path:
-            def _bg_notify():
-                try:
-                    new_emoji_id = self.emoji_manager.notify_app_opened(
-                        exe_path, exe_name, title
-                    )
-                    if new_emoji_id:
-                        self.current_session_emoji_id = new_emoji_id
-                        if new_emoji_id != emoji_id:
-                            self.publish_active_app_update(exe_name, new_emoji_id, title)
-                except Exception:
-                    LOG.exception("Error in _bg_notify")
-
-            threading.Thread(
-                target=_bg_notify,
-                name="emoji-notify-fast",
-                daemon=True
-            ).start()
-
     def _fast_foreground_watcher_loop(self):
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
@@ -2404,7 +512,6 @@ class PCControlAgent:
             try:
                 hwnd = self.get_foreground_window_safe()
 
-                # Fast path: if foreground HWND has not changed, check title changes (e.g. tabs)
                 if hwnd != last_hwnd:
                     last_hwnd = hwnd
                     if not hwnd:
@@ -2414,7 +521,7 @@ class PCControlAgent:
                         self.stop_event.wait(0.5)
                         continue
 
-                    pid = wintypes.DWORD()
+                    pid = ctypes.c_ulong()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                     exe_path = None
                     exe_name = None
@@ -2423,13 +530,12 @@ class PCControlAgent:
                         hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
                         if hproc:
                             buf = ctypes.create_unicode_buffer(1024)
-                            size = wintypes.DWORD(1024)
+                            size = ctypes.c_ulong(1024)
                             if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
                                 exe_path = buf.value
                                 exe_name = os.path.basename(exe_path)
                             kernel32.CloseHandle(hproc)
 
-                        # Fallback to psutil if OpenProcess or QueryFullProcessImageNameW was restricted
                         if not exe_name:
                             try:
                                 proc = psutil.Process(pid.value)
@@ -2438,7 +544,6 @@ class PCControlAgent:
                             except Exception:
                                 pass
 
-                    # Check for Desktop class names if explorer or no exe
                     if not exe_name or exe_name.lower() == "explorer.exe":
                         cls_buf = ctypes.create_unicode_buffer(256)
                         user32.GetClassNameW(hwnd, cls_buf, 256)
@@ -2463,7 +568,6 @@ class PCControlAgent:
                                 self.in_pc_control_chat = False
                             self._handle_active_app_change(exe_path, exe_name, title)
                         elif title != last_title:
-                            # Same exe, different window of the same app
                             last_title = title
                             self.current_session_title = title
                             if any(c in exe_key for c in telegram_clients):
@@ -2477,7 +581,6 @@ class PCControlAgent:
                         last_title = None
                         self.in_pc_control_chat = False
                 else:
-                    # Same window: check if user switched tabs/documents in ANY app
                     tlen = user32.GetWindowTextLengthW(hwnd)
                     if tlen:
                         tbuf = ctypes.create_unicode_buffer(tlen + 1)
@@ -2490,7 +593,7 @@ class PCControlAgent:
                                 self.in_pc_control_chat = bool(title and ("pc control" in title.lower() or "your_pc_bot" in title.lower()))
                             else:
                                 self.in_pc_control_chat = False
-                            if self.mqtt_online and last_exe_key:
+                            if getattr(self, "mqtt_online", False) and last_exe_key:
                                 try:
                                     emoji_id = self.emoji_manager.cache.get(last_exe_key, {}).get("emoji_id")
                                     self.publish_active_app_update(self.current_session_app or last_exe_key, emoji_id, title)
@@ -2528,8 +631,12 @@ class PCControlAgent:
                 import win32con
 
                 def wndproc(hwnd, msg, wparam, lparam):
-                    if msg in (win32con.WM_QUERYENDSESSION, win32con.WM_ENDSESSION):
-                        LOG.info("Windows shutdown/logoff detected via WM_ENDSESSION (msg=0x%x, lparam=0x%x)", msg, lparam)
+                    if msg == win32con.WM_QUERYENDSESSION:
+                        return 1
+                    if msg == win32con.WM_ENDSESSION:
+                        if not wparam:
+                            return 0
+                        LOG.info("Windows shutdown/logoff confirmed via WM_ENDSESSION (msg=0x%x, lparam=0x%x)", msg, lparam)
                         self._shutdown_detected = True
                         try:
                             now_ts = int(time.time())
@@ -2560,7 +667,7 @@ class PCControlAgent:
                         except Exception:
                             pass
                         self.stop_event.set()
-                        return 1
+                        return 0
                     return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
                 wc = win32gui.WNDCLASS()
@@ -2585,15 +692,15 @@ class PCControlAgent:
             self.activity_tracker.start()
 
         if hasattr(self, "emoji_manager"):
-            threading.Thread(
+            self.fast_watcher_thread = threading.Thread(
                 target=self._fast_foreground_watcher_loop,
                 name="fast-foreground-watcher",
                 daemon=True,
-            ).start()
+            )
+            self.fast_watcher_thread.start()
 
         self._start_shutdown_watcher()
 
-        # Prime cpu_percent to establish baseline
         psutil.cpu_percent(interval=None)
 
         if not self.connect_with_retry():
@@ -2621,7 +728,7 @@ class PCControlAgent:
                         pass
 
                     current_interval = 5 if getattr(self, "in_pc_control_chat", False) else interval
-                    if self.mqtt_online and time.time() >= next_telemetry:
+                    if getattr(self, "mqtt_online", False) and time.time() >= next_telemetry:
                         try:
                             self.publish_telemetry()
                         except Exception:
@@ -2635,17 +742,17 @@ class PCControlAgent:
                     LOG.exception("Desktop agent loop iteration failed")
                     self.stop_event.wait(2)
         finally:
-            # Flush final active app session to SQLite
             if self.current_session_app and self.current_session_start:
                 try:
                     from core.activity_db import get_activity_db
+
                     get_activity_db().record_session(
                         app_name=self.current_session_app,
                         window_title=self.current_session_title,
                         exe_path=self.current_session_exe,
                         started_at=self.current_session_start,
                         ended_at=time.time(),
-                        emoji_id=self.current_session_emoji_id
+                        emoji_id=self.current_session_emoji_id,
                     )
                 except Exception:
                     pass
@@ -2697,6 +804,7 @@ class PCControlAgent:
             if self.activity_tracker:
                 self.activity_tracker.stop()
 
+
 def main():
     mutex = acquire_single_instance()
     agent = PCControlAgent()
@@ -2710,7 +818,11 @@ def main():
     try:
         agent.run()
     finally:
-        ctypes.windll.kernel32.ReleaseMutex(mutex)
+        try:
+            ctypes.windll.kernel32.ReleaseMutex(mutex)
+            ctypes.windll.kernel32.CloseHandle(mutex)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

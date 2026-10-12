@@ -47,6 +47,16 @@ WM_SYSKEYUP = 0x0105
 
 HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
+try:
+    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+    user32.SetWindowsHookExW.restype = wintypes.HHOOK
+    user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+    user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+    user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    user32.CallNextHookEx.restype = ctypes.c_ssize_t
+except Exception:
+    pass
+
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
@@ -62,14 +72,14 @@ MODIFIER_VK_MAP = {
     0x5B: "win",
     0x5C: "win",
     0x11: "ctrl",
-    0xA0: "ctrl",
-    0xA1: "ctrl",
+    0xA2: "ctrl",
+    0xA3: "ctrl",
     0x12: "alt",
     0xA4: "alt",
     0xA5: "alt",
     0x10: "shift",
-    0xA2: "shift",
-    0xA3: "shift",
+    0xA0: "shift",
+    0xA1: "shift",
 }
 
 RUSSIAN_KEY_MAP = {
@@ -223,9 +233,9 @@ class StealthOverlay:
         except Exception:
             ctrl_hw = alt_hw = shift_hw = win_hw = False
 
-        ctrl_down = ctrl_hw or any(k in self._down_keys for k in (0x11, 0xA0, 0xA1))
+        ctrl_down = ctrl_hw or any(k in self._down_keys for k in (0x11, 0xA2, 0xA3))
         alt_down = alt_hw or any(k in self._down_keys for k in (0x12, 0xA4, 0xA5))
-        shift_down = shift_hw or any(k in self._down_keys for k in (0x10, 0xA2, 0xA3))
+        shift_down = shift_hw or any(k in self._down_keys for k in (0x10, 0xA0, 0xA1))
         win_down = win_hw or any(k in self._down_keys for k in (0x5B, 0x5C))
 
         if allow_recent_win and ("win" in self.required_mods) and not win_down:

@@ -191,6 +191,8 @@ class MediaManager:
             LOG.warning("Failed syncing Yandex Music likes: %s", e)
 
     def _resolve_track(self, title: str, artist: str, duration: float = 0.0) -> Tuple[str, str, Optional[str], bool, Optional[str]]:
+        title = title or ""
+        artist = artist or ""
         if not title and not artist:
             return title, artist, None, False, None
 
