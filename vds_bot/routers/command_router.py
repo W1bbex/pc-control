@@ -60,9 +60,12 @@ def route_message(app, message: dict) -> None:
     lower_text = text.lower().strip()
 
     try:
-        from vds_bot.routers.antigravity_router import route_antigravity_command
+        from .antigravity_router import route_antigravity_command
     except ImportError:
-        from antigravity_router import route_antigravity_command
+        try:
+            from routers.antigravity_router import route_antigravity_command
+        except ImportError:
+            from vds_bot.routers.antigravity_router import route_antigravity_command
 
     if route_antigravity_command(app, chat_id, text):
         return
@@ -204,7 +207,10 @@ def route_message(app, message: dict) -> None:
         try:
             from .monitoring_router import LED_WHITE_PRESETS
         except ImportError:
-            from monitoring_router import LED_WHITE_PRESETS
+            try:
+                from routers.monitoring_router import LED_WHITE_PRESETS
+            except ImportError:
+                from vds_bot.routers.monitoring_router import LED_WHITE_PRESETS
         if arg in LED_WHITE_PRESETS:
             rgb, name = LED_WHITE_PRESETS[arg]
             app.mqtt.publish_esp_action("LED_COLOR", value=rgb)

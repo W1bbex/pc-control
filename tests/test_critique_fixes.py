@@ -328,3 +328,17 @@ def test_telegram_ui_edit_media_sanitizes_reply_markup():
     assert "icon_custom_emoji_id" not in btn
 
 
+def test_command_router_antigravity_isolated_import():
+    """Verify route_message does not crash with ModuleNotFoundError when processing /antigravity."""
+    from unittest.mock import MagicMock
+    from vds_bot.routers.command_router import route_message
+
+    app = MagicMock()
+    app.allowed_user_id = 12345
+    app.ui = MagicMock()
+    app.latest_media_state = None
+    app.mqtt = MagicMock()
+    msg = {"chat": {"id": 12345, "type": "private"}, "from": {"id": 12345}, "text": "/antigravity"}
+    route_message(app, msg)
+
+
