@@ -70,13 +70,21 @@ EXCLUDE_FILES = {
 
 VDS_MANIFEST_FILES = [
     "bot.py",
+    "console_service.py",
     "health_engine.py",
     "history.py",
     "monitoring.py",
+    "mqtt_dispatcher.py",
     "mqtt_gateway.py",
     "physical_button.py",
+    "player_manager.py",
     "power_flow.py",
+    "power_scheduler.py",
     "telegram_ui.py",
+    "ui_icons.py",
+    "ui_markups.py",
+    "ui_templates.py",
+    "workspace_runner.py",
     "requirements.txt",
     "pc-control-bot.env.example",
     "pc-control-bot.service",
@@ -89,6 +97,7 @@ VDS_MANIFEST_FILES = [
     "routers/player_router.py",
     "routers/power_router.py",
     "routers/workspace_router.py",
+    "routers/antigravity_router.py",
 ]
 
 MAX_BACKUP_RETENTION = 12  # Keep last 12 weekly archives

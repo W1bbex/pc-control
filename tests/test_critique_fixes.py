@@ -81,8 +81,9 @@ def test_vds_bot_has_dedicated_polling_session():
 
 def test_vds_bot_command_timeout_cleans_pending_telemetry():
     """Verify command_timeout evicts pending_telemetry_cmd_ids to prevent memory leaks."""
+    dispatcher_file = Path(__file__).resolve().parent.parent / "vds_bot" / "mqtt_dispatcher.py"
     bot_file = Path(__file__).resolve().parent.parent / "vds_bot" / "bot.py"
-    source = bot_file.read_text(encoding="utf-8")
+    source = (dispatcher_file.read_text(encoding="utf-8") if dispatcher_file.exists() else "") + bot_file.read_text(encoding="utf-8")
     assert 'getattr(self, "pending_telemetry_cmd_ids", {}).pop(cmd_id, None)' in source
 
 
