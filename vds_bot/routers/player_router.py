@@ -9,21 +9,7 @@ LOG = logging.getLogger("pc-control-bot.routers.player")
 
 def route_player_callback(app, data: str, chat_id: int, message_id: int, callback_id: str, business_connection_id: str = None) -> bool:
     """Handle media player and sound callback queries. Returns True if handled, False otherwise."""
-    # 1. Open Player Card
-    if data == "menu_player":
-        app.ui.answer_callback(callback_id)
-        if message_id:
-            try:
-                app.ui.delete_message(chat_id, message_id)
-            except Exception:
-                pass
-
-        media_state = getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {})
-        app._send_player_card(chat_id, media_state, business_connection_id=None)
-        app.mqtt.send_media_command("refresh")
-        return True
-
-    # 2. Player Controls
+    # 1. Player Controls
     if data.startswith("player_"):
         action = data.replace("player_", "")
         app.active_player_message_id = message_id

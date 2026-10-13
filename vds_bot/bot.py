@@ -105,7 +105,7 @@ MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 
-STATE_PATH = Path("/var/lib/pc-control-bot/state.json")
+STATE_PATH = Path(os.environ.get("STATE_PATH", "/var/lib/pc-control-bot/state.json"))
 
 
 class PcControlBotApp(
@@ -378,10 +378,13 @@ class PcControlBotApp(
 
     def handle_callback(self, callback):
         callback_id = callback["id"]
-        chat_id = callback.get("message", {}).get("chat", {}).get("id")
-        from_user_id = callback.get("from", {}).get("id") or chat_id
-        message_id = callback.get("message", {}).get("message_id")
-        business_connection_id = callback.get("message", {}).get("business_connection_id")
+        msg = callback.get("message") or {}
+        chat_id = msg.get("chat", {}).get("id") if isinstance(msg, dict) else None
+        from_user_id = (callback.get("from") or {}).get("id") or chat_id
+        if chat_id is None:
+            chat_id = from_user_id
+        message_id = msg.get("message_id") if isinstance(msg, dict) else None
+        business_connection_id = msg.get("business_connection_id") if isinstance(msg, dict) else None
         data = callback.get("data", "")
 
         target_user = self.allowed_user_id
@@ -423,9 +426,9 @@ class PcControlBotApp(
 
     def handle_business_message(self, message):
         text = (message.get("text") or "").strip()
-        chat_id = message.get("chat", {}).get("id")
+        chat_id = (message.get("chat") or {}).get("id") if isinstance(message, dict) else None
         conn_id = message.get("business_connection_id")
-        from_id = message.get("from", {}).get("id")
+        from_id = (message.get("from") or {}).get("id") if isinstance(message, dict) else None
 
         LOG.info("Business message received: chat_id=%s conn_id=%s from_id=%s text=%r", chat_id, conn_id, from_id, text)
 

@@ -46,6 +46,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
     """Handle monitoring, dashboard, telemetry, screenshot, sound, and LED callbacks. Returns True if handled, False otherwise."""
     # 1. Main Dashboard Menu Navigation
     if data == "menu":
+        app.awaiting_shutdown_time_chat_id = None
         app.ui.answer_callback(callback_id)
         if hasattr(app, "power_flow") and getattr(app.power_flow, "stage", None) in (
             PowerFlowStage.WAITING_WORKSPACE_DECISION,
@@ -165,7 +166,11 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             return True
         app.ui.answer_callback(callback_id, "Обновляю состояние...")
         cmd_id = app.mqtt.publish_desktop_action("telemetry")
-        app.pending_telemetry_cmd_ids[cmd_id] = (chat_id, message_id)
+        if cmd_id:
+            app.pending_telemetry_cmd_ids[cmd_id] = (chat_id, message_id)
+            if not hasattr(app, "pending_cmd_timestamps"):
+                app.pending_cmd_timestamps = {}
+            app.pending_cmd_timestamps[cmd_id] = time.time()
         return True
 
     # 9. LED Menu
@@ -222,6 +227,8 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
                 rgb, name = LED_WHITE_PRESETS[preset_id]
                 app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
                 app.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
+            else:
+                app.ui.answer_callback(callback_id, "Неизвестный пресет", alert=True)
         return True
 
     return False

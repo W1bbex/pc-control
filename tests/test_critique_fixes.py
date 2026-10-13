@@ -342,3 +342,228 @@ def test_command_router_antigravity_isolated_import():
     route_message(app, msg)
 
 
+def test_wtsinfoexw_memory_alignment_offset_8():
+    """Verify WTSINFOEXW has Data field at offset 8 in 64-bit SDK while LEVEL1_W is 12 bytes."""
+    import ctypes
+    import boot_agent
+
+    struct_l1 = boot_agent.WTSINFOEX_LEVEL1_W
+    struct_ex = boot_agent.WTSINFOEXW
+    assert ctypes.sizeof(struct_l1) == 12, f"Expected 12 bytes, got {ctypes.sizeof(struct_l1)}"
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        assert struct_ex.Data.offset == 8, f"Expected Data offset 8 on 64-bit Windows, got {struct_ex.Data.offset}"
+        assert struct_ex.Data.offset + struct_l1.SessionFlags.offset == 16
+
+
+def test_antigravity_card_renders_valid_tg_emoji_and_none_safe():
+    """Verify antigravity_card_text wraps an emoji in tg-emoji and handles None values safely."""
+    from vds_bot.ui_templates import UiTemplatesMixin
+
+    ui = UiTemplatesMixin()
+    # 1. Null data test
+    null_data = {
+        "accounts": [
+            {"email": None, "name": None, "is_active": True},
+            {"email": None, "name": None, "is_active": False},
+        ],
+        "active": {"email": None, "name": None, "reset_time": None},
+        "is_running": False,
+    }
+    card = ui.antigravity_card_text(null_data)
+    assert "Antigravity • Управление аккаунтами" in card
+    assert "Без имени" in card or "—" in card
+
+    # 2. Check tg-emoji tag has inner character (not empty <tg-emoji ...></tg-emoji>)
+    if "<tg-emoji" in card:
+        assert "></tg-emoji>" not in card, "Custom emoji must wrap a fallback character!"
+
+
+def test_bot_callback_none_message_safe():
+    """Verify handle_callback does not crash with AttributeError when callback['message'] is None."""
+    from unittest.mock import MagicMock
+    from vds_bot.bot import PcControlBotApp
+
+    bot = PcControlBotApp.__new__(PcControlBotApp)
+    bot.allowed_user_id = 12345
+    bot.ui = MagicMock()
+    bot.current_menu_view = "menu"
+    bot.monitoring = MagicMock()
+    bot.save_state = MagicMock()
+    bot._main_menu_markup = MagicMock(return_value={})
+
+    # Message is None (inline callback from inline query message)
+    callback_payload = {
+        "id": "cb_999",
+        "data": "menu",
+        "message": None,
+        "from": {"id": 12345},
+    }
+    bot.handle_callback(callback_payload)
+    bot.ui.answer_callback.assert_called_with("cb_999")
+
+
+def test_player_card_caption_delegates_to_player_card_text():
+    """Verify player_card_caption returns the exact same string as player_card_text."""
+    from vds_bot.ui_templates import UiTemplatesMixin
+
+    ui = UiTemplatesMixin()
+    state = {"active": True, "title": "Song", "artist": "Artist", "position": 10, "duration": 100}
+    assert ui.player_card_caption(state) == ui.player_card_text(state)
+
+
+def test_power_flow_double_click_relay_protection():
+    """Verify power_flow ignores duplicate start_power_on calls while in POWERING_ON stage."""
+    from vds_bot.power_flow import PowerFlowManager, PowerFlowStage
+    mock_ui = MagicMock()
+    mock_mqtt = MagicMock()
+    mock_mqtt.system_status = "offline"
+    mock_mqtt.desktop_status = "offline"
+    mock_mqtt.esp_status = "online"
+    mock_mqtt.publish_esp_action = MagicMock(return_value="cmd_1")
+    pc_state = MagicMock()
+    pc_state.state = "OFFLINE"
+    mock_mqtt.health.evaluate_pc_state = MagicMock(return_value=pc_state)
+
+    flow = PowerFlowManager(mock_ui, mock_mqtt)
+    flow.reset_flow()
+    flow.start_power_on(123)
+    assert flow.stage == PowerFlowStage.POWERING_ON
+    # 1 PRESS and 1 LED_ON
+    assert mock_mqtt.publish_esp_action.call_count == 2
+
+    # Second call while stage is POWERING_ON
+    flow.start_power_on(123)
+    # publish_esp_action count must not increase (no second PRESS command!)
+    assert mock_mqtt.publish_esp_action.call_count == 2
+    flow.reset_flow()
+
+
+def test_power_flow_game_cancel_workspace_id():
+    """Verify auto_launch_game initializes active_workspace_id so cancel_workspace sends cancel command."""
+    from vds_bot.power_flow import PowerFlowManager, PowerFlowStage
+    mock_ui = MagicMock()
+    mock_mqtt = MagicMock()
+    flow = PowerFlowManager(mock_ui, mock_mqtt)
+    flow.reset_flow()
+    flow.auto_launch_game = True
+    flow.target_game = "gta5"
+    flow.message_id = 999
+    flow.on_unlock_success(123)
+
+    assert flow.stage == PowerFlowStage.WORKSPACE_RUNNING
+    assert flow.active_workspace_id is not None
+    assert flow.active_workspace_id.startswith("game-")
+
+    flow.cancel_workspace(123)
+    mock_mqtt.publish_desktop_action.assert_called_with("cancel_workspace", {"workspace_id": flow.active_workspace_id})
+    flow.reset_flow()
+
+
+def test_command_router_time_input_cancellation():
+    """Verify command_router aborts awaiting_shutdown_time on cancellation keywords."""
+    from vds_bot.routers.command_router import route_message
+    app = MagicMock()
+    app.allowed_user_id = 123
+    app.awaiting_shutdown_time_chat_id = 123
+    app._main_menu_markup = MagicMock(return_value={})
+
+    msg = {"chat": {"id": 123}, "text": "отмена", "from": {"id": 123}}
+    route_message(app, msg)
+    assert app.awaiting_shutdown_time_chat_id is None
+    app.ui.send_message.assert_called_with(123, "Ввод времени отменён.", reply_markup={})
+
+
+def test_history_records_ts_and_timestamp(tmp_path):
+    """Verify TelemetryHistory correctly extracts and records ts from payload."""
+    import time
+    from vds_bot.history import TelemetryHistory
+    db_file = tmp_path / "telem.db"
+    hist = TelemetryHistory(db_file)
+
+    test_ts = int(time.time()) - 30
+    hist.insert({"ts": test_ts, "host": "test-pc", "cpu": {"load_percent": 15.0}})
+
+    conn = hist._connect()
+    try:
+        cur = conn.execute("SELECT ts, host, cpu_load FROM telemetry").fetchall()
+        assert len(cur) == 1
+        assert cur[0][0] == test_ts
+        assert cur[0][1] == "test-pc"
+        assert cur[0][2] == 15.0
+    finally:
+        conn.close()
+
+
+def test_power_scheduler_evicts_stale_cmd_ids():
+    """Verify scheduler_tick evicts stale pending_telemetry and antigravity cmd_ids and None keys."""
+    import time
+    from vds_bot.power_scheduler import PowerSchedulerMixin
+
+    class DummyBot(PowerSchedulerMixin):
+        def __init__(self):
+            self.running = True
+            self.monitoring = MagicMock()
+            self.monitoring.telemetry_age = MagicMock(return_value=1.0)
+            self.mqtt = MagicMock()
+            self.mqtt.system_status = "online"
+            self.pending_screenshots = {}
+            self.pending_shutdown_cmd_id = None
+            self.scheduled_shutdown_ts = None
+            self.pending_telemetry_cmd_ids = {
+                None: (123, 456),
+                "stale_telem": (123, 456),
+                "fresh_telem": (123, 456),
+            }
+            self.pending_antigravity_cmd_ids = {
+                None: (123, 456, "list"),
+                "stale_ag": (123, 456, "list"),
+                "fresh_ag": (123, 456, "list"),
+            }
+            self.pending_cmd_timestamps = {
+                "stale_telem": time.time() - 120.0,
+                "fresh_telem": time.time() - 5.0,
+                "stale_ag": time.time() - 120.0,
+                "fresh_ag": time.time() - 5.0,
+            }
+
+    bot = DummyBot()
+    bot.scheduler_tick()
+
+    assert None not in bot.pending_telemetry_cmd_ids
+    assert "stale_telem" not in bot.pending_telemetry_cmd_ids
+    assert "fresh_telem" in bot.pending_telemetry_cmd_ids
+
+    assert None not in bot.pending_antigravity_cmd_ids
+    assert "stale_ag" not in bot.pending_antigravity_cmd_ids
+    assert "fresh_ag" in bot.pending_antigravity_cmd_ids
+
+    assert None not in bot.pending_antigravity_cmd_ids
+    assert "stale_ag" not in bot.pending_antigravity_cmd_ids
+    assert "fresh_ag" in bot.pending_antigravity_cmd_ids
+
+
+def test_workspace_router_escapes_html():
+    """Verify workspace_router escapes dangerous HTML characters in label and reason."""
+    from vds_bot.routers.workspace_router import route_workspace_callback
+
+    app = MagicMock()
+    app.monitoring.telemetry_age = MagicMock(return_value=5.0)
+    pc_state = MagicMock()
+    pc_state.session_status = "locked"
+    pc_state.state = "OFFLINE"
+    pc_state.label = "Bad <Tag> & Label"
+    pc_state.reason = "Crash <Error>"
+    app.mqtt.health.evaluate_pc_state = MagicMock(return_value=pc_state)
+    app.ui.back_button = MagicMock(return_value=[])
+
+    handled = route_workspace_callback(app, "game_start_direct", chat_id=123, message_id=456, callback_id="cb_1")
+    assert handled is True
+    call_args = app.ui.send_message.call_args[0]
+    sent_text = call_args[1]
+    assert "&lt;Tag&gt;" in sent_text
+    assert "&amp;" in sent_text
+    assert "<Tag>" not in sent_text
+    assert "<Error>" not in sent_text
+
+
+

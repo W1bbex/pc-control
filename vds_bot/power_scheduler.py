@@ -264,6 +264,22 @@ class PowerSchedulerMixin:
                 self.pending_screenshots.pop(cmd_id, None)
                 self.ui.send_message(pending["chat_id"], "❌ Скриншот не получен за 35 секунд. Попробуй ещё раз.")
 
+        # Evict stale pending_telemetry_cmd_ids and pending_antigravity_cmd_ids (timeout 60s)
+        pending_telem = getattr(self, "pending_telemetry_cmd_ids", {})
+        pending_ag = getattr(self, "pending_antigravity_cmd_ids", {})
+        cmd_timestamps = getattr(self, "pending_cmd_timestamps", {})
+
+        if None in pending_telem:
+            pending_telem.pop(None, None)
+        if None in pending_ag:
+            pending_ag.pop(None, None)
+
+        for cmd_id, ts in list(cmd_timestamps.items()):
+            if now - float(ts) >= 60.0:
+                cmd_timestamps.pop(cmd_id, None)
+                pending_telem.pop(cmd_id, None)
+                pending_ag.pop(cmd_id, None)
+
         if getattr(self, "pending_shutdown_cmd_id", None) and getattr(self, "pending_shutdown_started_at", None):
             confirmed = self._check_shutdown_confirmation(now)
             if not confirmed and (now - float(self.pending_shutdown_started_at) >= SHUTDOWN_CONFIRM_TIMEOUT_SECONDS):

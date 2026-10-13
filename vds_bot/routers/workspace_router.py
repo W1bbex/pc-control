@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Workspace Router: handles callbacks for apps menu, single app launches, workspace setup, and game launches."""
 
+import html
 import logging
 import time
 
@@ -155,7 +156,9 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         else:
             app.ui.answer_callback(callback_id)
-            text = f"<b>{pc_state.label}</b>\n\n{pc_state.reason}\n\nВключить ПК сейчас?"
+            safe_label = html.escape(str(pc_state.label or ""))
+            safe_reason = html.escape(str(pc_state.reason or ""))
+            text = f"<b>{safe_label}</b>\n\n{safe_reason}\n\nВключить ПК сейчас?"
             markup = {
                 "inline_keyboard": [
                     [{"text": "Включить ПК", "style": "success", "callback_data": "power_on"}],
@@ -199,15 +202,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         return True
 
     # 5. Workspace Flow
-    if data in {"flow_workspace_yes", "flow_workspace_no"}:
-        if data == "flow_workspace_yes":
-            app.ui.answer_callback(callback_id)
-            text = app.ui.workspace_vpn_choice_text() if hasattr(app.ui, "workspace_vpn_choice_text") else ""
-            if not isinstance(text, str) or not text:
-                text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
-            markup = app.ui.workspace_vpn_choice_markup(active_vpn=getattr(app, "chosen_vpn", "incy"))
-            app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-            return True
+    if data == "flow_workspace_no":
         app.ui.answer_callback(callback_id)
         app.power_flow.handle_workspace_decision(data, chat_id, app.start_async_workspace_setup)
         return True
@@ -266,7 +261,9 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         else:
             app.ui.answer_callback(callback_id)
-            text = f"<b>{pc_state.label}</b>\n\n{pc_state.reason}\n\nВключить ПК сейчас?"
+            safe_label = html.escape(str(pc_state.label or ""))
+            safe_reason = html.escape(str(pc_state.reason or ""))
+            text = f"<b>{safe_label}</b>\n\n{safe_reason}\n\nВключить ПК сейчас?"
             markup = {
                 "inline_keyboard": [
                     [

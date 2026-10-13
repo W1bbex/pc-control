@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -224,7 +225,7 @@ def rollback_to_previous():
         print("[!] No previous_release tag found. Cannot rollback automatically.")
         return False
 
-    prev_dir = f"{REMOTE_BASE}/releases/{prev_release}"
+    prev_dir = f"{REMOTE_BASE}/releases/{shlex.quote(prev_release)}"
     print(f"[*] Rolling back to previous release: {prev_release} ({prev_dir})")
 
     restore_cmd = (
@@ -259,15 +260,16 @@ def deploy_and_verify(release_tag, remote_release_dir):
     current_tag_res = run_ssh(f"cat {REMOTE_BASE}/current_release 2>/dev/null || echo ''", check=False)
     prev_tag = current_tag_res.stdout.strip()
     if prev_tag:
-        run_ssh(f"echo '{prev_tag}' > {REMOTE_BASE}/previous_release")
+        run_ssh(f"echo {shlex.quote(prev_tag)} > {REMOTE_BASE}/previous_release")
 
     # Atomic copy and permission setup
+    quoted_tag = shlex.quote(release_tag)
     deploy_cmd = (
         f"for f in {' '.join(MANIFEST_FILES)}; do "
         f"  mkdir -p $(dirname {REMOTE_BASE}/$f) && "
         f"  cp {remote_release_dir}/$f {REMOTE_BASE}/$f; "
         f"done && "
-        f"echo '{release_tag}' > {REMOTE_BASE}/current_release && "
+        f"echo {quoted_tag} > {REMOTE_BASE}/current_release && "
         f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
         f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
         f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "

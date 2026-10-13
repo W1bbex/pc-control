@@ -35,7 +35,6 @@ STATE_PATH = _data_state if (DATA_DIR.exists() or not _root_state.exists()) else
 _data_snapshot = DATA_DIR / "admin-sensors.json"
 _hw_sensors_snapshot = BASE_DIR / "hardware" / "sensors" / "admin-sensors.json"
 _hw_snapshot = BASE_DIR / "hardware" / "admin-sensors.json"
-SENSOR_SNAPSHOT = _data_snapshot if _data_snapshot.exists() else (_hw_sensors_snapshot if _hw_sensors_snapshot.exists() else _hw_snapshot)
 LOG_DIR = BASE_DIR / "logs"
 
 def _load_env_file(path: Path):
@@ -297,6 +296,7 @@ class WTSINFOEX_LEVEL1_W(ctypes.Structure):
 class WTSINFOEXW(ctypes.Structure):
     _fields_ = [
         ("Level", wintypes.DWORD),
+    ] + ([("_pad", wintypes.DWORD)] if ctypes.sizeof(ctypes.c_void_p) == 8 else []) + [
         ("Data", WTSINFOEX_LEVEL1_W),
     ]
 
@@ -439,50 +439,45 @@ def active_console_session(ttl=0.5):
             wtsapi32.WTSFreeMemory(infoex_buf)
 
     # 5. Determine state based on cross-validated signals
-    logonui_found = None
-    if not username:
-        state = "login_screen"
-        source = f"no_user(connect_state={connect_state})"
+    if connect_state is not None and connect_state != 0:
+        state = "locked"
+        source = f"wts_disconnected(connect_state={connect_state})"
+    elif session_flags == 1:  # WTS_SESSIONSTATE_UNLOCK
+        state = "unlocked"
+        source = "wts_session_flags_unlocked"
+    elif session_flags == 0:  # WTS_SESSIONSTATE_LOCK
+        state = "locked"
+        source = "wts_session_flags_locked"
+    elif input_desktop_accessible:
+        state = "unlocked"
+        source = "input_desktop_accessible"
     else:
-        if connect_state is not None and connect_state != 0:
-            state = "locked"
-            source = f"wts_disconnected(connect_state={connect_state})"
-        elif session_flags == 1:  # WTS_SESSIONSTATE_UNLOCK
-            state = "unlocked"
-            source = "wts_session_flags_unlocked"
-        elif session_flags == 0:  # WTS_SESSIONSTATE_LOCK
-            state = "locked"
-            source = "wts_session_flags_locked"
-        elif input_desktop_accessible:
-            state = "unlocked"
-            source = "input_desktop_accessible"
-        else:
-            # Fallback only when flags and input desktop are inconclusive
-            logonui_found = False
-            try:
-                for p in psutil.process_iter(['name', 'pid']):
-                    try:
-                        pname = (p.info.get('name') or '').lower()
-                        if pname == 'logonui.exe':
-                            psess = ctypes.c_uint32()
-                            if kernel32.ProcessIdToSessionId(p.info['pid'], ctypes.byref(psess)):
-                                if psess.value == session_id:
-                                    logonui_found = True
-                                    break
-                            else:
+        # Fallback only when flags and input desktop are inconclusive
+        logonui_found = False
+        try:
+            for p in psutil.process_iter(['name', 'pid']):
+                try:
+                    pname = (p.info.get('name') or '').lower()
+                    if pname == 'logonui.exe':
+                        psess = ctypes.c_uint32()
+                        if kernel32.ProcessIdToSessionId(p.info['pid'], ctypes.byref(psess)):
+                            if psess.value == session_id:
                                 logonui_found = True
                                 break
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-            except Exception:
-                pass
+                        else:
+                            logonui_found = True
+                            break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
 
-            if not logonui_found:
-                state = "unlocked"
-                source = "logonui_not_running"
-            else:
-                state = "locked"
-                source = f"input_desktop_denied(err={err_desk})"
+        if not logonui_found:
+            state = "unlocked"
+            source = "logonui_not_running"
+        else:
+            state = "locked"
+            source = f"input_desktop_denied(err={err_desk})"
 
     res = {
         "session": state,
@@ -572,7 +567,7 @@ class SystemAgent:
     def setup_mqtt_client(self):
         if hasattr(self, "mqtt") and self.mqtt:
             try:
-                self.mqtt.loop_stop(force=True)
+                self.mqtt.loop_stop()
             except Exception:
                 pass
             try:
@@ -843,10 +838,10 @@ class SystemAgent:
 
             return {
                 "name": values[0],
-                "temp_c": float(values[1]),
-                "load_percent": float(values[2]),
-                "vram_used_mb": float(values[3]),
-                "vram_total_mb": float(values[4]),
+                "temp_c": optional_number(values[1]),
+                "load_percent": optional_number(values[2]),
+                "vram_used_mb": optional_number(values[3]),
+                "vram_total_mb": optional_number(values[4]),
                 "fan_percent": optional_number(values[5]),
                 "power_w": optional_number(values[6]),
                 "clock_mhz": optional_number(values[7]),
@@ -1060,7 +1055,16 @@ class SystemAgent:
             timeout=20,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        time.sleep(2)
+        for _ in range(10):
+            time.sleep(1)
+            q = subprocess.run(
+                ["sc.exe", "query", service_name],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if "STOPPED" in (q.stdout or ""):
+                break
         completed = subprocess.run(
             ["sc.exe", "start", service_name],
             capture_output=True,

@@ -227,7 +227,7 @@ def run_unlock():
 
             scan = user32.VkKeyScanW(ord(ch))
             if scan == -1 or (scan & 0xFFFF) == 0xFFFF:
-                log(f"Unsupported character in password: '{ch}' (ord={ord(ch)}). Aborting typing to prevent lockout!")
+                log(f"Unsupported character in password: ord={ord(ch)}. Aborting typing to prevent lockout!")
                 sys.exit(1)
 
             vk = scan & 0xFF

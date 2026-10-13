@@ -568,6 +568,7 @@ def test_power_flow_check_timeout():
     mock_mqtt.publish_esp_action.return_value = "cmd-1"
 
     flow = PowerFlowManager(mock_ui, mock_mqtt)
+    flow.reset_flow()
     now = 1000.0
     with patch("time.time", return_value=now):
         flow.start_power_on(12345)
@@ -583,6 +584,7 @@ def test_power_flow_check_timeout():
     assert flow.check_timeout(now=1301.0)
     assert flow.stage == PowerFlowStage.IDLE
     assert mock_ui.send_message.called
+    flow.reset_flow()
     sent_text = mock_ui.send_message.call_args[0][1]
     assert "Время ожидания запуска ПК истекло" in sent_text
 

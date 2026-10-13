@@ -18,6 +18,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
     """Handle power-related callback queries. Returns True if handled, False otherwise."""
     # 1. Power Menu Navigation
     if data == "power_menu":
+        app.awaiting_shutdown_time_chat_id = None
         app.ui.answer_callback(callback_id)
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
         text = (
@@ -37,6 +38,11 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
 
     # 2. Power On
     if data == "power_on":
+        stage = getattr(getattr(app, "power_flow", None), "stage", None)
+        if stage == "POWERING_ON":
+            app.ui.answer_callback(callback_id, "Компьютер уже запускается...", alert=True)
+            return True
+
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
         state_str = getattr(getattr(pc_state, "state", None), "value", str(getattr(pc_state, "state", "")))
         if (
@@ -152,16 +158,6 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             app.mqtt.publish_esp_action("LED_OFF")
         return True
 
-    if data == "hibernate_pc":
-        app.ui.answer_callback(callback_id, "Перевожу в гибернацию...")
-        if app.mqtt.system_status == "online":
-            app.mqtt.publish_system_action("hibernate")
-        elif getattr(app.mqtt, "desktop_status", None) == "online":
-            app.mqtt.publish_desktop_action("hibernate")
-        if hasattr(app.mqtt, "publish_esp_action"):
-            app.mqtt.publish_esp_action("LED_OFF")
-        return True
-
     # 6. Reboot
     if data == "reboot_pc":
         app.ui.answer_callback(callback_id)
@@ -216,6 +212,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
 
     # 7. Shutdown
     if data == "shutdown_pc":
+        app.awaiting_shutdown_time_chat_id = None
         app.ui.answer_callback(callback_id)
         app.ui.send_message(
             chat_id,

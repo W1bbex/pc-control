@@ -234,9 +234,20 @@ def route_message(app, message: dict) -> None:
         return
 
     # 10. Scheduled Shutdown
-    time_text = text
+    time_text = text.strip()
+    if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id:
+        lower_txt = time_text.lower()
+        if lower_txt in ("/cancel", "отмена", "назад", "/menu", "cancel"):
+            app.awaiting_shutdown_time_chat_id = None
+            app.ui.send_message(chat_id, "Ввод времени отменён.", reply_markup=app._main_menu_markup())
+            return
+        if lower_txt.startswith("/") and not lower_txt.startswith("/shutdown"):
+            # User sent another slash command; abort awaiting time so the command can run
+            app.awaiting_shutdown_time_chat_id = None
+
     if text.lower().startswith("/shutdown "):
         time_text = text.split(None, 1)[1].strip()
+
     if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id or text.lower().startswith("/shutdown "):
         try:
             hour_text, minute_text = time_text.split(":", 1)
@@ -244,7 +255,7 @@ def route_message(app, message: dict) -> None:
             if not (0 <= hour <= 23 and 0 <= minute <= 59):
                 raise ValueError
         except (ValueError, TypeError):
-            app.ui.send_message(chat_id, "❌ Введи время как <code>HH:MM</code>, например <code>23:45</code>.")
+            app.ui.send_message(chat_id, "❌ Введи время как <code>HH:MM</code>, например <code>23:45</code> (или напиши «отмена»).")
             return
 
         now = datetime.now(MOSCOW)

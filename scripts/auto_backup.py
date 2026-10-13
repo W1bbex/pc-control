@@ -140,9 +140,13 @@ def is_excluded_file(path: Path) -> bool:
 
 def collect_local_code_files(base_path: Path) -> list[Path]:
     code_files: list[Path] = []
-    for item in base_path.rglob("*"):
-        if item.is_file() and not is_excluded_file(item.relative_to(base_path)):
-            code_files.append(item)
+    for root, dirs, files in os.walk(base_path):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        root_path = Path(root)
+        for f in files:
+            p = root_path / f
+            if not is_excluded_file(p.relative_to(base_path)):
+                code_files.append(p)
     code_files.sort(key=lambda p: str(p.relative_to(base_path)))
     return code_files
 

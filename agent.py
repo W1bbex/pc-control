@@ -5,6 +5,7 @@ Thin modular coordinator delegating to desktop mixins and services.
 """
 
 import ctypes
+from ctypes import wintypes
 import io
 import json
 import logging
@@ -26,11 +27,9 @@ import psutil
 
 from desktop.constants import (
     AGENT_BOOT_ID,
-    AGENT_START_TIME,
     AGENT_VERSION,
     BASE_DIR,
     CONFIG_PATH,
-    CORE_DIR,
     DATA_DIR,
     ICONS,
     LOG_DIR,
@@ -501,6 +500,10 @@ class PCControlAgent(
     def _fast_foreground_watcher_loop(self):
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
         last_hwnd = None
@@ -529,12 +532,14 @@ class PCControlAgent(
                     if pid.value:
                         hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
                         if hproc:
-                            buf = ctypes.create_unicode_buffer(1024)
-                            size = ctypes.c_ulong(1024)
-                            if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                                exe_path = buf.value
-                                exe_name = os.path.basename(exe_path)
-                            kernel32.CloseHandle(hproc)
+                            try:
+                                buf = ctypes.create_unicode_buffer(1024)
+                                size = ctypes.c_ulong(1024)
+                                if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                                    exe_path = buf.value
+                                    exe_name = os.path.basename(exe_path)
+                            finally:
+                                kernel32.CloseHandle(hproc)
 
                         if not exe_name:
                             try:

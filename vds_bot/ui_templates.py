@@ -108,72 +108,7 @@ class UiTemplatesMixin(UiMarkupsMixin):
         return text
 
     def player_card_caption(self, media_state):
-        if not media_state or not media_state.get("active"):
-            return "🎵 <b>Яндекс Музыка</b>\n\n<i>Сейчас ничего не играет или плеер закрыт.</i>"
-
-        title = media_state.get("title") or "Неизвестный трек"
-        artist = media_state.get("artist") or "Неизвестный исполнитель"
-        pos = float(media_state.get("position") or 0.0)
-        dur = float(media_state.get("duration") or 0.0)
-        is_playing = media_state.get("is_playing", False)
-        icons = dict(DEFAULT_PLAYER_ICONS)
-        if media_state and media_state.get("ui_icons"):
-            icons.update(media_state["ui_icons"])
-
-        tag_note = icons.get("tag_note")
-        tag_artist = icons.get("tag_artist")
-        note_badge = f'<tg-emoji emoji-id="{tag_note}">🎵</tg-emoji> ' if tag_note else ""
-
-        artist_avatar_id = media_state.get("artist_avatar_id") if media_state else None
-        if artist_avatar_id:
-            artist_badge = f'<tg-emoji emoji-id="{artist_avatar_id}">👤</tg-emoji> '
-        elif tag_artist:
-            artist_badge = f'<tg-emoji emoji-id="{tag_artist}">🎧</tg-emoji> '
-        else:
-            artist_badge = ""
-
-        safe_title = html.escape(str(title).strip(), quote=False)
-        safe_artist = html.escape(str(artist).strip(), quote=False)
-
-        display_pos = (pos + 2.0) if is_playing else pos
-        display_dur = (dur + 1.0) if dur > 0 else 0.0
-        if display_dur > 0:
-            display_pos = min(display_dur, display_pos)
-
-        def format_time(seconds):
-            m = int(round(seconds)) // 60
-            s = int(round(seconds)) % 60
-            return f"{m:02d}:{s:02d}"
-
-        pos_str = format_time(display_pos)
-        dur_str = format_time(display_dur) if display_dur > 0 else "--:--"
-
-        tag_dot = icons.get("tag_slider_dot") or ICONS.get("dot", "5330193051585391352")
-        dot = f'<tg-emoji emoji-id="{tag_dot}">⚪</tg-emoji>'
-
-        bar_len = 12
-        if display_dur > 0:
-            pct = min(1.0, max(0.0, display_pos / display_dur))
-            filled = int(round(pct * (bar_len - 1)))
-            bar = "━" * filled + dot + "━" * (bar_len - 1 - filled)
-        else:
-            bar = "━" * (bar_len // 2) + dot + "━" * (bar_len // 2)
-
-        btn_play = icons.get("btn_play") or ICONS.get("play", "5330015871299527534")
-        btn_pause = icons.get("btn_pause") or ICONS.get("pause", "5330570905628222348")
-        status_eid = (btn_play if is_playing else btn_pause) or icons.get("tag_status_play" if is_playing else "tag_status_pause")
-        if status_eid:
-            status_badge = f'<tg-emoji emoji-id="{status_eid}">{"▶️" if is_playing else "⏸"}</tg-emoji>'
-        else:
-            status_badge = "▶️" if is_playing else "⏸"
-
-        text = (
-            f'{note_badge}<b>{safe_title}</b>\n'
-            f'{artist_badge}<i>{safe_artist}</i>\n\n'
-            f'{bar}\n'
-            f'{status_badge} <b>{pos_str}</b> / {dur_str}'
-        )
-        return text
+        return self.player_card_text(media_state)
 
     def activity_card_text(self, summary_data, date_str):
         if not summary_data:
@@ -188,7 +123,7 @@ class UiTemplatesMixin(UiMarkupsMixin):
             h = m // 60
             rem_m = m % 60
             time_str = f"{h}ч {rem_m}м" if h > 0 else f"{rem_m}м"
-            lines.append(f"{i}. {emoji_tag}<b>{app}</b> — {time_str}")
+            lines.append(f"{i}. {emoji_tag}<b>{html.escape(str(app))}</b> — {time_str}")
         return "\n".join(lines)
 
     def console_card_text(self, target="desktop", shell="powershell", last_cmd=None, is_executing=False):
@@ -286,14 +221,15 @@ class UiTemplatesMixin(UiMarkupsMixin):
         clean_label = str(getattr(pc_state, "label", "Готов к работе") or "Готов к работе")
         for e in ("🟢", "🟡", "🔴", "⚪", "⚪️"):
             clean_label = clean_label.replace(e, "").strip()
+        safe_label = html.escape(clean_label)
 
         reason = getattr(pc_state, "reason", None)
-        reason_line = f"\n\n<i>{reason}</i>" if reason else ""
+        reason_line = f"\n\n<i>{html.escape(str(reason))}</i>" if reason else ""
 
         return (
             f"{power_tag}<b>ПК и экран</b>\n\n"
             f"{user_tag}<b>Состояние</b>\n"
-            f" ├ Статус: {status_icon} {clean_label}\n"
+            f" ├ Статус: {status_icon} {safe_label}\n"
             f" ├ Сессия: {sess_ru}\n"
             f" ├ Desktop-агент: {desk_ru}\n"
             f" └ Контроллер ESP: {esp_ru}"
@@ -484,7 +420,7 @@ class UiTemplatesMixin(UiMarkupsMixin):
         active = data.get("active") or {}
         is_running = data.get("is_running", False)
 
-        tag_ag = f'<tg-emoji emoji-id="{ICONS.get("apps")}"></tg-emoji> ' if ICONS.get("apps") else ""
+        tag_ag = f'<tg-emoji emoji-id="{ICONS.get("apps")}">📱</tg-emoji> ' if ICONS.get("apps") else ""
         lines = [
             f"{tag_ag}<b>Antigravity • Управление аккаунтами</b>\n",
         ]
@@ -493,8 +429,8 @@ class UiTemplatesMixin(UiMarkupsMixin):
             lines.append("<i>Список аккаунтов пуст или не удалось прочитать базу.</i>")
             return "\n".join(lines)
 
-        active_email = active.get("email", "—")
-        active_name = active.get("name", "—")
+        active_email = active.get("email") or "—"
+        active_name = active.get("name") or "—"
         ide_status = "В сети (запущена)" if is_running else "Остановлена"
         reset_time = active.get("reset_time") or "—"
         if reset_time and "T" in reset_time:
@@ -508,7 +444,7 @@ class UiTemplatesMixin(UiMarkupsMixin):
                 pass
 
         lines.append("<b>Активный профиль:</b>")
-        lines.append(f"├ 👤 <b>{html.escape(active_name)}</b> (<code>{html.escape(active_email)}</code>)")
+        lines.append(f"├ 👤 <b>{html.escape(str(active_name))}</b> (<code>{html.escape(str(active_email))}</code>)")
         lines.append(f"├ 🖥️ IDE: <b>{ide_status}</b>")
         lines.append(f"└ ⏳ Сброс квот: <code>{reset_time}</code>\n")
 
@@ -545,9 +481,11 @@ class UiTemplatesMixin(UiMarkupsMixin):
             lines.append(f"<b>Резервные аккаунты ({len(others)}):</b>")
             for i, o in enumerate(others):
                 prefix = "└" if i == len(others) - 1 else "├"
-                o_name = o.get("name") or o.get("email", "").split("@")[0]
+                raw_email = o.get("email") or ""
+                raw_name = o.get("name")
+                o_name = raw_name or (raw_email.split("@")[0] if "@" in raw_email else "Без имени")
                 o_pct = o.get("min_quota", 100)
-                lines.append(f"{prefix} 👤 {html.escape(o_name)}: <b>{o_pct}%</b> квоты")
+                lines.append(f"{prefix} 👤 {html.escape(str(o_name))}: <b>{o_pct}%</b> квоты")
             lines.append("")
 
         lines.append("<i>⚡ Выберите аккаунт ниже для мгновенного переключения:</i>")

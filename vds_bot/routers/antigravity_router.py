@@ -2,6 +2,7 @@
 """Antigravity Router: manages remote account switching and quota inspection."""
 
 import logging
+import time
 from typing import Optional
 
 LOG = logging.getLogger("pc-control-bot.routers.antigravity")
@@ -78,7 +79,11 @@ def open_antigravity_menu(app, chat_id: int, message_id: Optional[int] = None) -
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_list", {})
-    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "list")
+    if cmd_id:
+        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "list")
+        if not hasattr(app, "pending_cmd_timestamps"):
+            app.pending_cmd_timestamps = {}
+        app.pending_cmd_timestamps[cmd_id] = time.time()
 
 
 def switch_antigravity_account(app, chat_id: int, account_id: str, message_id: Optional[int] = None) -> None:
@@ -91,7 +96,11 @@ def switch_antigravity_account(app, chat_id: int, account_id: str, message_id: O
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_switch", {"account_id": account_id, "restart": True})
-    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "switch")
+    if cmd_id:
+        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "switch")
+        if not hasattr(app, "pending_cmd_timestamps"):
+            app.pending_cmd_timestamps = {}
+        app.pending_cmd_timestamps[cmd_id] = time.time()
 
 
 def restart_antigravity_ide(app, chat_id: int, message_id: Optional[int] = None) -> None:
@@ -104,7 +113,11 @@ def restart_antigravity_ide(app, chat_id: int, message_id: Optional[int] = None)
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_restart", {})
-    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "restart")
+    if cmd_id:
+        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "restart")
+        if not hasattr(app, "pending_cmd_timestamps"):
+            app.pending_cmd_timestamps = {}
+        app.pending_cmd_timestamps[cmd_id] = time.time()
 
 
 def export_antigravity_accounts(app, chat_id: int) -> None:
@@ -117,4 +130,8 @@ def export_antigravity_accounts(app, chat_id: int) -> None:
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_export", {})
-    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, None, "export")
+    if cmd_id:
+        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, None, "export")
+        if not hasattr(app, "pending_cmd_timestamps"):
+            app.pending_cmd_timestamps = {}
+        app.pending_cmd_timestamps[cmd_id] = time.time()

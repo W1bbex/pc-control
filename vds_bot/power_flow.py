@@ -15,7 +15,7 @@ try:
 except ImportError:
     from telegram_ui import ICONS
 
-FLOW_STATE_PATH = Path("/var/lib/pc-control-bot/flow_state.json")
+FLOW_STATE_PATH = Path(os.environ.get("FLOW_STATE_PATH", "/var/lib/pc-control-bot/flow_state.json"))
 FLOW_TTL_SECONDS = 300  # 5 minutes
 
 
@@ -177,70 +177,75 @@ class PowerFlowManager:
                 pass
 
     def start_power_on(self, chat_id):
-        # Hardware protection: NEVER pulse power button if PC is already on/booting
-        pc_state = self.mqtt.health.evaluate_pc_state()
-        state_str = getattr(getattr(pc_state, "state", None), "value", str(getattr(pc_state, "state", "")))
-        if (
-            state_str in ("READY", "DEGRADED", "LOCKED", "BOOTING")
-            or self.mqtt.system_status == "online"
-            or self.mqtt.desktop_status == "online"
-        ):
-            LOG.warning("start_power_on ignored: PC is already running (state=%s, system=%s)", state_str, self.mqtt.system_status)
-            self.ui.send_message(
-                chat_id,
-                f"ℹ️ <b>Компьютер уже включен!</b>\n\nТекущее состояние: {pc_state.label}",
-                reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status)
-            )
-            return
+        with self._lock:
+            if self.stage == PowerFlowStage.POWERING_ON:
+                LOG.warning("start_power_on ignored: already in POWERING_ON stage")
+                return
 
-        # 2. Check ESP connectivity: ESP MUST be online to pulse power button
-        if getattr(self.mqtt, "esp_status", None) != "online":
-            LOG.warning("start_power_on rejected: ESP8266 is not online (status=%s)", getattr(self.mqtt, "esp_status", None))
-            text = (
-                "<b>❌ Модуль питания (ESP8266) не в сети!</b>\n\n"
-                f"Статус платы: <code>{getattr(self.mqtt, 'esp_status', 'offline')}</code>.\n\n"
-                "Плата ESP8266 отключена от питания или потеряла связь с сервером.\n"
-                "Сигнал включения (импульс реле) не может быть доставлен.\n\n"
-                "👉 <i>Подключите плату к питанию или включите ПК вручную кнопкой на корпусе.</i>"
-            )
-            self.ui.send_message(
-                chat_id,
-                text,
-                reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status),
-                message_id=self.message_id
-            )
-            return
+            # Hardware protection: NEVER pulse power button if PC is already on/booting
+            pc_state = self.mqtt.health.evaluate_pc_state()
+            state_str = getattr(getattr(pc_state, "state", None), "value", str(getattr(pc_state, "state", "")))
+            if (
+                state_str in ("READY", "DEGRADED", "LOCKED", "BOOTING")
+                or self.mqtt.system_status == "online"
+                or self.mqtt.desktop_status == "online"
+            ):
+                LOG.warning("start_power_on ignored: PC is already running (state=%s, system=%s)", state_str, self.mqtt.system_status)
+                self.ui.send_message(
+                    chat_id,
+                    f"ℹ️ <b>Компьютер уже включен!</b>\n\nТекущее состояние: {pc_state.label}",
+                    reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status)
+                )
+                return
 
-        press_cmd_id = self.mqtt.publish_esp_action("PRESS")
-        if not press_cmd_id:
-            LOG.error("Failed to publish PRESS command to ESP")
-            text = (
-                "<b>❌ Ошибка отправки команды на ESP8266</b>\n\n"
-                "Не удалось отправить команду включения в MQTT."
-            )
-            self.ui.send_message(
-                chat_id,
-                text,
-                reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status),
-                message_id=self.message_id
-            )
-            return
+            # 2. Check ESP connectivity: ESP MUST be online to pulse power button
+            if getattr(self.mqtt, "esp_status", None) != "online":
+                LOG.warning("start_power_on rejected: ESP8266 is not online (status=%s)", getattr(self.mqtt, "esp_status", None))
+                text = (
+                    "<b>❌ Модуль питания (ESP8266) не в сети!</b>\n\n"
+                    f"Статус платы: <code>{getattr(self.mqtt, 'esp_status', 'offline')}</code>.\n\n"
+                    "Плата ESP8266 отключена от питания или потеряла связь с сервером.\n"
+                    "Сигнал включения (импульс реле) не может быть доставлен.\n\n"
+                    "👉 <i>Подключите плату к питанию или включите ПК вручную кнопкой на корпусе.</i>"
+                )
+                self.ui.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status),
+                    message_id=self.message_id
+                )
+                return
 
-        self.flow_id = str(uuid.uuid4())
-        self.chat_id = chat_id
-        self.stage = PowerFlowStage.POWERING_ON
-        self.created_at = time.time()
-        self.expires_at = self.created_at + FLOW_TTL_SECONDS
-        self.unlock_attempts = 0
-        self.pending_unlock_command_id = None
-        self.workspace_cancelled = False
-        self.last_card_update_at = self.created_at
-        self.win_online_at = None
-        self.logon_ready_at = None
-        self.unlocked_at = None
+            press_cmd_id = self.mqtt.publish_esp_action("PRESS")
+            if not press_cmd_id:
+                LOG.error("Failed to publish PRESS command to ESP")
+                text = (
+                    "<b>❌ Ошибка отправки команды на ESP8266</b>\n\n"
+                    "Не удалось отправить команду включения в MQTT."
+                )
+                self.ui.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status),
+                    message_id=self.message_id
+                )
+                return
 
-        # Send LED command via ESP
-        self.mqtt.publish_esp_action("LED_ON")
+            self.flow_id = str(uuid.uuid4())
+            self.chat_id = chat_id
+            self.stage = PowerFlowStage.POWERING_ON
+            self.created_at = time.time()
+            self.expires_at = self.created_at + FLOW_TTL_SECONDS
+            self.unlock_attempts = 0
+            self.pending_unlock_command_id = None
+            self.workspace_cancelled = False
+            self.last_card_update_at = self.created_at
+            self.win_online_at = None
+            self.logon_ready_at = None
+            self.unlocked_at = None
+
+            # Send LED command via ESP
+            self.mqtt.publish_esp_action("LED_ON")
 
         self._update_launch_card(force=True, is_initial=True)
         self.save_state()
@@ -683,10 +688,31 @@ class PowerFlowManager:
             vpn_key = getattr(self, "target_game_vpn", None) or "incy"
             self.auto_launch_game = False
             self.stage = PowerFlowStage.WORKSPACE_RUNNING
+            self.workspace_cancelled = False
+            self.active_workspace_id = f"game-{int(time.time())}"
             self.save_state()
             if self.on_game_start_cb:
-                self.on_game_start_cb(chat_id, card_message_id=self.message_id, game=game_key, vpn=vpn_key)
-                return
+                try:
+                    import inspect
+                    sig = inspect.signature(self.on_game_start_cb)
+                    if "workspace_id" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+                        self.on_game_start_cb(
+                            chat_id,
+                            card_message_id=self.message_id,
+                            game=game_key,
+                            vpn=vpn_key,
+                            workspace_id=self.active_workspace_id,
+                        )
+                    else:
+                        self.on_game_start_cb(
+                            chat_id,
+                            card_message_id=self.message_id,
+                            game=game_key,
+                            vpn=vpn_key,
+                        )
+                except Exception:
+                    LOG.exception("Failed to invoke on_game_start_cb")
+            return
 
         if getattr(self, "auto_launch_workspace", False):
             vpn_key = getattr(self, "target_workspace_vpn", None) or "incy"
@@ -812,7 +838,7 @@ class PowerFlowManager:
             # Publish real cancel_workspace command with workspace_id to desktop agent
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
 
-        text = "<b>Запуск рабочего сетапа отменён.</b>"
+        text = "<b>Запуск рабочего сетапа отменён.</b>" if not (ws_id and str(ws_id).startswith("game")) else "<b>Запуск игры отменён.</b>"
         markup = {"inline_keyboard": [self.ui.back_button("menu")]}
         self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
         # Note: reset_flow() is called by the workspace runner thread upon clean exit so workspace_cancelled remains True while runner halts.

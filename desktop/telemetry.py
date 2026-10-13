@@ -162,10 +162,10 @@ class TelemetryMixin:
 
             return {
                 "name": values[0],
-                "temp_c": float(values[1]),
-                "load_percent": float(values[2]),
-                "vram_used_mb": float(values[3]),
-                "vram_total_mb": float(values[4]),
+                "temp_c": optional_number(values[1]),
+                "load_percent": optional_number(values[2]),
+                "vram_used_mb": optional_number(values[3]),
+                "vram_total_mb": optional_number(values[4]),
                 "fan_percent": optional_number(values[5]),
                 "power_w": optional_number(values[6]),
                 "clock_mhz": optional_number(values[7]),
