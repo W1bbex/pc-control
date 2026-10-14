@@ -35,8 +35,8 @@ LOG = logging.getLogger("pc-control.antigravity")
 
 # Google OAuth Constants (Antigravity Enterprise Client)
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-DEFAULT_CLIENT_ID = ""
-DEFAULT_CLIENT_SECRET = ""
+DEFAULT_CLIENT_ID = os.getenv("ANTIGRAVITY_CLIENT_ID", "")
+DEFAULT_CLIENT_SECRET = os.getenv("ANTIGRAVITY_CLIENT_SECRET", "")
 
 ENC_PREFIX = "agm_enc_v1:"
 
@@ -593,6 +593,11 @@ class AntigravityAccountManager:
         for p in alive:
             try:
                 p.kill()
+            except Exception:
+                pass
+        if alive:
+            try:
+                psutil.wait_procs(alive, timeout=3.0)
             except Exception:
                 pass
 

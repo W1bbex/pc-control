@@ -216,6 +216,7 @@ class ActivityTracker:
                 address.address
                 for address in addresses
                 if address.family in (socket.AF_INET, socket.AF_INET6)
+                and address.address
                 and not address.address.startswith(("127.", "::1", "fe80:"))
             )
             if ips:

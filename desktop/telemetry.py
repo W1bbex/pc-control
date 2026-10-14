@@ -316,6 +316,7 @@ class TelemetryMixin:
             "windows": platform.platform(),
             "local_ip": self.get_local_ip(),
             "uptime_seconds": max(0, int(time.time() - REAL_BOOT_TIME)),
+            "boot_id": str(int(REAL_BOOT_TIME)),
             "cpu": {
                 "name": self.get_cpu_name(),
                 "load_percent": round(psutil.cpu_percent(interval=None), 1),

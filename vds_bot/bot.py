@@ -11,11 +11,14 @@ import json
 import logging
 import os
 import requests
+import signal
 import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import psutil
 
 try:
     from zoneinfo import ZoneInfo
@@ -106,6 +109,7 @@ MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 
 STATE_PATH = Path(os.environ.get("STATE_PATH", "/var/lib/pc-control-bot/state.json"))
+LOCK_PATH = Path(os.environ.get("BOT_LOCK_PATH", str(STATE_PATH.parent / "bot.lock")))
 
 
 class PcControlBotApp(
@@ -513,6 +517,51 @@ class PcControlBotApp(
             LOG.exception("Telegram polling exception")
             time.sleep(3)
 
+    def _acquire_lock(self):
+        try:
+            LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if LOCK_PATH.exists():
+                try:
+                    content = LOCK_PATH.read_text(encoding="utf-8").strip()
+                    old_pid = int(content) if content.isdigit() else None
+                    if old_pid and psutil.pid_exists(old_pid):
+                        LOG.error("Another bot instance is already running (PID %d). Aborting to prevent 409 conflict.", old_pid)
+                        sys.exit(0)
+                    else:
+                        LOG.warning("Found stale lockfile from PID %s. Overwriting.", content)
+                except Exception as e:
+                    LOG.warning("Could not check existing lockfile: %s", e)
+            LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+            LOG.info("Acquired single-instance lock (PID %d) at %s", os.getpid(), LOCK_PATH)
+        except Exception as e:
+            LOG.warning("Could not acquire single-instance lock: %s", e)
+
+    def _release_lock(self):
+        try:
+            if LOCK_PATH.exists():
+                content = LOCK_PATH.read_text(encoding="utf-8").strip()
+                if content == str(os.getpid()):
+                    LOCK_PATH.unlink(missing_ok=True)
+                    LOG.info("Released single-instance lock (PID %d)", os.getpid())
+        except Exception as e:
+            LOG.warning("Could not release single-instance lock: %s", e)
+
+    def stop(self):
+        LOG.info("Stopping PC Control Bot...")
+        self.running = False
+        try:
+            if hasattr(self, "mqtt") and hasattr(self.mqtt, "client"):
+                self.mqtt.client.loop_stop()
+                self.mqtt.client.disconnect()
+        except Exception as e:
+            LOG.warning("Error stopping MQTT client: %s", e)
+        if hasattr(self, "_executor"):
+            try:
+                self._executor.shutdown(wait=False)
+            except Exception:
+                pass
+        self._release_lock()
+
     def register_commands(self):
         try:
             self.ui.call(
@@ -526,6 +575,10 @@ class PcControlBotApp(
                         {"command": "antigravity", "description": "🔮 Профили Antigravity"},
                         {"command": "esc", "description": "⚡ Нажатие Escape (1..20x)"},
                         {"command": "console", "description": "💻 Консоль Windows"},
+                        {"command": "cmd", "description": "💻 Командная строка CMD"},
+                        {"command": "ps", "description": "⚡ Скрипт PowerShell"},
+                        {"command": "shutdown", "description": "🛑 Выключение ПК"},
+                        {"command": "start", "description": "🔄 Запуск и меню бота"},
                     ]
                 },
             )
@@ -534,6 +587,13 @@ class PcControlBotApp(
             LOG.warning("Failed to register Telegram commands: %s", e)
 
     def run(self):
+        self._acquire_lock()
+        try:
+            signal.signal(signal.SIGINT, lambda s, f: self.stop())
+            signal.signal(signal.SIGTERM, lambda s, f: self.stop())
+        except Exception as e:
+            LOG.warning("Could not register signal handlers: %s", e)
+
         LOG.info("Starting PC Control Bot application...")
         self.register_commands()
         self.mqtt.start()
@@ -549,8 +609,7 @@ class PcControlBotApp(
             while self.running:
                 self.poll_updates()
         finally:
-            if hasattr(self, "_executor"):
-                self._executor.shutdown(wait=False)
+            self.stop()
 
 
 if __name__ == "__main__":

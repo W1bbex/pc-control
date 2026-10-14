@@ -229,19 +229,19 @@ class LauncherMixin:
                     )
                 except OSError as e:
                     if getattr(e, "winerror", None) == 740:
-                        LOG.warning("WinError 740 for %s, falling back to shell=True", executable)
-                        process = subprocess.Popen(
-                            cmd,
-                            cwd=str(Path(executable).parent),
-                            shell=True,
-                            creationflags=subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        LOG.warning("WinError 740 for %s, elevating via ShellExecuteW 'runas'", executable)
+                        params_str = " ".join(str(p) for p in cmd[1:]) if len(cmd) > 1 else ""
+                        ret = ctypes.windll.shell32.ShellExecuteW(
+                            None, "runas", str(executable), params_str, str(Path(executable).parent), 1
                         )
+                        if ret <= 32:
+                            raise RuntimeError(f"ShellExecuteW 'runas' failed with code {ret} for {executable}")
+                        process = None
                     else:
                         raise
 
                 time.sleep(0.3)
-                if process.poll() not in (None, 0):
+                if process is not None and process.poll() not in (None, 0):
                     raise RuntimeError(f"Application exited immediately: {executable}")
                 launched.append(label)
 
@@ -299,7 +299,7 @@ class LauncherMixin:
                     ver_deadline = time.time() + max(0.5, ver_timeout)
                     process_verified = False
                     while True:
-                        process_verified = (process.poll() is None) or any(
+                        process_verified = (process is not None and process.poll() is None) or any(
                             (p.info["name"] or "").lower() in target_names
                             for p in psutil.process_iter(["name"])
                         )

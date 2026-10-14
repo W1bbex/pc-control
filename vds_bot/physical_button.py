@@ -455,7 +455,7 @@ class PhysicalButtonManager:
             self.ui.send_message(chat_id, text, reply_markup=markup, message_id=msg_id)
 
         elif event_type == "failed":
-            if self.mode in ("diagnostic", "password_record", "password_input") or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0):
+            if self.mode in ("test", "record_password", "record_unlock_pattern") or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0):
                 LOG.info("Suppressing ESP failed event caused by active diagnostic/record mode or recent unlock gesture, resetting ESP lock")
                 self.mqtt.publish_esp_action("UNLOCK_PHYSICAL_INPUT")
                 return

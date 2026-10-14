@@ -142,14 +142,20 @@ def check_network_connectivity(timeout: float = 2.0) -> bool:
         ("mqtt.example.com", 8883),
     ]
     for host, port in probes:
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect((host, port))
-            sock.close()
             return True
         except Exception:
             continue
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
     return False
 
 

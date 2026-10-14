@@ -90,13 +90,15 @@ class PowerFlowManager:
             self.reboot_started_at = float(data.get("reboot_started_at", 0.0))
             self.reboot_offline_detected = bool(data.get("reboot_offline_detected", False))
 
-            # Fix 5: If bot restarted during UNLOCKING, switch to UNLOCK_FAILED and update Telegram UI card!
             if self.stage == PowerFlowStage.UNLOCKING:
                 LOG.info("Bot restarted during UNLOCKING. Pausing auto-retry, requiring user interaction.")
                 self.stage = PowerFlowStage.UNLOCK_FAILED
                 self.pending_unlock_command_id = None
                 if self.chat_id and self.message_id:
-                    self.on_unlock_failed(self.chat_id, "Разблокировка была прервана перезапуском бота.")
+                    try:
+                        self.on_unlock_failed(self.chat_id, "Разблокировка была прервана перезапуском бота.")
+                    except Exception as e:
+                        LOG.warning("Could not send unlock failed notification during startup: %s", e)
 
             LOG.info("Loaded active flow_state: stage=%s, message_id=%s", self.stage, self.message_id)
         except Exception:

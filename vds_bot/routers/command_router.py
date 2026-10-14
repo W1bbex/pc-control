@@ -118,11 +118,11 @@ def route_message(app, message: dict) -> None:
         return
 
     # 4. Hardware ESC key simulation
-    if lower_text.startswith(("/esc", "esc")):
-        parts = lower_text.split()
+    cmd_parts = lower_text.split()
+    if cmd_parts and cmd_parts[0] in ("/esc", "esc"):
         count = 1
-        if len(parts) > 1 and parts[1].isdigit():
-            count = max(1, min(int(parts[1]), 20))
+        if len(cmd_parts) > 1 and cmd_parts[1].isdigit():
+            count = max(1, min(int(cmd_parts[1]), 20))
         app.mqtt.publish_desktop_action("press_esc", {"count": count})
         app.ui.send_message(chat_id, f"⚡ Отправлено нажатие <b>ESC</b> ({count}x) на ПК.")
         return

@@ -244,7 +244,8 @@ class MqttGateway:
                 # valid telemetry is not downgraded to ``unknown`` while
                 # Windows agents are being rolled out.
                 ts = telemetry_data.get("ts", telemetry_data.get("timestamp"))
-                self.health.update("telemetry", "fresh", ts=ts, is_retained=message.retain)
+                boot_id = telemetry_data.get("boot_id")
+                self.health.update("telemetry", "fresh", ts=ts, boot_id=boot_id, is_retained=message.retain)
                 self._emit_health_state()
                 self._emit("telemetry", telemetry_data)
             except Exception:

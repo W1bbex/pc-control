@@ -15,6 +15,20 @@ import psutil
 
 LOG = logging.getLogger("pc-control-agent")
 
+if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "user32"):
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        user32.GetThreadDesktop.restype = wintypes.HANDLE
+        user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+        user32.SetThreadDesktop.restype = wintypes.BOOL
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        user32.CloseDesktop.restype = wintypes.BOOL
+    except Exception as _e:
+        LOG.warning("Failed to initialize Win32 desktop types: %s", _e)
+
 
 class VpnManagerMixin:
     """Provides methods to check and connect Happ and INCY VPN services."""
@@ -159,11 +173,20 @@ class VpnManagerMixin:
             resolved_exe = os.path.expandvars(str(incy_cmd))
             if Path(resolved_exe).exists():
                 LOG.info("Launching INCY: %s", resolved_exe)
-                subprocess.Popen(
-                    [resolved_exe],
-                    cwd=str(Path(resolved_exe).parent),
-                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                )
+                try:
+                    subprocess.Popen(
+                        [resolved_exe],
+                        cwd=str(Path(resolved_exe).parent),
+                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                    )
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 740:
+                        LOG.warning("WinError 740 for %s, elevating via ShellExecuteW 'runas'", resolved_exe)
+                        ctypes.windll.shell32.ShellExecuteW(
+                            None, "runas", str(resolved_exe), "", str(Path(resolved_exe).parent), 1
+                        )
+                    else:
+                        raise
 
         if timeout is None:
             timeout = max(45, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 45))))
@@ -196,8 +219,12 @@ class VpnManagerMixin:
 
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
-        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        user32.GetThreadDesktop.restype = wintypes.HANDLE
         user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+        user32.SetThreadDesktop.restype = wintypes.BOOL
         user32.CloseDesktop.argtypes = [wintypes.HANDLE]
         user32.CloseDesktop.restype = wintypes.BOOL
 

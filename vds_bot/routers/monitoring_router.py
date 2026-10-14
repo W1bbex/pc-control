@@ -154,7 +154,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
                     reply_markup=app.ui.history_menu_markup(),
                 )
                 return
-            app.ui.send_photo(chat_id, chart_bytes, caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
+            app.ui.send_photo(chat_id, chart_bytes, filename="chart.png", caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
 
         threading.Thread(target=_build_and_send_chart, daemon=True, name="chart-renderer").start()
         return True

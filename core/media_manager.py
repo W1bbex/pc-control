@@ -529,7 +529,7 @@ class MediaManager:
     async def _execute_control_async(self, action: str, **kwargs) -> bool:
         try:
             if action == "toggle_like":
-                return self._toggle_like()
+                return await asyncio.to_thread(self._toggle_like)
 
             manager = await self._get_manager()
             session = self._get_target_session(manager)

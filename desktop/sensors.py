@@ -15,7 +15,6 @@ LOG = logging.getLogger("pc-control-agent")
 class SensorHelper:
     def __init__(self, executable: Path):
         self.executable = executable
-        self.admin_snapshot = executable.parent / "admin-sensors.json"
         self.process = None
         self.latest = []
         self.lock = threading.Lock()
