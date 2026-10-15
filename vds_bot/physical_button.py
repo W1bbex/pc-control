@@ -262,7 +262,7 @@ class PhysicalButtonManager:
         cmd_id = ack_data.get("id")
         result = ack_data.get("result")
 
-        if cmd_id == self.pending_command_id:
+        if self.pending_command_id and cmd_id == self.pending_command_id:
             action_kind = getattr(self, "pending_action_kind", "save")
             self.pending_command_id = None
             if result == "executed":

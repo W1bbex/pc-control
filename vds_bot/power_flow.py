@@ -581,12 +581,19 @@ class PowerFlowManager:
             self.pending_unlock_command_id = None
 
             sess = data.get("session") or self.mqtt.system_session
-            if result == "executed" and sess == "unlocked":
-                self.on_unlock_success(self.chat_id or 0)
+            if result == "executed":
+                if sess == "unlocked":
+                    self.on_unlock_success(self.chat_id or 0)
+                else:
+                    LOG.info(
+                        "Unlock attempt %d keystrokes injected successfully. Awaiting session update (current session=%s)...",
+                        self.unlock_attempts,
+                        sess,
+                    )
             elif result == "busy":
                 LOG.info("System agent reported unlock busy (already running)")
             else:
-                LOG.warning("Unlock attempt %d ACK result=%s session=%s", self.unlock_attempts, result, sess)
+                LOG.warning("Unlock attempt %d ACK failed: result=%s session=%s", self.unlock_attempts, result, sess)
                 if self.unlock_attempts < 2:
                     text = (
                         "<b>⚠️ Первая попытка ввода пароля не подтверждена.</b>\n\n"
@@ -852,7 +859,11 @@ class PowerFlowManager:
         it is cleanly expired, resetting to IDLE and notifying the user.
         """
         now = time.time() if now is None else float(now)
-        if self.stage in (PowerFlowStage.IDLE, PowerFlowStage.WORKSPACE_RUNNING):
+        if self.stage in (
+            PowerFlowStage.IDLE,
+            PowerFlowStage.WAITING_WORKSPACE_DECISION,
+            PowerFlowStage.WORKSPACE_RUNNING,
+        ):
             return False
 
         if self.expires_at > 0 and now > self.expires_at:

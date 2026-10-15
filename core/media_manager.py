@@ -171,6 +171,20 @@ class MediaManager:
             daemon=True,
         ).start()
 
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+        func = getattr(self._http_session, method.lower(), self._http_session.request)
+        try:
+            return func(url, **kwargs)
+        except OSError as e:
+            LOG.warning(
+                "Yandex Music request failed with OSError (%s: %s). Recreating clean session without bound IP...",
+                type(e).__name__,
+                e,
+            )
+            self._http_session = requests.Session()
+            func = getattr(self._http_session, method.lower(), self._http_session.request)
+            return func(url, **kwargs)
+
     async def _get_manager(self):
         if self._session_manager is None:
             self._session_manager = await wmc.GlobalSystemMediaTransportControlsSessionManager.request_async()
@@ -189,11 +203,13 @@ class MediaManager:
         if not force and now - self._last_liked_fetch < 60.0 and self.liked_track_ids:
             return
         try:
-            r = self._http_session.get(
+            resp = self._request_with_retry(
+                "GET",
                 f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks",
                 headers=self._get_yandex_headers(),
                 timeout=5,
-            ).json()
+            )
+            r = resp.json()
             data = r.get("result", r) if isinstance(r, dict) else {}
             tracks = data.get("library", {}).get("tracks", []) if isinstance(data, dict) else []
             if tracks:
@@ -236,11 +252,13 @@ class MediaManager:
         tracks = []
         for q in queries_to_try:
             try:
-                r = self._http_session.get(
+                resp = self._request_with_retry(
+                    "GET",
                     f"https://api.music.yandex.net/search?text={requests.utils.quote(q)}&type=all&page=0",
                     headers=self._get_yandex_headers(),
                     timeout=3,
-                ).json()
+                )
+                r = resp.json()
                 res = r.get("result", r) if isinstance(r, dict) else {}
                 tracks_data = res.get("tracks", {})
                 found = tracks_data.get("results", tracks_data.get("items", []))
@@ -254,10 +272,10 @@ class MediaManager:
         best_score = 9999.0
         best_diff = 9999.0
         for t in tracks:
-            t_dur = t.get("durationMs", 0) / 1000.0
+            t_dur = (t.get("durationMs") or 0) / 1000.0
             diff = abs(t_dur - duration) if duration > 0 else 0.0
-            t_title = t.get("title", "").lower()
-            t_artists = [a.get("name", "").lower() for a in t.get("artists", [])]
+            t_title = (t.get("title") or "").lower()
+            t_artists = [(a.get("name") or "").lower() for a in (t.get("artists") or []) if isinstance(a, dict)]
             t_matched = bool(clean_title and (clean_title.lower() in t_title or t_title in clean_title.lower()))
             a_matched = bool(clean_artist and any(clean_artist.lower() in a or a in clean_artist.lower() for a in t_artists))
 
@@ -287,10 +305,10 @@ class MediaManager:
         is_good_match = False
         if best_track:
             artist_matched = any(
-                clean_artist.lower() in a.get("name", "").lower() or a.get("name", "").lower() in clean_artist.lower()
-                for a in best_track.get("artists", [])
+                clean_artist.lower() in (a.get("name") or "").lower() or (a.get("name") or "").lower() in clean_artist.lower()
+                for a in (best_track.get("artists") or []) if isinstance(a, dict)
             ) if (best_track and clean_artist) else False
-            best_t_title = best_track.get("title", "").lower()
+            best_t_title = (best_track.get("title") or "").lower()
             title_matched = bool(clean_title and (clean_title.lower() in best_t_title or best_t_title in clean_title.lower())) if (best_track and clean_title) else False
 
             # Title match is strictly required if clean_title is present
@@ -306,12 +324,12 @@ class MediaManager:
                 is_good_match = True
 
         if best_track and is_good_match:
-            real_title = best_track.get("title", "")
+            real_title = best_track.get("title") or title
             version = best_track.get("version")
             if version and version not in real_title:
                 real_title = f"{real_title} ({version})"
-            artists_list = best_track.get("artists", [])
-            real_artist = ", ".join(a.get("name", "") for a in artists_list) if artists_list else artist
+            artists_list = [a for a in (best_track.get("artists") or []) if isinstance(a, dict)]
+            real_artist = ", ".join((a.get("name") or "") for a in artists_list if a.get("name")) if artists_list else artist
             tid = str(best_track.get("id"))
             real_id = str(best_track.get("realId"))
 
@@ -369,7 +387,8 @@ class MediaManager:
             headers = self._get_yandex_headers()
             if self.current_is_liked:
                 # Remove from likes
-                r = self._http_session.post(
+                r = self._request_with_retry(
+                    "POST",
                     f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks/remove",
                     data={"track-ids": str(self.current_track_id)},
                     headers=headers,
@@ -382,7 +401,8 @@ class MediaManager:
                         self.current_is_liked = False
             else:
                 # Add to likes
-                r = self._http_session.post(
+                r = self._request_with_retry(
+                    "POST",
                     f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks/add-multiple",
                     data={"track-ids": str(self.current_track_id)},
                     headers=headers,
@@ -400,13 +420,14 @@ class MediaManager:
                     if cache_key in self._resolve_cache:
                         c = self._resolve_cache[cache_key]
                         self._resolve_cache[cache_key] = (c[0], c[1], c[2], self.current_is_liked, c[4] if len(c) > 4 else None)
-                if self.last_state:
-                    self.last_state["is_liked"] = self.current_is_liked
-                    state_copy = dict(self.last_state)
+                last_st = getattr(self, "last_state", None)
+                if last_st is not None:
+                    last_st["is_liked"] = self.current_is_liked
+                    state_copy = dict(last_st)
                 else:
                     state_copy = None
 
-            if state_copy and self.on_status_change:
+            if state_copy and getattr(self, "on_status_change", None):
                 self.on_status_change(state_copy)
 
             return True

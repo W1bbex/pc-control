@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
+import json
 import logging
 import os
 from pathlib import Path
@@ -137,9 +138,9 @@ def vk_matches(candidate: int, target: int) -> bool:
 def check_network_connectivity(timeout: float = 2.0) -> bool:
     """Check whether network is reachable via socket probe."""
     probes = [
-        ("1.1.1.1", 53),
-        ("8.8.8.8", 53),
-        ("mqtt.example.com", 8883),
+        ("1.1.1.1", 443),
+        ("8.8.8.8", 443),
+        ("77.88.8.8", 443),
     ]
     for host, port in probes:
         sock = None
@@ -157,6 +158,9 @@ def check_network_connectivity(timeout: float = 2.0) -> bool:
                 except Exception:
                     pass
     return False
+
+
+EXIT_REASON_FILE = Path(__file__).resolve().parent.parent / "data" / "stealth_exit_reason.json"
 
 
 def parse_hotkey(hotkey_str: str) -> Tuple[Set[str], Set[int]]:
@@ -192,6 +196,22 @@ def parse_hotkey(hotkey_str: str) -> Tuple[Set[str], Set[int]]:
     return modifiers, vks
 
 
+def parse_hotkey_sequence(hotkey_str: str) -> list[int]:
+    """Extract ordered list of normalized non-modifier VK codes from hotkey string."""
+    parts = [p.strip().lower() for p in hotkey_str.split("+") if p.strip()]
+    seq: list[int] = []
+    for part in parts:
+        if part in ("ctrl", "control", "alt", "menu", "shift", "win", "windows", "super"):
+            continue
+        if part in VK_MAP:
+            seq.append(normalize_vk(VK_MAP[part]))
+        elif part in RUSSIAN_KEY_MAP:
+            seq.append(normalize_vk(RUSSIAN_KEY_MAP[part]))
+        elif len(part) == 1 and ("a" <= part <= "z" or "0" <= part <= "9"):
+            seq.append(normalize_vk(ord(part.upper())))
+    return seq
+
+
 class StealthOverlay:
     """Fullscreen TopMost overlay window that absorbs mouse and keyboard events."""
 
@@ -205,6 +225,7 @@ class StealthOverlay:
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.offline_timeout_seconds = max(0.0, float(offline_timeout_seconds))
         self.required_mods, self.required_vks = parse_hotkey(hotkey)
+        self.required_seq = parse_hotkey_sequence(hotkey)
 
         self._mouse_hook = None
         self._keyboard_hook = None
@@ -212,10 +233,12 @@ class StealthOverlay:
         self._keyboard_proc = None
         self._root = None
         self._stopped = threading.Event()
+        self.exit_reason = "unknown"
 
         # Keyboard state tracking
         self._down_keys: Set[int] = set()
-        self._recent_keydowns: list[Tuple[int, float]] = []
+        self._seq_idx: int = 0
+        self._last_seq_time: float = 0.0
         self._recent_escapes: list[float] = []
 
         # Offline network watchdog tracking
@@ -243,9 +266,6 @@ class StealthOverlay:
         alt_down = alt_hw or any(k in self._down_keys for k in (0x12, 0xA4, 0xA5))
         shift_down = shift_hw or any(k in self._down_keys for k in (0x10, 0xA0, 0xA1))
         win_down = win_hw or any(k in self._down_keys for k in (0x5B, 0x5C))
-
-        if allow_recent_win and ("win" in self.required_mods) and not win_down:
-            win_down = any(k in (0x5B, 0x5C) for (k, t) in self._recent_keydowns)
 
         if "ctrl" in self.required_mods and not ctrl_down:
             return False
@@ -279,16 +299,15 @@ class StealthOverlay:
                 self._recent_escapes = [t for t in self._recent_escapes if now - t <= 2.0]
                 if len(self._recent_escapes) >= 5:
                     LOG.info("Emergency unlock triggered (5x Escape pressed). Exiting stealth mode...")
-                    self.stop()
+                    self.stop(reason="emergency_escape")
                     return 1
 
-            # 2. Record to recent keydowns window (last 2.5 seconds)
-            self._recent_keydowns.append((norm_vk, now))
-            self._recent_keydowns = [(k, t) for (k, t) in self._recent_keydowns if now - t <= 2.5]
+            # 2. Check modifiers (Win MUST be physically down)
+            mods_ok = self._are_modifiers_matching(allow_recent_win=False)
 
-            # 3. Check modifier states
+            # 3. Check chord match (all sequence keys pressed simultaneously while modifiers held)
             chord_matched = False
-            if self._are_modifiers_matching(allow_recent_win=False):
+            if mods_ok and self.required_vks:
                 chord_matched = True
                 for req_vk in self.required_vks:
                     req_norm = normalize_vk(req_vk)
@@ -301,27 +320,48 @@ class StealthOverlay:
                         chord_matched = False
                         break
 
-            sequential_matched = False
-            if self._are_modifiers_matching(allow_recent_win=True):
-                recent_vks = {k for (k, t) in self._recent_keydowns}
-                sequential_matched = self.required_vks.issubset(recent_vks)
-
-            if chord_matched or sequential_matched:
-                LOG.info("Secret unlock hotkey pressed (%s). Exiting stealth mode...", self.hotkey_str)
-                self.stop()
+            if chord_matched:
+                LOG.info("Secret unlock hotkey chord pressed (%s). Exiting stealth mode...", self.hotkey_str)
+                self.stop(reason="local_hotkey")
                 return 1
+
+            # 4. Check strict sequential match (e.g. Win held down, then W, then 1, within 1.5s per tap)
+            if mods_ok and self.required_seq:
+                expected_vk = self.required_seq[self._seq_idx]
+                if norm_vk == expected_vk:
+                    if self._seq_idx == 0:
+                        self._seq_idx = 1
+                        self._last_seq_time = now
+                    else:
+                        if now - self._last_seq_time <= 1.5:
+                            self._seq_idx += 1
+                            self._last_seq_time = now
+                        else:
+                            self._seq_idx = 1 if norm_vk == self.required_seq[0] else 0
+                            self._last_seq_time = now
+
+                    if self._seq_idx >= len(self.required_seq):
+                        LOG.info("Secret unlock hotkey sequence completed (%s). Exiting stealth mode...", self.hotkey_str)
+                        self.stop(reason="local_hotkey")
+                        return 1
+                else:
+                    # Extraneous key breaks sequential matching!
+                    self._seq_idx = 0
+            else:
+                self._seq_idx = 0
 
             # Swallow all other keystrokes
             return 1
 
         return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
-    def _lock_cursor_and_topmost(self):
+    def _lock_cursor_and_topmost(self, set_pos: bool = False):
         """Confine cursor to 1x1 pixel at (0, 0) and enforce TopMost z-order."""
         try:
             rect = wintypes.RECT(0, 0, 1, 1)
             user32.ClipCursor(ctypes.byref(rect))
-            user32.SetCursorPos(0, 0)
+            if set_pos:
+                user32.SetCursorPos(0, 0)
         except Exception as err:
             LOG.debug("ClipCursor error: %s", err)
 
@@ -337,7 +377,7 @@ class StealthOverlay:
     def _periodic_guard(self):
         if self._stopped.is_set():
             return
-        self._lock_cursor_and_topmost()
+        self._lock_cursor_and_topmost(set_pos=False)
         if self._root and not self._stopped.is_set():
             self._root.after(500, self._periodic_guard)
 
@@ -349,12 +389,12 @@ class StealthOverlay:
                 if not line:
                     # EOF reached (parent closed stdin or died)
                     LOG.info("Stdin EOF reached. Exiting stealth mode...")
-                    self.stop()
+                    self.stop(reason="stdin_eof")
                     break
                 line_str = line.strip().lower()
                 if line_str in ("stop", "exit", "quit"):
                     LOG.info("Received stop command from stdin. Exiting stealth mode...")
-                    self.stop()
+                    self.stop(reason="remote_command")
                     break
         except Exception:
             pass
@@ -384,7 +424,7 @@ class StealthOverlay:
                                 user32.SendMessageTimeoutW(0xFFFF, 0x0112, 0xF170, 2, 0x0002, 1000, None)
                             except Exception:
                                 pass
-                            self.stop()
+                            self.stop(reason="network_offline")
                             break
                 else:
                     if self._offline_start_time is not None:
@@ -434,7 +474,7 @@ class StealthOverlay:
             )
             self._network_thread.start()
 
-        self._lock_cursor_and_topmost()
+        self._lock_cursor_and_topmost(set_pos=True)
         self._root.after(500, self._periodic_guard)
 
         # Watchdog timeout
@@ -463,13 +503,28 @@ class StealthOverlay:
 
     def _on_watchdog_timeout(self):
         LOG.warning("Watchdog timer expired (%ds). Auto-deactivating stealth mode.", int(self.timeout_seconds))
-        self.stop()
+        self.stop(reason="watchdog_timeout")
 
-    def stop(self):
-        """Signal overlay to close cleanly."""
+    def stop(self, reason: str = "remote_command"):
+        """Signal overlay to close cleanly and persist exit reason."""
         if self._stopped.is_set():
             return
+        self.exit_reason = reason
         self._stopped.set()
+
+        try:
+            EXIT_REASON_FILE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "reason": reason,
+                "timestamp": time.time(),
+                "hotkey": self.hotkey_str,
+            }
+            tmp = EXIT_REASON_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(EXIT_REASON_FILE)
+        except Exception as err:
+            LOG.debug("Failed saving stealth exit reason: %s", err)
+
         if self._root:
             try:
                 self._root.after(0, self._root.quit)
@@ -678,6 +733,19 @@ class StealthManager:
             "offline_timeout_minutes": self.default_offline_timeout_minutes,
         }
 
+    def get_last_exit_reason(self) -> str:
+        """Read the persistent exit reason recorded by the stealth overlay process."""
+        try:
+            if EXIT_REASON_FILE.exists():
+                data = json.loads(EXIT_REASON_FILE.read_text(encoding="utf-8"))
+                ts = float(data.get("timestamp", 0))
+                # Only trust if recorded recently (within last 60s)
+                if time.time() - ts < 60.0:
+                    return data.get("reason", "local_hotkey")
+        except Exception as err:
+            LOG.debug("Error reading stealth exit reason: %s", err)
+        return "local_hotkey"
+
 
 def main():
     parser = argparse.ArgumentParser(description="Stealth Blackout Guard")
@@ -696,7 +764,7 @@ def main():
     )
 
     def sig_handler(signum, frame):
-        overlay.stop()
+        overlay.stop(reason="signal")
 
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)

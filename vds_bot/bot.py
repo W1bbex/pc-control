@@ -404,8 +404,8 @@ class PcControlBotApp(
 
         LOG.info("Callback received: %s", data)
 
-        if data != "menu" and not data.startswith("player_"):
-            self.current_menu_view = data
+        if data in ("menu", "main"):
+            self.current_menu_view = "main"
 
         # Modular Router Delegation
         if route_power_callback(self, data, chat_id, message_id, callback_id):

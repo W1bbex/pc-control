@@ -34,7 +34,31 @@ class ActionDispatcherMixin:
                 return
             if action == "lock":
                 self.acknowledge(command_id, "executed")
-                subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"])
+                sid = find_active_interactive_session_id()
+                if not sid or sid in (0xFFFFFFFF, -1, 0):
+                    sid = 1
+                locked = False
+                unlock_cfg = self.config.get("unlock", {})
+                psexec_candidates = [
+                    unlock_cfg.get("psexec_path"),
+                    str(BASE_DIR / "PsExec64.exe"),
+                    str(BASE_DIR / "hardware" / "PsExec64.exe"),
+                    shutil.which("PsExec64.exe"),
+                    shutil.which("PsExec.exe"),
+                ]
+                psexec = next((p for p in psexec_candidates if p and Path(p).is_file()), None)
+                if psexec:
+                    try:
+                        subprocess.Popen([psexec, "-accepteula", "-nobanner", "-i", str(sid), "-d", "-s", "rundll32.exe", "user32.dll,LockWorkStation"])
+                        locked = True
+                    except Exception as err:
+                        LOG.warning("PsExec lock failed: %s", err)
+                if not locked:
+                    tsdiscon = shutil.which("tsdiscon.exe")
+                    if tsdiscon:
+                        subprocess.Popen([tsdiscon, str(sid)])
+                    else:
+                        subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"])
                 return
             if action == "shutdown":
                 self._turn_off_led_esp()

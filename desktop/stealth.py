@@ -164,10 +164,19 @@ class StealthMixin:
 
             try:
                 now = time.time()
+                reason = "local_hotkey"
+                if hasattr(self.stealth_mgr, "get_last_exit_reason"):
+                    try:
+                        r = self.stealth_mgr.get_last_exit_reason()
+                        if isinstance(r, str) and r:
+                            reason = r
+                    except Exception:
+                        pass
+
                 payload = {
                     "state": "online",
                     "event": "stealth_exit",
-                    "reason": "local_hotkey",
+                    "reason": reason,
                     "stealth_mode": False,
                     "ts": now,
                     "session": self.get_session_seconds(),
@@ -175,7 +184,7 @@ class StealthMixin:
                 }
                 self.mqtt.publish(TOPIC_STATUS, json.dumps(payload), qos=1)
                 self.publish_telemetry()
-                LOG.info("Published stealth_exit event and updated telemetry to MQTT.")
+                LOG.info("Published stealth_exit event (reason: %s) and updated telemetry to MQTT.", reason)
             except Exception as err:
                 LOG.warning("Failed to publish stealth_exit event: %s", err)
 

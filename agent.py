@@ -145,12 +145,24 @@ patch_paho_sockpair()
 
 def acquire_single_instance():
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.ReleaseMutex.restype = wintypes.BOOL
+    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
     mutex = kernel32.CreateMutexW(
         None,
         True,
         "Local\\W1bbexPCControlAgent",
     )
     if ctypes.get_last_error() == 183:
+        if mutex:
+            try:
+                kernel32.CloseHandle(mutex)
+            except Exception:
+                pass
         raise SystemExit("PC Control Agent is already running")
     return mutex
 
@@ -427,16 +439,15 @@ class PCControlAgent(
         if data is not None:
             payload["data"] = data
 
-        info = self.mqtt.publish(
-            TOPIC_ACK,
-            json.dumps(payload, ensure_ascii=False),
-            qos=1,
-            retain=False,
-        )
         try:
-            info.wait_for_publish(timeout=5)
-        except RuntimeError:
-            pass
+            self.mqtt.publish(
+                TOPIC_ACK,
+                json.dumps(payload, ensure_ascii=False),
+                qos=1,
+                retain=False,
+            )
+        except Exception as err:
+            LOG.warning("Failed publishing ACK for %s: %s", command_id, err)
 
     def publish_status(self, force=False):
         if not getattr(self, "mqtt_online", False):
@@ -811,6 +822,12 @@ class PCControlAgent(
             self.sensor_helper.stop()
             if self.activity_tracker:
                 self.activity_tracker.stop()
+            try:
+                from core.activity_db import _GLOBAL_DB
+                if _GLOBAL_DB is not None:
+                    _GLOBAL_DB.close()
+            except Exception:
+                pass
 
 
 def main():
@@ -827,8 +844,13 @@ def main():
         agent.run()
     finally:
         try:
-            ctypes.windll.kernel32.ReleaseMutex(mutex)
-            ctypes.windll.kernel32.CloseHandle(mutex)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.ReleaseMutex.restype = wintypes.BOOL
+            kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.ReleaseMutex(mutex)
+            kernel32.CloseHandle(mutex)
         except Exception:
             pass
 

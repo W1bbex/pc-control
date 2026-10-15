@@ -115,7 +115,8 @@ class MqttDispatcherMixin:
             for alert_text in alerts:
                 self.ui.send_message(self.allowed_user_id, alert_text)
             if prev_stealth and not new_stealth and getattr(self, "active_stealth_card", None):
-                self.on_stealth_exit({"reason": "telemetry_diff"})
+                if time.time() - getattr(self, "last_stealth_exit_ts", 0.0) > 5.0:
+                    self.on_stealth_exit({"reason": "telemetry_diff"})
             now = time.time()
             if self._is_user_in_telegram_on_pc() and (now - getattr(self, "last_dashboard_auto_refresh", 0.0) >= 10.0):
                 self._check_dashboard_auto_refresh(now)
@@ -373,16 +374,38 @@ class MqttDispatcherMixin:
 
     def on_stealth_exit(self, data=None):
         """
-        Handles local stealth mode exit event (triggered via hotkey Win+W+1 or watchdog).
+        Handles local stealth mode exit event (triggered via hotkey Win+W+1, 5x Esc, or watchdog).
         Updates telemetry cache, updates the stale card's button from 'Выйти' to 'Включить',
         and sends a push notification to Telegram.
         """
         LOG.info("Handling stealth_exit event: %s", data)
+        self.last_stealth_exit_ts = time.time()
         if self.monitoring.latest_telemetry:
             self.monitoring.latest_telemetry["stealth_mode"] = False
 
         card = getattr(self, "active_stealth_card", None)
         self.active_stealth_card = None
+
+        reason = (data or {}).get("reason", "local_hotkey")
+        if reason == "local_hotkey":
+            alert_header = "🔓 <b>Режим скрытности отключен локально</b> (хоткей <code>Win+W+1</code>)"
+            footer_reason = "<i>Локальный выход: <code>Win+W+1</code></i>"
+        elif reason == "emergency_escape":
+            alert_header = "🔓 <b>Режим скрытности отключен</b> (экстренный выход 5x <code>Escape</code>)"
+            footer_reason = "<i>Экстренный выход: 5x <code>Escape</code></i>"
+        elif reason == "network_offline":
+            alert_header = "⚠️ <b>Режим скрытности отключен по таймауту сети</b> (ПК не в сети)"
+            footer_reason = "<i>Аварийный таймер: отсутствие связи</i>"
+        elif reason == "watchdog_timeout":
+            alert_header = "⏱ <b>Режим скрытности отключен по таймеру</b> (watchdog)"
+            footer_reason = "<i>Сработал таймер автоотключения</i>"
+        elif reason == "remote_command":
+            alert_header = "🔓 <b>Режим скрытности отключен удаленно</b>"
+            footer_reason = "<i>Команда управления</i>"
+        else:
+            alert_header = "🔓 <b>Режим скрытности отключен</b>"
+            clean_reason = str(reason).replace("<", "").replace(">", "")
+            footer_reason = f"<i>Причина: <code>{clean_reason}</code></i>"
 
         if card and isinstance(card, (tuple, list)) and len(card) == 2:
             chat_id, msg_id = card
@@ -390,11 +413,11 @@ class MqttDispatcherMixin:
             try:
                 self.ui.send_message(
                     chat_id,
-                    "<b>🔓 Режим скрытности отключен локально</b>\n\n"
+                    "<b>🔓 Режим скрытности отключен</b>\n\n"
                     "• Дисплеи разбужены\n"
                     "• Поглощение ввода снято\n"
                     "• Звук восстановлен\n\n"
-                    "<i>Локальный выход: <code>Win+W+1</code></i>",
+                    f"{footer_reason}",
                     reply_markup=self.ui.stealth_menu_markup(active=False),
                     message_id=msg_id,
                 )
@@ -405,7 +428,7 @@ class MqttDispatcherMixin:
             try:
                 self.ui.send_message(
                     self.allowed_user_id,
-                    "🔓 <b>Режим скрытности отключен локально</b> (хоткей <code>Win+W+1</code>)",
+                    alert_header,
                 )
             except Exception as err:
                 LOG.warning("Failed sending stealth exit alert: %s", err)
@@ -414,7 +437,7 @@ class MqttDispatcherMixin:
             try:
                 self.ui.send_message(
                     self.allowed_user_id,
-                    "🔓 <b>Режим скрытности отключен локально</b> (хоткей <code>Win+W+1</code>)\n\n"
+                    f"{alert_header}\n\n"
                     "• Дисплеи разбужены\n"
                     "• Ввод мыши и клавиатуры восстановлен\n"
                     "• Звук восстановлен",
