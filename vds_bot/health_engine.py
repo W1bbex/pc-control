@@ -46,10 +46,10 @@ class ComponentState:
 
         # Check reboot / boot_id transition before sequence check
         if boot_id is not None:
-            if self.boot_id is not None and boot_id != self.boot_id:
+            if (self.boot_id is not None and boot_id != self.boot_id) or self.status in ("offline", "unknown"):
                 LOG.info(
-                    "Component %s rebooted (boot_id changed: %s -> %s). Resetting timestamp sequence.",
-                    self.name, self.boot_id, boot_id
+                    "Component %s rebooted or woke from offline (boot_id: %s). Resetting timestamp sequence.",
+                    self.name, boot_id
                 )
                 self.last_ts = 0.0
             self.boot_id = boot_id
@@ -87,7 +87,7 @@ class ComponentState:
                 age = now - ts
                 # If older than threshold, or impossibly far in the future (> 60s drift)
                 if age > self.stale_threshold or age < -600.0:
-                    if status in ("online", "locked", "unlocked", "fresh"):
+                    if status in ("online", "unlocked", "locked", "fresh"):
                         status = "stale"
                         
         self.status = status
@@ -122,14 +122,17 @@ class HealthEngine:
         
     def update(self, component, status, boot_id=None, ts=None, is_retained=False):
         if component in self.components:
-            self.components[component].update(status, boot_id, ts, is_retained)
+            comp = self.components[component]
+            old_boot_id = comp.boot_id
+            comp.update(status, boot_id, ts, is_retained)
             # An active online heartbeat cancels shutdown_observed and graceful_shutdown ONLY IF
-            # it is strictly newer than the shutdown observation timestamp!
+            # it is strictly newer than the shutdown observation timestamp (or a confirmed reboot occurred)!
             if status in ("online", "unlocked", "locked", "fresh"):
                 msg_ts = ts if ts is not None else time.time()
-                if msg_ts > self.shutdown_observed_at:
+                reboot_detected = bool(boot_id and ((old_boot_id and boot_id != old_boot_id) or self.graceful_shutdown_until > 0.0))
+                if reboot_detected or msg_ts > self.shutdown_observed_at:
                     self.clear_shutdown_observed()
-                if msg_ts > self.graceful_shutdown_at:
+                if reboot_detected or msg_ts > self.graceful_shutdown_at:
                     self.clear_graceful_shutdown()
                 else:
                     LOG.info(

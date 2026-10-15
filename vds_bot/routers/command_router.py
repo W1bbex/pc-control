@@ -171,7 +171,40 @@ def route_message(app, message: dict) -> None:
                 app.active_stealth_card = (chat_id, msg["message_id"])
         return
 
-    # 6. Interactive terminal line input
+    # 6. Scheduled Shutdown
+    time_text = text.strip()
+    if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id:
+        lower_txt = time_text.lower()
+        if lower_txt in ("/cancel", "отмена", "назад", "/menu", "cancel"):
+            app.awaiting_shutdown_time_chat_id = None
+            app.ui.send_message(chat_id, "Ввод времени отменён.", reply_markup=app._main_menu_markup())
+            return
+        if lower_txt.startswith("/") and not lower_txt.startswith("/shutdown"):
+            # User sent another slash command; abort awaiting time so the command can run
+            app.awaiting_shutdown_time_chat_id = None
+
+    if text.lower().startswith("/shutdown "):
+        time_text = text.split(None, 1)[1].strip()
+
+    if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id or text.lower().startswith("/shutdown "):
+        try:
+            hour_text, minute_text = time_text.split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError
+        except (ValueError, TypeError):
+            app.ui.send_message(chat_id, "❌ Введи время как <code>HH:MM</code>, например <code>23:45</code> (или напиши «отмена»).")
+            return
+
+        now = datetime.now(MOSCOW)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        app.awaiting_shutdown_time_chat_id = None
+        app._show_shutdown_schedule_confirmation(chat_id, target)
+        return
+
+    # 7. Interactive terminal line input
     if getattr(app, "console_active_chat_id", None) == chat_id and not text.startswith("/"):
         app.execute_console_command(chat_id, text, target=app.console_target, shell=app.console_shell)
         return
@@ -231,37 +264,4 @@ def route_message(app, message: dict) -> None:
             return
         app.mqtt.publish_esp_action("LED_OFF")
         app.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
-        return
-
-    # 10. Scheduled Shutdown
-    time_text = text.strip()
-    if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id:
-        lower_txt = time_text.lower()
-        if lower_txt in ("/cancel", "отмена", "назад", "/menu", "cancel"):
-            app.awaiting_shutdown_time_chat_id = None
-            app.ui.send_message(chat_id, "Ввод времени отменён.", reply_markup=app._main_menu_markup())
-            return
-        if lower_txt.startswith("/") and not lower_txt.startswith("/shutdown"):
-            # User sent another slash command; abort awaiting time so the command can run
-            app.awaiting_shutdown_time_chat_id = None
-
-    if text.lower().startswith("/shutdown "):
-        time_text = text.split(None, 1)[1].strip()
-
-    if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id or text.lower().startswith("/shutdown "):
-        try:
-            hour_text, minute_text = time_text.split(":", 1)
-            hour, minute = int(hour_text), int(minute_text)
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError
-        except (ValueError, TypeError):
-            app.ui.send_message(chat_id, "❌ Введи время как <code>HH:MM</code>, например <code>23:45</code> (или напиши «отмена»).")
-            return
-
-        now = datetime.now(MOSCOW)
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        app.awaiting_shutdown_time_chat_id = None
-        app._show_shutdown_schedule_confirmation(chat_id, target)
         return

@@ -273,24 +273,33 @@ class TelemetryMixin:
             except OSError:
                 continue
 
+        def _safe_sensor_val(s):
+            val = s.get("value")
+            if val is None:
+                return 0.0
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
         sensors = self.sensor_helper.snapshot()
         temperatures = [
             sensor
             for sensor in sensors
             if (
                 sensor.get("type") in ("Temperature", "Fan", "Power")
-                and float(sensor.get("value", 0)) != 0
+                and _safe_sensor_val(sensor) != 0
             )
         ][:60]
 
         cpu_temperature = next(
             (
-                float(sensor["value"])
+                _safe_sensor_val(sensor)
                 for sensor in temperatures
                 if (
                     sensor.get("hardware_type") == "Cpu"
                     and sensor.get("type") == "Temperature"
-                    and float(sensor.get("value", 0)) > 5
+                    and _safe_sensor_val(sensor) > 5
                 )
             ),
             None,

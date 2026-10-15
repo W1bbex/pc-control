@@ -181,7 +181,10 @@ class PCControlAgent(
         self.fast_watcher_thread = None
 
         def _on_foreground_change(exe_path, proc_name, title):
-            self._handle_active_app_change(exe_path, proc_name, title)
+            # If fast_watcher_thread is active, it handles active app transitions with
+            # low latency. Prevent duplicate transitions, DB writes and MQTT bursts.
+            if not getattr(self, "fast_watcher_thread", None) or not self.fast_watcher_thread.is_alive():
+                self._handle_active_app_change(exe_path, proc_name, title)
 
         activity_config = self.config.get("activity_logging", {})
         self.activity_tracker = None

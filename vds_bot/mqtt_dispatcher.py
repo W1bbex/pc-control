@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -136,14 +137,28 @@ class MqttDispatcherMixin:
                     raise ValueError("Screenshot JPEG is truncated")
                 LOG.info("Parsed screenshot JPEG (%d bytes, %dx%d)", len(jpeg_bytes), header_data.get("width", 0), header_data.get("height", 0))
                 captured_at = datetime.now(MOSCOW).strftime("%d.%m.%Y %H:%M:%S")
-                sent = self.ui.send_photo(
-                    pending["chat_id"],
-                    jpeg_bytes,
-                    caption=f"<b>🖼️ Скриншот экрана ПК</b>\n{captured_at} МСК",
-                    filename="pc-screenshot.jpg",
-                )
-                if not sent:
-                    self.ui.send_message(pending["chat_id"], "❌ Telegram не принял изображение. Попробуй ещё раз.")
+                target_chat_id = pending["chat_id"]
+
+                def _send_photo_worker(cid, img_bytes, cap):
+                    try:
+                        sent = self.ui.send_photo(
+                            cid,
+                            img_bytes,
+                            caption=cap,
+                            filename="pc-screenshot.jpg",
+                        )
+                        if not sent:
+                            self.ui.send_message(cid, "❌ Telegram не принял изображение. Попробуй ещё раз.")
+                    except Exception:
+                        LOG.exception("Failed to send screenshot photo to chat %s", cid)
+                        self.ui.send_message(cid, "❌ Сбой при отправке изображения в Telegram.")
+
+                caption = f"<b>🖼️ Скриншот экрана ПК</b>\n{captured_at} МСК"
+                executor = getattr(self, "executor", None)
+                if executor:
+                    executor.submit(_send_photo_worker, target_chat_id, jpeg_bytes, caption)
+                else:
+                    threading.Thread(target=_send_photo_worker, args=(target_chat_id, jpeg_bytes, caption), daemon=True).start()
             except Exception:
                 LOG.exception("Failed to unpack screenshot binary payload")
                 self.ui.send_message(target_user, "❌ Ошибка парсинга скриншота от desktop-агента.")
@@ -263,9 +278,9 @@ class MqttDispatcherMixin:
                     self.workspace_execution_result = "executed"
                     self.workspace_executed_event.set()
 
-                elif result == "failed":
-                    LOG.warning("Workspace setup failed ACK received: %s", ack_data)
-                    self.workspace_execution_result = "failed"
+                elif result in ("failed", "cancelled"):
+                    LOG.warning("Workspace setup %s ACK received: %s", result, ack_data)
+                    self.workspace_execution_result = result
                     self.workspace_executed_event.set()
 
             # Minimize ACK tracking

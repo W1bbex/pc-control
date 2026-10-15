@@ -107,8 +107,9 @@ class ActionDispatcherMixin:
                     progress_callback=report_progress,
                     vpn=args.get("vpn"),
                 )
-                if isinstance(res, dict) and res.get("success") is False:
-                    self.acknowledge(command_id, "failed", res)
+                if isinstance(res, dict) and (res.get("cancelled") or res.get("success") is False):
+                    status = "cancelled" if res.get("cancelled") else "failed"
+                    self.acknowledge(command_id, status, res)
                 else:
                     self.acknowledge(command_id, "executed", res)
                 return

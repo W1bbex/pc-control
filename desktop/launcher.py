@@ -119,6 +119,7 @@ class LauncherMixin:
                         "launched": launched,
                         "verified_steps": verified_steps,
                         "cancelled": True,
+                        "success": False,
                         "desktop_minimized": False,
                     }
 
@@ -263,6 +264,7 @@ class LauncherMixin:
                             "launched": launched,
                             "verified_steps": verified_steps,
                             "cancelled": True,
+                            "success": False,
                             "desktop_minimized": False,
                         }
                     if not vpn_res.get("verified"):

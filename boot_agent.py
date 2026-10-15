@@ -328,8 +328,10 @@ def active_console_session(ttl=0.5):
     wtsapi32.WTSFreeMemory.argtypes = [ctypes.c_void_p]
     wtsapi32.WTSFreeMemory.restype = None
 
+    kernel32.WTSGetActiveConsoleSessionId.restype = wintypes.DWORD
+    kernel32.WTSGetActiveConsoleSessionId.argtypes = []
     session_id = int(kernel32.WTSGetActiveConsoleSessionId())
-    if session_id == 0xFFFFFFFF:
+    if session_id in (0xFFFFFFFF, -1):
         res = {
             "session": "no_console",
             "session_id": None,
@@ -494,10 +496,12 @@ def active_console_session(ttl=0.5):
 def find_active_interactive_session_id():
     kernel32 = ctypes.windll.kernel32
     wtsapi32 = ctypes.windll.wtsapi32
+    kernel32.WTSGetActiveConsoleSessionId.restype = wintypes.DWORD
+    kernel32.WTSGetActiveConsoleSessionId.argtypes = []
 
     # 1. Primary: WTSGetActiveConsoleSessionId
     sess_id = int(kernel32.WTSGetActiveConsoleSessionId())
-    if sess_id != 0xFFFFFFFF and sess_id != 0:
+    if sess_id not in (0xFFFFFFFF, 0, -1):
         return sess_id
 
     # 2. Secondary: enumerate sessions for state 0 (WTSActive) or any non-zero user session
@@ -528,7 +532,7 @@ def find_active_interactive_session_id():
     try:
         info = active_console_session(ttl=0)
         sid = info.get("session_id")
-        if sid and sid != 0xFFFFFFFF and sid != 0:
+        if sid and sid not in (0xFFFFFFFF, 0, -1):
             return int(sid)
     except Exception:
         pass
@@ -536,7 +540,7 @@ def find_active_interactive_session_id():
     if fallback_sid is not None:
         return fallback_sid
 
-    return 1 if (sess_id == 0xFFFFFFFF or sess_id == 0) else sess_id
+    return 1 if (sess_id in (0xFFFFFFFF, 0, -1)) else sess_id
 
 
 class SystemAgent:
@@ -903,23 +907,32 @@ class SystemAgent:
             except OSError:
                 continue
 
+        def _safe_sensor_val(s):
+            val = s.get("value")
+            if val is None:
+                return 0.0
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
         sensors = self.read_sensors()
         useful_sensors = [
             sensor
             for sensor in sensors
             if (
                 sensor.get("type") in ("Temperature", "Fan", "Power")
-                and float(sensor.get("value", 0)) != 0
+                and _safe_sensor_val(sensor) != 0
             )
         ][:60]
         cpu_temperature = next(
             (
-                float(sensor["value"])
+                _safe_sensor_val(sensor)
                 for sensor in useful_sensors
                 if (
                     sensor.get("hardware_type") == "Cpu"
                     and sensor.get("type") == "Temperature"
-                    and float(sensor.get("value", 0)) > 5
+                    and _safe_sensor_val(sensor) > 5
                 )
             ),
             None,
@@ -1311,7 +1324,10 @@ class SystemAgent:
                         )
                         return
 
-                    target_session = str(find_active_interactive_session_id())
+                    sid = find_active_interactive_session_id()
+                    if not sid or sid in (0xFFFFFFFF, -1, 0):
+                        sid = 1
+                    target_session = str(sid)
 
                     completed = subprocess.run(
                         [
@@ -1443,8 +1459,15 @@ class SystemAgent:
                 import win32con
 
                 def wndproc(hwnd, msg, wparam, lparam):
-                    if msg in (win32con.WM_QUERYENDSESSION, win32con.WM_ENDSESSION):
-                        LOG.info("Windows shutdown/logoff detected in SystemAgent via WM_ENDSESSION (msg=0x%x, lparam=0x%x)", msg, lparam)
+                    if msg == win32con.WM_QUERYENDSESSION:
+                        LOG.info("Windows queried session end (WM_QUERYENDSESSION, lparam=0x%x). Acknowledging readiness.", lparam)
+                        return 1
+
+                    if msg == win32con.WM_ENDSESSION:
+                        if not wparam:
+                            LOG.info("Windows shutdown cancelled (WM_ENDSESSION with wparam=0, lparam=0x%x)", lparam)
+                            return 0
+                        LOG.info("Windows shutdown confirmed in SystemAgent via WM_ENDSESSION (wparam=%s, lparam=0x%x)", wparam, lparam)
                         self._shutdown_detected = True
                         self._turn_off_led_esp()
                         try:
@@ -1471,7 +1494,7 @@ class SystemAgent:
                         except Exception:
                             pass
                         self.stop_event.set()
-                        return 1
+                        return 0
                     return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
                 wc = win32gui.WNDCLASS()

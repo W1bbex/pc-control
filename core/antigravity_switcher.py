@@ -52,6 +52,21 @@ class _DATA_BLOB(ctypes.Structure):
     ]
 
 
+if sys.platform == "win32":
+    ctypes.windll.crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        wintypes.LPWSTR,
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    ctypes.windll.crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    ctypes.windll.kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    ctypes.windll.kernel32.LocalFree.restype = ctypes.c_void_p
+
+
 def _dpapi_decrypt(data: bytes) -> bytes:
     """Decrypt Windows DPAPI protected blob."""
     if sys.platform != "win32":

@@ -362,8 +362,9 @@ class MediaManager:
                 )
                 LOG.info("Removed track %s from likes, status: %s", self.current_track_id, r.status_code)
                 if r.status_code == 200:
-                    self.liked_track_ids.discard(str(self.current_track_id))
-                    self.current_is_liked = False
+                    with self._lock:
+                        self.liked_track_ids.discard(str(self.current_track_id))
+                        self.current_is_liked = False
             else:
                 # Add to likes
                 r = self._http_session.post(
@@ -374,8 +375,9 @@ class MediaManager:
                 )
                 LOG.info("Added track %s to likes, status: %s", self.current_track_id, r.status_code)
                 if r.status_code == 200:
-                    self.liked_track_ids.add(str(self.current_track_id))
-                    self.current_is_liked = True
+                    with self._lock:
+                        self.liked_track_ids.add(str(self.current_track_id))
+                        self.current_is_liked = True
 
             with self._lock:
                 if hasattr(self, "_resolve_cache") and self._last_title:
@@ -583,9 +585,20 @@ class MediaManager:
 
     def execute_command(self, action: str, **kwargs) -> bool:
         if action == "toggle_like":
-            res = self._toggle_like()
-            self.trigger_poll()
-            return res
+            if self._loop and self._loop.is_running():
+                async def _run_like():
+                    try:
+                        await asyncio.to_thread(self._toggle_like)
+                    except Exception as e:
+                        LOG.error("Toggle like failed: %s", e)
+                    finally:
+                        self.trigger_poll()
+
+                asyncio.run_coroutine_threadsafe(_run_like(), self._loop)
+                return True
+            else:
+                threading.Thread(target=self._toggle_like, daemon=True).start()
+                return True
         if self._loop and self._loop.is_running():
             async def _run_command():
                 try:

@@ -641,7 +641,11 @@ class StealthManager:
                     self._process.terminate()
                     self._process.wait(timeout=1.0)
                 except Exception:
-                    pass
+                    try:
+                        self._process.kill()
+                        self._process.wait(timeout=1.0)
+                    except Exception:
+                        pass
 
             self._process = None
             LOG.info("Stealth mode process stopped.")
