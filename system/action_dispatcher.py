@@ -109,7 +109,7 @@ class ActionDispatcherMixin:
             if action in ("cmd", "exec", "powershell"):
                 cmd_text = args.get("command") or args.get("cmd") or ""
                 use_ps = action == "powershell" or args.get("shell") == "powershell"
-                timeout_s = min(int(args.get("timeout", 60)), 300)
+                timeout_s = max(1, min(int(args.get("timeout", 60)), 300))
                 cwd = args.get("cwd") or os.environ.get("USERPROFILE") or "C:\\"
 
                 if use_ps:

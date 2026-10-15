@@ -131,10 +131,25 @@ class MediaManager:
                     kwargs['source_address'] = self.source_address
                     super().init_poolmanager(*args, **kwargs)
 
-            ips = socket.gethostbyname_ex(socket.gethostname())[2]
-            phys_ips = [ip for ip in ips if not ip.startswith(("127.", "198.18.", "169.254."))]
-            if phys_ips:
-                adapter = _SourceAddressAdapter((phys_ips[0], 0))
+            def _get_best_phys_ip():
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                        sock.connect(("77.88.8.8", 53))
+                        ip = sock.getsockname()[0]
+                        if ip and not ip.startswith(("127.", "198.18.", "169.254.")):
+                            return ip
+                except Exception:
+                    pass
+                try:
+                    ips = socket.gethostbyname_ex(socket.gethostname())[2]
+                    phys_ips = [ip for ip in ips if not ip.startswith(("127.", "198.18.", "169.254."))]
+                    return phys_ips[0] if phys_ips else None
+                except Exception:
+                    return None
+
+            phys_ip = _get_best_phys_ip()
+            if phys_ip:
+                adapter = _SourceAddressAdapter((phys_ip, 0))
                 self._http_session.mount("https://api.music.yandex.net/", adapter)
                 self._http_session.mount("http://api.music.yandex.net/", adapter)
         except Exception as e:

@@ -526,6 +526,7 @@ class PcControlBotApp(
                     old_pid = int(content) if content.isdigit() else None
                     if old_pid and psutil.pid_exists(old_pid):
                         is_bot = False
+                        proc = None
                         try:
                             proc = psutil.Process(old_pid)
                             cmdline_str = " ".join(proc.cmdline()).lower()
@@ -539,7 +540,13 @@ class PcControlBotApp(
                             LOG.error("Another bot instance is already running (PID %d). Aborting to prevent 409 conflict.", old_pid)
                             sys.exit(0)
                         else:
-                            LOG.warning("Lockfile PID %d belongs to unrelated process (%s). Overwriting stale lock.", old_pid, getattr(proc, 'name', lambda: 'unknown')())
+                            proc_name_str = "unknown"
+                            if proc is not None:
+                                try:
+                                    proc_name_str = proc.name()
+                                except Exception:
+                                    pass
+                            LOG.warning("Lockfile PID %d belongs to unrelated process (%s). Overwriting stale lock.", old_pid, proc_name_str)
                     else:
                         LOG.warning("Found stale lockfile from PID %s. Overwriting.", content)
                 except Exception as e:

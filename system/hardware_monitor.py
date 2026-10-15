@@ -90,9 +90,12 @@ class HardwareMonitorMixin:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 check=True,
             )
+            lines = [l for l in completed.stdout.splitlines() if l.strip()]
+            if not lines:
+                return None
             values = [
                 item.strip()
-                for item in completed.stdout.splitlines()[0].split(",")
+                for item in lines[0].split(",")
             ]
 
             def optional_number(value):

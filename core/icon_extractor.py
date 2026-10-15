@@ -187,7 +187,7 @@ def extract_app_icon_png(exe_path, target_size=100, padding=2):
     (target_size x target_size) canvas, and returns PNG bytes.
     Returns None if extraction fails.
     """
-    if not os.path.exists(exe_path):
+    if not exe_path or not os.path.exists(exe_path):
         return None
 
     sizes_to_try = [256, 128, 64, 48, 32]

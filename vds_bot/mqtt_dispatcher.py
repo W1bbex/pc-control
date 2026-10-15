@@ -154,7 +154,7 @@ class MqttDispatcherMixin:
                         self.ui.send_message(cid, "❌ Сбой при отправке изображения в Telegram.")
 
                 caption = f"<b>🖼️ Скриншот экрана ПК</b>\n{captured_at} МСК"
-                executor = getattr(self, "executor", None)
+                executor = getattr(self, "_executor", getattr(self, "executor", None))
                 if executor:
                     executor.submit(_send_photo_worker, target_chat_id, jpeg_bytes, caption)
                 else:

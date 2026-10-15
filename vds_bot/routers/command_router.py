@@ -183,6 +183,15 @@ def route_message(app, message: dict) -> None:
             # User sent another slash command; abort awaiting time so the command can run
             app.awaiting_shutdown_time_chat_id = None
 
+    if lower_text == "/shutdown":
+        app.awaiting_shutdown_time_chat_id = None
+        app.ui.send_message(
+            chat_id,
+            "<b>Выключение ПК</b>\n\nВыключить сейчас или запланировать по московскому времени?",
+            reply_markup=app.ui.shutdown_menu_markup(app.scheduled_shutdown_ts),
+        )
+        return
+
     if text.lower().startswith("/shutdown "):
         time_text = text.split(None, 1)[1].strip()
 

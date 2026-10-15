@@ -46,8 +46,12 @@ class PremiumChecker:
     def _save_cache(self) -> None:
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.cache_path, "w", encoding="utf-8") as f:
-                json.dump(self._memory_cache, f, indent=2, ensure_ascii=False)
+            tmp_path = self.cache_path.with_suffix(f".tmp.{os.getpid()}")
+            tmp_path.write_text(
+                json.dumps(self._memory_cache, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, self.cache_path)
         except Exception as e:
             LOG.warning("Failed to save premium cache to %s: %s", self.cache_path, e)
 

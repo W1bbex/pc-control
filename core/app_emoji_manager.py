@@ -100,7 +100,7 @@ class AppEmojiManager:
                 if entry.get("failed_at") and (time.time() - entry["failed_at"] < 60.0):
                     return None
 
-            if not os.path.exists(exe_path):
+            if not exe_path or not os.path.exists(exe_path):
                 return None
 
             # Extract real 100x100 transparent PNG

@@ -228,6 +228,7 @@ def rollback_to_previous():
     prev_dir = f"{REMOTE_BASE}/releases/{shlex.quote(prev_release)}"
     print(f"[*] Rolling back to previous release: {prev_release} ({prev_dir})")
 
+    quoted_prev = shlex.quote(prev_release)
     restore_cmd = (
         f"for f in {' '.join(MANIFEST_FILES)}; do "
         f"  if [ -f {prev_dir}/$f ]; then "
@@ -235,10 +236,11 @@ def rollback_to_previous():
         f"    cp {prev_dir}/$f {REMOTE_BASE}/$f; "
         f"  fi; "
         f"done && "
+        f"echo {quoted_prev} > {REMOTE_BASE}/current_release && "
         f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
-        f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
-        f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "
-        f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && chmod 0644 {REMOTE_BASE}/routers/*; fi && "
+        f"chmod 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
+        f"if [ -d {REMOTE_BASE}/resources ]; then find {REMOTE_BASE}/resources -type d -exec chmod 0755 {{}} + && find {REMOTE_BASE}/resources -type f -exec chmod 0644 {{}} +; fi && "
+        f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && find {REMOTE_BASE}/routers -maxdepth 1 -name '*.py' -exec chmod 0644 {{}} +; fi && "
         f"systemctl restart pc-control-bot.service"
     )
     run_ssh(restore_cmd)
@@ -271,9 +273,9 @@ def deploy_and_verify(release_tag, remote_release_dir):
         f"done && "
         f"echo {quoted_tag} > {REMOTE_BASE}/current_release && "
         f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
-        f"chmod -R 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
-        f"if [ -d {REMOTE_BASE}/resources ]; then chmod 0755 {REMOTE_BASE}/resources && chmod 0644 {REMOTE_BASE}/resources/*; fi && "
-        f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && chmod 0644 {REMOTE_BASE}/routers/*; fi && "
+        f"chmod 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
+        f"if [ -d {REMOTE_BASE}/resources ]; then find {REMOTE_BASE}/resources -type d -exec chmod 0755 {{}} + && find {REMOTE_BASE}/resources -type f -exec chmod 0644 {{}} +; fi && "
+        f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && find {REMOTE_BASE}/routers -maxdepth 1 -name '*.py' -exec chmod 0644 {{}} +; fi && "
         f"systemctl restart pc-control-bot.service"
     )
     run_ssh(deploy_cmd)

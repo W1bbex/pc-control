@@ -32,6 +32,18 @@ user32.CloseDesktop.restype = wintypes.BOOL
 user32.GetKeyState.argtypes = [ctypes.c_int]
 user32.GetKeyState.restype = ctypes.c_short
 
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateMutexW.restype = wintypes.HANDLE
+
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+user32.LoadKeyboardLayoutW.argtypes = [wintypes.LPCWSTR, wintypes.UINT]
+user32.LoadKeyboardLayoutW.restype = wintypes.HKL
+
+user32.ActivateKeyboardLayout.argtypes = [wintypes.HKL, wintypes.UINT]
+user32.ActivateKeyboardLayout.restype = wintypes.HKL
+
 def _load_env_file(path: Path):
     if not path.exists():
         return

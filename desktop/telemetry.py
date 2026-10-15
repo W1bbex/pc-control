@@ -14,6 +14,7 @@ import time
 import psutil
 
 from desktop.constants import (
+    AGENT_BOOT_ID,
     AGENT_START_TIME,
     ICONS,
     REAL_BOOT_TIME,
@@ -150,9 +151,12 @@ class TelemetryMixin:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 check=True,
             )
+            lines = [l for l in completed.stdout.splitlines() if l.strip()]
+            if not lines:
+                return None
             values = [
                 item.strip()
-                for item in completed.stdout.splitlines()[0].split(",")
+                for item in lines[0].split(",")
             ]
 
             def optional_number(value):
@@ -325,7 +329,7 @@ class TelemetryMixin:
             "windows": platform.platform(),
             "local_ip": self.get_local_ip(),
             "uptime_seconds": max(0, int(time.time() - REAL_BOOT_TIME)),
-            "boot_id": str(int(REAL_BOOT_TIME)),
+            "boot_id": getattr(self, "boot_id", AGENT_BOOT_ID),
             "cpu": {
                 "name": self.get_cpu_name(),
                 "load_percent": round(psutil.cpu_percent(interval=None), 1),
