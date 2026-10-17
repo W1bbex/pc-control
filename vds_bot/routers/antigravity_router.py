@@ -61,6 +61,7 @@ def route_antigravity_callback(app, data: str, chat_id: int, message_id: int, ca
 
 def open_antigravity_menu(app, chat_id: int, message_id: Optional[int] = None) -> None:
     """Requests account list from desktop agent and renders/updates card."""
+    app.current_menu_view = "antigravity_menu"
     if not hasattr(app, "pending_antigravity_cmd_ids"):
         app.pending_antigravity_cmd_ids = {}
 

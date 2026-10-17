@@ -84,6 +84,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
 
     # 3. Monitoring Menu
     if data == "monitoring_menu":
+        app.current_menu_view = "monitoring_menu"
         app.ui.answer_callback(callback_id)
         text = app.monitoring.dashboard_text()
         app.ui.send_message(chat_id, text, reply_markup=app.ui.monitoring_menu_markup(), message_id=message_id)
@@ -114,6 +115,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
 
     # 6. Telemetry History Menu
     if data == "history_menu":
+        app.current_menu_view = "history_menu"
         app.ui.answer_callback(callback_id)
         stats = app.monitoring.history.stats()
         text = app.ui.history_menu_text(count=stats.get("count", 0))
@@ -175,6 +177,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
 
     # 9. LED Menu
     if data == "led_menu":
+        app.current_menu_view = "led_menu"
         app.ui.answer_callback(callback_id)
         text = (
             "<b>💡 Калибровка белого цвета кулера</b>\n\n"

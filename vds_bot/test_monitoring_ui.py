@@ -504,6 +504,122 @@ def test_dashboard_renders_yellow_pulse_when_esp_offline():
     assert "Модуль ESP8266 недоступен" in dashboard
 
 
+def test_resolve_menu_view_mapping():
+    try:
+        from vds_bot.bot import resolve_menu_view
+    except ImportError:
+        from bot import resolve_menu_view
+
+    # Submenus
+    assert resolve_menu_view("apps_menu") == "apps_menu"
+    assert resolve_menu_view("power_menu") == "power_menu"
+    assert resolve_menu_view("shutdown_menu") == "shutdown_menu"
+    assert resolve_menu_view("shutdown_after:15") == "shutdown_menu"
+    assert resolve_menu_view("reboot_menu") == "reboot_menu"
+    assert resolve_menu_view("stealth_menu") == "stealth_menu"
+    assert resolve_menu_view("sound_menu") == "sound_menu"
+    assert resolve_menu_view("volume:50") == "sound_menu"
+    assert resolve_menu_view("settings_menu") == "settings_menu"
+    assert resolve_menu_view("monitoring_menu") == "monitoring_menu"
+    assert resolve_menu_view("history_menu") == "history_menu"
+    assert resolve_menu_view("history_period:7d") == "history_menu"
+    assert resolve_menu_view("led_menu") == "led_menu"
+    assert resolve_menu_view("led_set:255,255,255") == "led_menu"
+    assert resolve_menu_view("console_open") == "console"
+    assert resolve_menu_view("console") == "console"
+    assert resolve_menu_view("antigravity_menu") == "antigravity_menu"
+    assert resolve_menu_view("ag_refresh") == "antigravity_menu"
+    assert resolve_menu_view("game_start_direct") == "game_menu"
+    assert resolve_menu_view("flow_unlock_and_game") == "game_menu"
+    assert resolve_menu_view("flow_game:minecraft") == "game_menu"
+    assert resolve_menu_view("direct_game:gta5") == "game_menu"
+    assert resolve_menu_view("workspace_start_direct") == "workspace_menu"
+    assert resolve_menu_view("flow_unlock_and_workspace") == "workspace_menu"
+    assert resolve_menu_view("workspace_vpn:incy") == "workspace_menu"
+
+    # Main menu resets
+    assert resolve_menu_view("menu") == "main"
+    assert resolve_menu_view("main") == "main"
+    assert resolve_menu_view("flow_unlock_no") == "main"
+
+    # Non-navigation action callbacks must NOT change menu view
+    assert resolve_menu_view("kill_process:5432") is None
+    assert resolve_menu_view("app:Telegram") is None
+    assert resolve_menu_view("press_esc") is None
+    assert resolve_menu_view("power_on") is None
+    assert resolve_menu_view("sleep_confirm") is None
+
+
+def test_apps_menu_navigation_prevents_dashboard_auto_refresh():
+    """Regression test: opening apps_menu must prevent dashboard auto-refresh from kicking user out."""
+    from unittest.mock import MagicMock
+    try:
+        from vds_bot.bot import PcControlBotApp
+    except ImportError:
+        from bot import PcControlBotApp
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.allowed_user_id = 12345
+    app.ui = MagicMock()
+    app.monitoring = MagicMock()
+    app.power_flow = MagicMock()
+    app.mqtt = MagicMock()
+    app.workspace_cancel_event = MagicMock()
+    app.active_main_menu_message_id = 999
+    app.current_menu_view = "main"
+    app.last_dashboard_auto_refresh = 100.0
+    app._main_menu_markup = MagicMock(return_value={"inline_keyboard": []})
+    app._is_user_in_telegram_on_pc = MagicMock(return_value=True)
+    app.monitoring.latest_telemetry = {"in_pc_control_chat": True}
+
+    # 1. User clicks "apps_menu"
+    call = {
+        "id": "cb-apps-1",
+        "from": {"id": 12345},
+        "message": {"message_id": 999, "chat": {"id": 12345}},
+        "data": "apps_menu",
+    }
+    app.handle_callback(call)
+
+    # current_menu_view must be "apps_menu", not "main"
+    assert app.current_menu_view == "apps_menu"
+
+    # 2. Telemetry arrives or scheduler ticks at 115.0s (>5s / >10s elapsed)
+    app.ui.send_message.reset_mock()
+    app._check_dashboard_auto_refresh(115.0)
+
+    # Must NOT call send_message to overwrite dashboard!
+    assert app.ui.send_message.call_count == 0
+
+    # 3. User clicks an action in apps_menu (e.g. launch app)
+    call_launch = {
+        "id": "cb-apps-2",
+        "from": {"id": 12345},
+        "message": {"message_id": 999, "chat": {"id": 12345}},
+        "data": "app:Telegram",
+    }
+    app.mqtt.desktop_status = "online"
+    app.handle_callback(call_launch)
+
+    # View must STILL remain "apps_menu"
+    assert app.current_menu_view == "apps_menu"
+
+    # 4. Another auto-refresh tick
+    app._check_dashboard_auto_refresh(130.0)
+    assert app.ui.send_message.call_count == 0
+
+    # 5. User clicks "Назад" ("menu")
+    call_back = {
+        "id": "cb-apps-3",
+        "from": {"id": 12345},
+        "message": {"message_id": 999, "chat": {"id": 12345}},
+        "data": "menu",
+    }
+    app.handle_callback(call_back)
+    assert app.current_menu_view == "main"
+
+
+
 if __name__ == "__main__":
     test_dashboard_uses_real_nested_agent_schema()
     test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux()

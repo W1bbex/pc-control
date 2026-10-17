@@ -18,6 +18,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
     """Handle power-related callback queries. Returns True if handled, False otherwise."""
     # 1. Power Menu Navigation
     if data == "power_menu":
+        app.current_menu_view = "power_menu"
         app.awaiting_shutdown_time_chat_id = None
         app.ui.answer_callback(callback_id)
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
@@ -160,6 +161,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
 
     # 6. Reboot
     if data == "reboot_pc":
+        app.current_menu_view = "reboot_menu"
         app.ui.answer_callback(callback_id)
         app.ui.send_message(
             chat_id,
@@ -212,6 +214,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
 
     # 7. Shutdown
     if data == "shutdown_pc":
+        app.current_menu_view = "shutdown_menu"
         app.awaiting_shutdown_time_chat_id = None
         app.ui.answer_callback(callback_id)
         app.ui.send_message(

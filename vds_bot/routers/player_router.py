@@ -73,6 +73,7 @@ def route_player_callback(app, data: str, chat_id: int, message_id: int, callbac
 
     # 3. Sound Menu Navigation
     if data == "sound_menu":
+        app.current_menu_view = "sound_menu"
         app.ui.answer_callback(callback_id)
         vol = None
         if hasattr(app, "monitoring") and app.monitoring.latest_telemetry:

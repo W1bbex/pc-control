@@ -108,8 +108,49 @@ MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 
+from typing import Optional
+
 STATE_PATH = Path(os.environ.get("STATE_PATH", "/var/lib/pc-control-bot/state.json"))
 LOCK_PATH = Path(os.environ.get("BOT_LOCK_PATH", str(STATE_PATH.parent / "bot.lock")))
+
+
+def resolve_menu_view(data: str) -> Optional[str]:
+    """Resolves whether a callback query data corresponds to navigating to a specific menu view.
+    Returns the view name if it is a menu navigation, or None if it is an action callback.
+    """
+    if not isinstance(data, str):
+        return None
+    if data in ("menu", "main", "flow_unlock_no"):
+        return "main"
+    if data == "apps_menu":
+        return "apps_menu"
+    if data == "power_menu":
+        return "power_menu"
+    if data == "shutdown_menu" or data.startswith("shutdown_after:"):
+        return "shutdown_menu"
+    if data == "reboot_menu":
+        return "reboot_menu"
+    if data == "stealth_menu":
+        return "stealth_menu"
+    if data == "sound_menu" or data.startswith("volume:"):
+        return "sound_menu"
+    if data == "settings_menu":
+        return "settings_menu"
+    if data == "monitoring_menu":
+        return "monitoring_menu"
+    if data == "history_menu" or data.startswith("history_period:"):
+        return "history_menu"
+    if data == "led_menu" or data.startswith("led_"):
+        return "led_menu"
+    if data in ("console_open", "console") or data.startswith("console_"):
+        return "console"
+    if data in ("antigravity_menu", "ag_refresh") or data.startswith("ag_"):
+        return "antigravity_menu"
+    if data in ("game_start_direct", "flow_unlock_and_game") or data.startswith(("flow_game", "direct_game")):
+        return "game_menu"
+    if data in ("workspace_start_direct", "flow_unlock_and_workspace") or data.startswith("workspace_vpn:"):
+        return "workspace_menu"
+    return None
 
 
 class PcControlBotApp(
@@ -404,8 +445,9 @@ class PcControlBotApp(
 
         LOG.info("Callback received: %s", data)
 
-        if data in ("menu", "main"):
-            self.current_menu_view = "main"
+        new_view = resolve_menu_view(data)
+        if new_view is not None:
+            self.current_menu_view = new_view
 
         # Modular Router Delegation
         if route_power_callback(self, data, chat_id, message_id, callback_id):

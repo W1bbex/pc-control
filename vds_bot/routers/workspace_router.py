@@ -59,6 +59,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
 
     # 1. Apps Menu Navigation
     if data == "apps_menu":
+        app.current_menu_view = "apps_menu"
         app.ui.answer_callback(callback_id)
         app.ui.send_message(chat_id, app.ui.apps_menu_text(), reply_markup=app.ui.apps_menu_markup(), message_id=message_id)
         return True
@@ -108,6 +109,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
 
     # 4. Game Setup Flow
     if data == "flow_unlock_and_game":
+        app.current_menu_view = "game_menu"
         app.ui.answer_callback(callback_id)
         game_icon = ICONS.get("game")
         game_tag = f'<tg-emoji emoji-id="{game_icon}">🎮</tg-emoji> ' if game_icon else ""
@@ -117,6 +119,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         return True
 
     if data.startswith("flow_game:"):
+        app.current_menu_view = "game_menu"
         game_key = data.split(":", 1)[1]
         g_info = GAME_INFO.get(game_key, {})
         game_name = g_info.get("name", game_key)
@@ -142,6 +145,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         return True
 
     if data == "game_start_direct":
+        app.current_menu_view = "game_menu"
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
         if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
             app.ui.answer_callback(callback_id)
@@ -247,6 +251,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         return True
 
     if data == "workspace_start_direct":
+        app.current_menu_view = "workspace_menu"
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
         if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
             app.ui.answer_callback(callback_id)
