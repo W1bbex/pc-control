@@ -70,6 +70,11 @@ CANONICAL_ICONS = {
     "app_chrome": "5251317871274929314",
     "app_antigravity": "5251292384938994108",
     "app_dolphin": "5278321743709124204",
+    "game_gta5": "5294012509076893983",
+    "game_roblox": "5300747348509503837",
+    "game_gtasa": "5289681232127369961",
+    "game_minecraft": "5375530541678373091",
+    "game_warcraft3": "5377727451810017452",
 }
 
 def _load_canonical_icons():

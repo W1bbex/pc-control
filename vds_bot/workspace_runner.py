@@ -70,25 +70,39 @@ def get_workspace_steps(vpn="incy"):
 
 
 GAME_INFO = {
+    "minecraft": {
+        "id": "game_minecraft",
+        "name": "Minecraft",
+        "scenario": "Игровой сетап: Minecraft",
+        "emoji_id": ICONS.get("game_minecraft") or ICONS.get("game"),
+        "fallback_emoji": "⛏",
+    },
+    "warcraft3": {
+        "id": "game_warcraft3",
+        "name": "Warcraft 3",
+        "scenario": "Игровой сетап: Warcraft 3",
+        "emoji_id": ICONS.get("game_warcraft3") or ICONS.get("game"),
+        "fallback_emoji": "⚔",
+    },
     "gta5": {
         "id": "game_gta5",
         "name": "GTA 5 Legacy",
         "scenario": "Игровой сетап: GTA 5 Legacy",
-        "emoji_id": ICONS.get("game"),
+        "emoji_id": ICONS.get("game_gta5") or ICONS.get("game"),
         "fallback_emoji": "🚗",
     },
     "roblox": {
         "id": "game_roblox",
         "name": "Roblox",
         "scenario": "Игровой сетап: Roblox",
-        "emoji_id": ICONS.get("game"),
+        "emoji_id": ICONS.get("game_roblox") or ICONS.get("game"),
         "fallback_emoji": "🟥",
     },
     "gtasa": {
         "id": "game_gtasa",
         "name": "GTA SA",
         "scenario": "Игровой сетап: GTA SA",
-        "emoji_id": ICONS.get("game"),
+        "emoji_id": ICONS.get("game_gtasa") or ICONS.get("game"),
         "fallback_emoji": "🚗",
     },
 }

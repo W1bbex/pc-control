@@ -20,25 +20,39 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         from telegram_ui import ICONS
 
     GAME_INFO = {
+        "minecraft": {
+            "id": "game_minecraft",
+            "name": "Minecraft",
+            "scenario": "Игровой сетап: Minecraft",
+            "emoji_id": ICONS.get("game_minecraft") or ICONS.get("game"),
+            "fallback_emoji": "⛏",
+        },
+        "warcraft3": {
+            "id": "game_warcraft3",
+            "name": "Warcraft 3",
+            "scenario": "Игровой сетап: Warcraft 3",
+            "emoji_id": ICONS.get("game_warcraft3") or ICONS.get("game"),
+            "fallback_emoji": "⚔",
+        },
         "gta5": {
             "id": "game_gta5",
             "name": "GTA 5 Legacy",
             "scenario": "Игровой сетап: GTA 5 Legacy",
-            "emoji_id": ICONS.get("game"),
+            "emoji_id": ICONS.get("game_gta5") or ICONS.get("game"),
             "fallback_emoji": "🚗",
         },
         "roblox": {
             "id": "game_roblox",
             "name": "Roblox",
             "scenario": "Игровой сетап: Roblox",
-            "emoji_id": ICONS.get("game"),
+            "emoji_id": ICONS.get("game_roblox") or ICONS.get("game"),
             "fallback_emoji": "🟥",
         },
         "gtasa": {
             "id": "game_gtasa",
             "name": "GTA SA",
             "scenario": "Игровой сетап: GTA SA",
-            "emoji_id": ICONS.get("game"),
+            "emoji_id": ICONS.get("game_gtasa") or ICONS.get("game"),
             "fallback_emoji": "🚗",
         },
     }
@@ -95,7 +109,9 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
     # 4. Game Setup Flow
     if data == "flow_unlock_and_game":
         app.ui.answer_callback(callback_id)
-        text = "<b>🎮 Выберите игру для запуска:</b>\n\nИгра и VPN запустятся автоматически после разблокировки ПК."
+        game_icon = ICONS.get("game")
+        game_tag = f'<tg-emoji emoji-id="{game_icon}">🎮</tg-emoji> ' if game_icon else ""
+        text = f"<b>{game_tag}Выберите игру для запуска:</b>\n\nИгра и VPN запустятся автоматически после разблокировки ПК."
         markup = app.ui.game_choice_markup("flow_game")
         app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
@@ -105,7 +121,9 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         g_info = GAME_INFO.get(game_key, {})
         game_name = g_info.get("name", game_key)
         app.ui.answer_callback(callback_id, f"Выбрана {game_name}")
-        text = f"<b>🌐 Выберите VPN для {game_name}:</b>"
+        net_icon = ICONS.get("network") or ICONS.get("wifi")
+        net_tag = f'<tg-emoji emoji-id="{net_icon}">🌐</tg-emoji> ' if net_icon else ""
+        text = f"<b>{net_tag}Выберите VPN для {game_name}:</b>"
         markup = app.ui.game_vpn_choice_markup(game_key, "flow_game_vpn")
         app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
@@ -117,7 +135,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         g_info = GAME_INFO.get(game_key, {})
         game_name = g_info.get("name", game_key)
         vpn_name = "INCY" if selected_vpn == "incy" else "Happ"
-        app.ui.answer_callback(callback_id, f"🎮 {game_name} ({vpn_name} VPN) запланирована!")
+        app.ui.answer_callback(callback_id, f"{game_name} ({vpn_name} VPN) запланирована!")
         app.power_flow.chat_id = chat_id
         app.power_flow.message_id = message_id
         app.power_flow.set_auto_launch_game(game=game_key, vpn=selected_vpn, chat_id=chat_id)
@@ -127,7 +145,9 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
         if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
             app.ui.answer_callback(callback_id)
-            text = "<b>🎮 Запуск игрового сетапа</b>\n\nВыберите игру для запуска:"
+            game_icon = ICONS.get("game")
+            game_tag = f'<tg-emoji emoji-id="{game_icon}">🎮</tg-emoji> ' if game_icon else ""
+            text = f"<b>{game_tag}Запуск игрового сетапа</b>\n\nВыберите игру для запуска:"
             markup = app.ui.game_choice_markup("direct_game")
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         elif pc_state.state == "LOCKED":

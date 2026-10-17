@@ -40,6 +40,24 @@ def test_get_game_steps_gtasa_incy():
     assert steps[2]["label"] == "GTA SA"
 
 
+def test_get_game_steps_minecraft_incy():
+    steps = get_game_steps("minecraft", "incy")
+    step_ids = [s["id"] for s in steps]
+    assert step_ids == ["incy_vpn", "antigravity", "game_minecraft"]
+    assert steps[0]["label"] == "INCY (VPN)"
+    assert steps[1]["label"] == "Antigravity"
+    assert steps[2]["label"] == "Minecraft"
+
+
+def test_get_game_steps_warcraft3_happ():
+    steps = get_game_steps("warcraft3", "happ")
+    step_ids = [s["id"] for s in steps]
+    assert step_ids == ["happ_vpn", "antigravity", "game_warcraft3"]
+    assert steps[0]["label"] == "Happ (VPN)"
+    assert steps[1]["label"] == "Antigravity"
+    assert steps[2]["label"] == "Warcraft 3"
+
+
 # ==============================================================================
 # PowerFlowManager Game Mode Tests
 # ==============================================================================
@@ -137,9 +155,19 @@ def test_bot_callback_flow_unlock_and_game():
     assert "Выберите игру" in sent_text
     sent_markup = ui.send_message.call_args[1].get("reply_markup")
     all_callbacks = [btn["callback_data"] for row in sent_markup["inline_keyboard"] for btn in row]
+    assert "flow_game:minecraft" in all_callbacks
+    assert "flow_game:warcraft3" in all_callbacks
     assert "flow_game:gta5" in all_callbacks
     assert "flow_game:roblox" in all_callbacks
     assert "flow_game:gtasa" in all_callbacks
+
+    # Verify custom emoji icons are attached to buttons
+    btn_by_cb = {btn["callback_data"]: btn for row in sent_markup["inline_keyboard"] for btn in row if "callback_data" in btn}
+    assert btn_by_cb["flow_game:minecraft"].get("icon_custom_emoji_id")
+    assert btn_by_cb["flow_game:warcraft3"].get("icon_custom_emoji_id")
+    assert btn_by_cb["flow_game:gta5"].get("icon_custom_emoji_id")
+    assert btn_by_cb["flow_game:roblox"].get("icon_custom_emoji_id")
+    assert btn_by_cb["flow_game:gtasa"].get("icon_custom_emoji_id")
 
 
 def test_bot_callback_flow_game_choice():

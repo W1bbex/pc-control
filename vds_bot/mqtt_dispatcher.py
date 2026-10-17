@@ -254,6 +254,10 @@ class MqttDispatcherMixin:
                             step_id = "game_roblox"
                         elif "gtasa" in an or "gta sa" in an or "san andreas" in an:
                             step_id = "game_gtasa"
+                        elif "minecraft" in an or "tlauncher" in an or "майн" in an:
+                            step_id = "game_minecraft"
+                        elif "warcraft" in an or "war3" in an or "frozen throne" in an:
+                            step_id = "game_warcraft3"
 
                     if step_id:
                         if state_val in {"verified", "already_running_verified", "ready", "vpn_connected"}:

@@ -260,6 +260,8 @@ class PowerFlowManager:
         elif getattr(self, "auto_launch_game", False):
             game = getattr(self, "target_game", None) or "Игра"
             game_map = {
+                "minecraft": "Minecraft",
+                "warcraft3": "Warcraft 3",
                 "gta5": "GTA 5 Legacy",
                 "roblox": "Roblox",
                 "gtasa": "GTA SA",

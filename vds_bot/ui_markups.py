@@ -314,32 +314,43 @@ class UiMarkupsMixin:
         }
 
     def game_choice_markup(self, prefix="flow_game"):
-        game_icon = ICONS.get("game")
         cross_icon = ICONS.get("cross")
         cancel_cb = "flow_unlock_no" if prefix == "flow_game" else "menu"
         return {
             "inline_keyboard": [
                 [
                     {
-                        "text": "🚗 GTA 5 Legacy",
+                        "text": "Minecraft",
                         "style": "primary",
-                        "icon_custom_emoji_id": game_icon,
-                        "callback_data": f"{prefix}:gta5",
+                        "icon_custom_emoji_id": ICONS.get("game_minecraft") or ICONS.get("game"),
+                        "callback_data": f"{prefix}:minecraft",
+                    },
+                    {
+                        "text": "Warcraft 3",
+                        "style": "primary",
+                        "icon_custom_emoji_id": ICONS.get("game_warcraft3") or ICONS.get("game"),
+                        "callback_data": f"{prefix}:warcraft3",
                     },
                 ],
                 [
                     {
-                        "text": "🟥 Roblox",
+                        "text": "GTA 5 Legacy",
                         "style": "primary",
-                        "icon_custom_emoji_id": game_icon,
+                        "icon_custom_emoji_id": ICONS.get("game_gta5") or ICONS.get("game"),
+                        "callback_data": f"{prefix}:gta5",
+                    },
+                    {
+                        "text": "Roblox",
+                        "style": "primary",
+                        "icon_custom_emoji_id": ICONS.get("game_roblox") or ICONS.get("game"),
                         "callback_data": f"{prefix}:roblox",
                     },
                 ],
                 [
                     {
-                        "text": "🚗 GTA SA",
+                        "text": "GTA SA",
                         "style": "primary",
-                        "icon_custom_emoji_id": game_icon,
+                        "icon_custom_emoji_id": ICONS.get("game_gtasa") or ICONS.get("game"),
                         "callback_data": f"{prefix}:gtasa",
                     },
                 ],
