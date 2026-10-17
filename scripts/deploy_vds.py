@@ -295,7 +295,11 @@ def deploy_and_verify(release_tag, remote_release_dir):
             rollback_to_previous()
             raise RuntimeError(f"Deployment failed post-check: service is {is_active}")
 
-        logs_res = run_ssh("journalctl -u pc-control-bot.service -n 25 --no-pager", check=False)
+        # Query MainPID to isolate logs to the current service process
+        pid_res = run_ssh("systemctl show pc-control-bot.service -p MainPID --value", check=False)
+        current_pid = pid_res.stdout.strip()
+        log_filter = f"_PID={current_pid}" if current_pid.isdigit() and int(current_pid) > 0 else ""
+        logs_res = run_ssh(f"journalctl -u pc-control-bot.service {log_filter} -n 35 --no-pager", check=False)
         recent_logs = logs_res.stdout
 
         if "Traceback (most recent call last):" in recent_logs:

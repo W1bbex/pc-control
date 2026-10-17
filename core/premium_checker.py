@@ -70,14 +70,16 @@ class PremiumChecker:
             self._save_cache()
         return is_premium
 
-    def get_cached_status(self, user_id: int) -> bool:
-        """Returns cached status if still valid; otherwise returns last known or False."""
+    def get_cached_status(self, user_id: int, allow_stale: bool = True) -> bool:
+        """Returns cached status if still valid; if allow_stale is True, returns last known value."""
         uid = int(user_id)
         with self._lock:
             entry = self._memory_cache.get(uid)
-            if entry and entry.get("expires_at", 0) > time.time():
+            if not entry:
+                return False
+            if entry.get("expires_at", 0) > time.time():
                 return bool(entry.get("is_premium", False))
-            if entry:
+            if allow_stale:
                 return bool(entry.get("is_premium", False))
         return False
 

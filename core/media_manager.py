@@ -603,12 +603,12 @@ class MediaManager:
                 current_pos = timeline.position.total_seconds() if timeline and timeline.position else 0.0
                 end_pos = timeline.end_time.total_seconds() if timeline and timeline.end_time else 300.0
                 target_pos = max(0.0, min(end_pos, current_pos + delta))
-                ticks = int(target_pos * 10_000_000)
+                from datetime import timedelta
                 try:
-                    return await session.try_change_playback_position_async(ticks)
-                except TypeError:
-                    from datetime import timedelta
                     return await session.try_change_playback_position_async(timedelta(seconds=target_pos))
+                except TypeError:
+                    ticks = int(target_pos * 10_000_000)
+                    return await session.try_change_playback_position_async(ticks)
             elif action == "wave":
                 # For Yandex Music: skip to next track in My Wave or play
                 return await session.try_skip_next_async()
@@ -724,4 +724,9 @@ class MediaManager:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        if hasattr(self, "_http_session") and self._http_session:
+            try:
+                self._http_session.close()
+            except Exception:
+                pass
         LOG.info("MediaManager stopped.")

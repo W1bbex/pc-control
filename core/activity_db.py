@@ -196,9 +196,13 @@ class ActivityDB:
 
 # Global singleton instance
 _GLOBAL_DB: Optional[ActivityDB] = None
+_GLOBAL_DB_LOCK = threading.Lock()
+
 
 def get_activity_db() -> ActivityDB:
     global _GLOBAL_DB
     if _GLOBAL_DB is None:
-        _GLOBAL_DB = ActivityDB()
+        with _GLOBAL_DB_LOCK:
+            if _GLOBAL_DB is None:
+                _GLOBAL_DB = ActivityDB()
     return _GLOBAL_DB

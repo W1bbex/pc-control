@@ -753,7 +753,7 @@ class PowerFlowManager:
                         card_message_id=self.message_id,
                         workspace_id=self.active_workspace_id,
                     )
-                return
+            return
 
         status_title = "<b>ℹ️ Windows разблокирована вручную.</b>" if manual else "<b>✅ Windows разблокирована!</b>"
         

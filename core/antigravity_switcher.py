@@ -300,7 +300,31 @@ class ProtobufHelper:
                         # Skip old matching entry
                         continue
                 filtered.extend(existing_raw[start_pos:end_pos])
+            elif wire_type == 0:
+                # Varint field
+                _, pos = cls.read_varint(existing_raw, pos)
+                filtered.extend(existing_raw[start_pos:pos])
+            elif wire_type == 1:
+                # 64-bit fixed field
+                pos += 8
+                if pos > len(existing_raw):
+                    break
+                filtered.extend(existing_raw[start_pos:pos])
+            elif wire_type == 2:
+                # Other length-delimited field
+                length, pos = cls.read_varint(existing_raw, pos)
+                pos += length
+                if pos > len(existing_raw):
+                    break
+                filtered.extend(existing_raw[start_pos:pos])
+            elif wire_type == 5:
+                # 32-bit fixed field
+                pos += 4
+                if pos > len(existing_raw):
+                    break
+                filtered.extend(existing_raw[start_pos:pos])
             else:
+                # Unknown wire type, cannot safely parse further
                 break
 
         new_entry = cls.create_unified_topic_entry(sentinel_key, new_payload)

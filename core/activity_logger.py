@@ -232,9 +232,12 @@ class ActivityTracker:
         if info.exe:
             fields["exe"] = info.exe
         if info.create_time:
-            fields["process_started"] = datetime.fromtimestamp(
-                info.create_time
-            ).astimezone().isoformat(timespec="milliseconds")
+            try:
+                fields["process_started"] = datetime.fromtimestamp(
+                    info.create_time
+                ).astimezone().isoformat(timespec="milliseconds")
+            except (OSError, OverflowError, ValueError):
+                pass
         return fields
 
     def run(self):

@@ -31,9 +31,14 @@ def _get_allowed_user_id(app) -> int:
 
 def route_message(app, message: dict) -> None:
     """Handle incoming Telegram text message or slash command."""
-    chat_id = message["chat"]["id"]
-    chat_type = message.get("chat", {}).get("type", "private")
-    from_id = message.get("from", {}).get("id")
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return
+    chat_id = chat.get("id")
+    if not chat_id:
+        return
+    chat_type = chat.get("type", "private")
+    from_id = message.get("from", {}).get("id") if isinstance(message.get("from"), dict) else None
     text = message.get("text", "").strip()
     allowed_id = _get_allowed_user_id(app)
 

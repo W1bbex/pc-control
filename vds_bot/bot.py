@@ -509,7 +509,11 @@ class PcControlBotApp(
                 for update in updates:
                     self.offset = int(update["update_id"]) + 1
                     if getattr(self, "async_dispatch", True) and hasattr(self, "_executor"):
-                        self._executor.submit(self._dispatch_update, update)
+                        try:
+                            self._executor.submit(self._dispatch_update, update)
+                        except RuntimeError:
+                            # Executor was shut down during service termination
+                            break
                     else:
                         self._dispatch_update(update)
                 self.save_state()

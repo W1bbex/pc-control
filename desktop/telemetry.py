@@ -184,6 +184,7 @@ class TelemetryMixin:
         import pythoncom
 
         pythoncom.CoInitialize()
+        endpoint = None
         try:
             from pycaw.pycaw import AudioUtilities
 
@@ -195,12 +196,14 @@ class TelemetryMixin:
         except Exception:
             return None
         finally:
+            endpoint = None
             pythoncom.CoUninitialize()
 
     def set_volume(self, percent=None, mute=None, toggle=False):
         import pythoncom
 
         pythoncom.CoInitialize()
+        endpoint = None
         try:
             from pycaw.pycaw import AudioUtilities
 
@@ -222,6 +225,7 @@ class TelemetryMixin:
                 "muted": bool(endpoint.GetMute()),
             }
         finally:
+            endpoint = None
             pythoncom.CoUninitialize()
 
     def network_rates(self):

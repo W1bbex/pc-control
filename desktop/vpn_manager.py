@@ -282,7 +282,8 @@ class VpnManagerMixin:
                 time.sleep(0.4)
 
                 happ_windows.clear()
-                user32.EnumWindows(EnumWindowsProc(_enum_cb), 0)
+                proc_cb2 = EnumWindowsProc(_enum_cb)
+                user32.EnumWindows(proc_cb2, 0)
                 if not happ_windows:
                     time.sleep(0.5)
                     continue
