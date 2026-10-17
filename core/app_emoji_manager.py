@@ -179,7 +179,10 @@ class AppEmojiManager:
                     return emoji_id
 
             except Exception as e:
-                LOG.warning("Exception adding emoji for %s (will negative cache for 60s): %s", exe_name, e)
+                err_msg = str(e)
+                if self.token and self.token in err_msg:
+                    err_msg = err_msg.replace(self.token, "[REDACTED]")
+                LOG.warning("Exception adding emoji for %s (will negative cache for 60s): %s", exe_name, err_msg)
                 self.cache[key] = {"emoji_id": None, "failed_at": time.time()}
                 self._save_cache()
 

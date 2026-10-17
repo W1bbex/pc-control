@@ -215,6 +215,13 @@ class WorkspaceRunnerMixin:
                     self.run_workspace_setup_steps(chat_id, card_message_id, workspace_id, vpn=selected_vpn)
                 else:
                     self.run_workspace_setup_steps(chat_id, card_message_id, workspace_id)
+            except Exception:
+                LOG.exception("Workspace setup runner crashed unexpectedly")
+                if hasattr(self, "power_flow") and self.power_flow:
+                    try:
+                        self.power_flow.reset_flow()
+                    except Exception:
+                        pass
             finally:
                 self._workspace_running = False
 
@@ -437,6 +444,13 @@ class WorkspaceRunnerMixin:
         def _runner():
             try:
                 self.run_game_setup_steps(chat_id, card_message_id, game=game, vpn=selected_vpn, workspace_id=workspace_id)
+            except Exception:
+                LOG.exception("Game setup runner crashed unexpectedly")
+                if hasattr(self, "power_flow") and self.power_flow:
+                    try:
+                        self.power_flow.reset_flow()
+                    except Exception:
+                        pass
             finally:
                 self._workspace_running = False
 

@@ -59,10 +59,7 @@ class UiMarkupsMixin:
         elif state_val in ("SHUTDOWN_OBSERVED", "UNREACHABLE", "OFFLINE") or sys_val == "offline":
             bottom_btn = {"text": "Включить ПК", "style": "success", "callback_data": "power_on"}
         else:
-            if sys_val == "offline":
-                bottom_btn = {"text": "Включить ПК", "style": "success", "callback_data": "power_on"}
-            else:
-                bottom_btn = {"text": "Выключить", "style": "danger", "callback_data": "shutdown_pc"}
+            bottom_btn = {"text": "Выключить", "style": "danger", "callback_data": "shutdown_pc"}
 
         buttons = [
             [{"text": "Питание", "style": "success", "callback_data": "power_menu", "icon_custom_emoji_id": EMOJI_BTN_POWER}],

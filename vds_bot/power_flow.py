@@ -748,11 +748,7 @@ class PowerFlowManager:
                             workspace_id=self.active_workspace_id,
                         )
                 except Exception:
-                    self.on_workspace_start_cb(
-                        chat_id,
-                        card_message_id=self.message_id,
-                        workspace_id=self.active_workspace_id,
-                    )
+                    LOG.exception("Failed to invoke on_workspace_start_cb")
             return
 
         status_title = "<b>ℹ️ Windows разблокирована вручную.</b>" if manual else "<b>✅ Windows разблокирована!</b>"

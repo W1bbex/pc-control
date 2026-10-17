@@ -516,12 +516,12 @@ class AntigravityAccountManager:
             score += min(elapsed_hours * 2.0, 20.0)
             return score
 
-        candidates.sort(key=score_account, reverse=True)
-        best = candidates[0]
-        # Only return if it actually has quota remaining
-        if best.get("min_quota", 0) > 0 or not best["is_active"]:
-            return best
-        return None
+        # Candidates must have remaining quota to be eligible fallback
+        viable = [acc for acc in candidates if acc.get("min_quota", 0) > 0]
+        if not viable:
+            return None
+        viable.sort(key=score_account, reverse=True)
+        return viable[0]
 
     # --- Token Refresh ---
 
@@ -832,9 +832,9 @@ class AntigravityAccountManager:
         finally:
             db_conn.close()
 
-        # 7. Relaunch IDE if requested or if it was running
+        # 7. Relaunch IDE only if requested and it was already running
         restarted = False
-        if restart_ide and (was_running or sys.platform == "win32"):
+        if restart_ide and was_running:
             restarted = self.launch_ide()
 
         return {

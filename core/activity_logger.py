@@ -168,6 +168,13 @@ class ActivityTracker:
     def _foreground(self, processes):
         user32 = ctypes.windll.user32
         user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             return {"hwnd": 0, "pid": 0, "process": None, "title": None}

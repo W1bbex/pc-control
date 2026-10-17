@@ -674,35 +674,41 @@ class StealthManager:
     def deactivate(self) -> bool:
         """Gracefully stop the background stealth overlay process."""
         with self._lock:
-            if self._process is None or self._process.poll() is not None:
-                self._process = None
-                return True
-
-            try:
-                # Send 'stop\n' to stdin and close pipe
-                if self._process.stdin:
-                    try:
-                        self._process.stdin.write(b"stop\n")
-                        self._process.stdin.flush()
-                    except Exception:
-                        pass
-                    try:
-                        self._process.stdin.close()
-                    except Exception:
-                        pass
-                self._process.wait(timeout=2.0)
-            except Exception:
+            if self._process is not None and self._process.poll() is None:
                 try:
-                    self._process.terminate()
-                    self._process.wait(timeout=1.0)
+                    # Send 'stop\n' to stdin and close pipe
+                    if self._process.stdin:
+                        try:
+                            self._process.stdin.write(b"stop\n")
+                            self._process.stdin.flush()
+                        except Exception:
+                            pass
+                        try:
+                            self._process.stdin.close()
+                        except Exception:
+                            pass
+                    self._process.wait(timeout=2.0)
                 except Exception:
                     try:
-                        self._process.kill()
+                        self._process.terminate()
                         self._process.wait(timeout=1.0)
                     except Exception:
-                        pass
+                        try:
+                            self._process.kill()
+                            self._process.wait(timeout=1.0)
+                        except Exception:
+                            pass
 
             self._process = None
+
+            if sys.platform == "win32":
+                try:
+                    user32.ClipCursor(None)
+                    while user32.ShowCursor(True) < 0:
+                        pass
+                except Exception:
+                    pass
+
             LOG.info("Stealth mode process stopped.")
             return True
 

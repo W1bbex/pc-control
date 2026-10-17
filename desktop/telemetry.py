@@ -175,8 +175,11 @@ class TelemetryMixin:
                 "clock_mhz": optional_number(values[7]),
                 "memory_clock_mhz": optional_number(values[8]),
             }
-        except Exception:
-            LOG.exception("Could not query NVIDIA GPU")
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+            LOG.debug("NVIDIA GPU query not available: %s", e)
+            return None
+        except Exception as e:
+            LOG.warning("Could not query NVIDIA GPU: %s", e)
             return None
 
     @staticmethod
@@ -419,8 +422,9 @@ class TelemetryMixin:
         return processes[:10]
 
     def publish_telemetry(self):
+        telemetry = self.collect_telemetry()
         with self.state_lock:
-            telemetry = self.collect_telemetry()
+            self.last_telemetry = telemetry
             payload = json.dumps(telemetry, ensure_ascii=False)
         self.mqtt.publish(
             TOPIC_TELEMETRY,
