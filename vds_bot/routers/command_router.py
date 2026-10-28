@@ -260,6 +260,11 @@ def route_message(app, message: dict) -> None:
                 from vds_bot.routers.monitoring_router import LED_WHITE_PRESETS
         if arg in LED_WHITE_PRESETS:
             rgb, name = LED_WHITE_PRESETS[arg]
+            app.user_led_state = "on"
+            app.last_auto_led_state = "on"
+            app.user_led_color = rgb
+            if hasattr(app, "save_state"):
+                app.save_state()
             app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
             app.ui.send_message(chat_id, f"💡 Выбран оттенок #{arg}: {name} (<code>{rgb}</code>)")
             return
@@ -268,7 +273,14 @@ def route_message(app, message: dict) -> None:
         if getattr(app.mqtt, "esp_status", None) != "online":
             app.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
             return
-        app.mqtt.publish_esp_action("LED_ON")
+        app.user_led_state = "on"
+        app.last_auto_led_state = "on"
+        if hasattr(app, "save_state"):
+            app.save_state()
+        if getattr(app, "user_led_color", None):
+            app.mqtt.publish_esp_action("LED_COLOR", value=app.user_led_color)
+        else:
+            app.mqtt.publish_esp_action("LED_ON")
         app.ui.send_message(chat_id, "💡 Подсветка кулера включена")
         return
 
@@ -276,6 +288,10 @@ def route_message(app, message: dict) -> None:
         if getattr(app.mqtt, "esp_status", None) != "online":
             app.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
             return
+        app.user_led_state = "off"
+        app.last_auto_led_state = "off"
+        if hasattr(app, "save_state"):
+            app.save_state()
         app.mqtt.publish_esp_action("LED_OFF")
         app.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
         return

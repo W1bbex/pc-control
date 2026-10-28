@@ -75,9 +75,18 @@ class MqttDispatcherMixin:
                 LOG.info("Auto-LED: ESP reconnected (status=%s, prev=%s, pc_online=%s)", esp_status, prev_esp_status, pc_online)
                 if pc_online:
                     if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_ON"):
+                        if getattr(self, "user_led_state", "on") != "off":
+                            color = getattr(self, "user_led_color", None)
+                            if color:
+                                self.mqtt.publish_esp_action("LED_COLOR", value=color)
+                            else:
+                                self.mqtt.publish_esp_action("LED_ON")
                             self.last_auto_led_state = "on"
-                            LOG.info("Auto-LED: ESP reconnected while PC is online -> resynced LED_ON to cooler")
+                            LOG.info("Auto-LED: ESP reconnected while PC is online -> resynced LED to cooler")
+                        else:
+                            if self.mqtt.publish_esp_action("LED_OFF"):
+                                self.last_auto_led_state = "off"
+                                LOG.info("Auto-LED: ESP reconnected while PC online, but user_led_state=off -> LED_OFF sent to cooler")
                 else:
                     if hasattr(self.mqtt, "publish_esp_action"):
                         if self.mqtt.publish_esp_action("LED_OFF"):
@@ -89,11 +98,20 @@ class MqttDispatcherMixin:
                         if self.mqtt.publish_esp_action("LED_OFF"):
                             self.last_auto_led_state = "off"
                             LOG.info("Auto-LED: PC went offline/asleep (sys=%s, desk=%s, sess=%s) -> LED_OFF sent to cooler", sys_status, desk_status, session)
-                elif pc_online and getattr(self, "last_auto_led_state", None) != "on":
+                elif pc_online and getattr(self, "user_led_state", "on") != "off" and getattr(self, "last_auto_led_state", None) != "on":
                     if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_ON"):
-                            self.last_auto_led_state = "on"
-                            LOG.info("Auto-LED: PC came online/awake (sys=%s, desk=%s, sess=%s) -> LED_ON sent to cooler", sys_status, desk_status, session)
+                        color = getattr(self, "user_led_color", None)
+                        if color:
+                            self.mqtt.publish_esp_action("LED_COLOR", value=color)
+                        else:
+                            self.mqtt.publish_esp_action("LED_ON")
+                        self.last_auto_led_state = "on"
+                        LOG.info("Auto-LED: PC came online/awake (sys=%s, desk=%s, sess=%s) -> LED sent to cooler", sys_status, desk_status, session)
+                elif pc_online and getattr(self, "user_led_state", "on") == "off" and getattr(self, "last_auto_led_state", None) != "off":
+                    if hasattr(self.mqtt, "publish_esp_action"):
+                        if self.mqtt.publish_esp_action("LED_OFF"):
+                            self.last_auto_led_state = "off"
+                            LOG.info("Auto-LED: PC came online/awake, but user_led_state=off -> enforced LED_OFF")
 
         elif event_type == "graceful_shutdown":
             LOG.info("Graceful shutdown event received from Windows: %s", data)
@@ -362,8 +380,21 @@ class MqttDispatcherMixin:
                     if result == "executed" and isinstance(ack_data, dict):
                         cnt = ack_data.get("accounts_count", 0)
                         self.ui.send_message(req_chat_id, f"📦 <b>Экспорт выполнен успешно:</b> {cnt} аккаунтов сохранены в портативный формат.")
+                elif action_kind in ("heal", "fix"):
+                    if result == "executed" and isinstance(ack_data, dict):
+                        srv = ack_data.get("server", "—")
+                        lat = ack_data.get("latency", 0)
+                        lat_str = f" ({lat}ms)" if lat else ""
+                        msg = (
+                            f"🌐 <b>Antigravity & VPN успешно восстановлены!</b>\n"
+                            f"├ Сервер INCY: <b>{srv}</b>{lat_str}\n"
+                            f"├ Google HTTPS: <b>Доступен</b>\n"
+                            f"└ Antigravity IDE: <b>Перезапущена</b>"
+                        )
+                        self.ui.send_message(req_chat_id, msg)
                     else:
-                        self.ui.send_message(req_chat_id, "❌ Ошибка экспорта профилей.")
+                        err = (ack_data or {}).get("error", "Не удалось восстановить доступ к Google через VPN")
+                        self.ui.send_message(req_chat_id, f"❌ Ошибка лечения Antigravity: {err}")
 
         elif event_type == "media_status":
             self.latest_media_state = data

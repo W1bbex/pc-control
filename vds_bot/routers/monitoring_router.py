@@ -211,23 +211,50 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             return True
         action = data.split(":", 1)[1]
         if action == "on":
-            app.mqtt.publish_esp_action("LED_ON")
+            app.user_led_state = "on"
+            app.last_auto_led_state = "on"
+            if hasattr(app, "save_state"):
+                app.save_state()
+            if getattr(app, "user_led_color", None):
+                app.mqtt.publish_esp_action("LED_COLOR", value=app.user_led_color)
+            else:
+                app.mqtt.publish_esp_action("LED_ON")
             app.ui.answer_callback(callback_id, "💡 Подсветка включена")
         elif action == "off":
+            app.user_led_state = "off"
+            app.last_auto_led_state = "off"
+            if hasattr(app, "save_state"):
+                app.save_state()
             app.mqtt.publish_esp_action("LED_OFF")
             app.ui.answer_callback(callback_id, "🌑 Подсветка выключена")
         elif action.startswith("bright:"):
             level = action.split(":", 1)[1]
+            try:
+                app.user_led_brightness = int(level)
+            except Exception:
+                pass
+            if hasattr(app, "save_state"):
+                app.save_state()
             app.mqtt.publish_esp_action("LED_BRIGHTNESS", value=level)
             app.ui.answer_callback(callback_id, f"🔆 Яркость: {level}")
         elif action.startswith("color:"):
             rgb = action.split(":", 1)[1]
+            app.user_led_state = "on"
+            app.last_auto_led_state = "on"
+            app.user_led_color = rgb
+            if hasattr(app, "save_state"):
+                app.save_state()
             app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
             app.ui.answer_callback(callback_id, "🎨 Оттенок изменён")
         elif action.startswith("preset:"):
             preset_id = action.split(":", 1)[1]
             if preset_id in LED_WHITE_PRESETS:
                 rgb, name = LED_WHITE_PRESETS[preset_id]
+                app.user_led_state = "on"
+                app.last_auto_led_state = "on"
+                app.user_led_color = rgb
+                if hasattr(app, "save_state"):
+                    app.save_state()
                 app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
                 app.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
             else:

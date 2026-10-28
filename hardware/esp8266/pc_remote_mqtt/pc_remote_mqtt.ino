@@ -3,6 +3,7 @@
 #include <PubSubClient.h>
 #include <time.h>
 #include <EEPROM.h>
+#include <stddef.h>
 
 #include "secrets.h"
 #include <Adafruit_NeoPixel.h>
@@ -171,7 +172,7 @@ char attemptBuffer[PASSWORD_MAX_STEPS];
 uint8_t physicalChecksum(const struct PhysicalConfig& config) {
   const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&config);
   uint8_t value = 0;
-  for (size_t i = 0; i < sizeof(PhysicalConfig) - 1; ++i) value ^= bytes[i];
+  for (size_t i = 0; i < offsetof(PhysicalConfig, checksum); ++i) value ^= bytes[i];
   return value;
 }
 
@@ -192,6 +193,62 @@ void loadPhysicalConfig() {
     savePhysicalConfig();
   }
 }
+
+static const uint32_t LED_CONFIG_MAGIC = 0x4C454431;
+static const int EEPROM_LED_OFFSET = 32;
+
+struct __attribute__((packed)) LedConfig {
+  uint32_t magic;
+  uint8_t enabled;
+  uint8_t brightness;
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+  uint8_t checksum;
+};
+LedConfig ledConfig;
+
+uint8_t ledChecksum(const struct LedConfig& config) {
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&config);
+  uint8_t value = 0;
+  for (size_t i = 0; i < offsetof(LedConfig, checksum); ++i) value ^= bytes[i];
+  return value;
+}
+
+void saveLedConfig() {
+  ledConfig.checksum = ledChecksum(ledConfig);
+  EEPROM.put(EEPROM_LED_OFFSET, ledConfig);
+  EEPROM.commit();
+}
+
+void loadLedConfig() {
+  EEPROM.get(EEPROM_LED_OFFSET, ledConfig);
+  if (ledConfig.magic != LED_CONFIG_MAGIC ||
+      ledConfig.checksum != ledChecksum(ledConfig)) {
+    ledConfig.magic = LED_CONFIG_MAGIC;
+    ledConfig.enabled = 0;
+    ledConfig.brightness = 160;
+    ledConfig.r = 255;
+    ledConfig.g = 150;
+    ledConfig.b = 125;
+    saveLedConfig();
+  }
+  argbBrightness = ledConfig.brightness;
+  argbR = ledConfig.r;
+  argbG = ledConfig.g;
+  argbB = ledConfig.b;
+  argbEnabled = (ledConfig.enabled == 1);
+  if (argbEnabled) {
+    applyArgbColor(argbR, argbG, argbB);
+  } else {
+    strip.clear();
+    strip.show();
+  }
+}
+
+bool physicalTestMode = false;
+unsigned long physicalTestStartedMs = 0;
+static const unsigned long PHYSICAL_TEST_TIMEOUT_MS = 120000;
 
 void publishPhysicalEvent(const char* event, const unsigned long durationMs = 0) {
   char payload[160];
@@ -255,7 +312,6 @@ void relayOff() {
 void pressRelay() {
   digitalWrite(RELAY_PIN, RELAY_ON);
   relayOnUntilMs = millis() + RELAY_PRESS_MS;
-  setArgbWhite();
 }
 
 void forcePowerOff() {
@@ -349,6 +405,13 @@ void processPhysicalSymbol(const char symbol, const unsigned long evtTime) {
 
 void updatePhysicalAttempt() {
   const unsigned long nowMs = millis();
+  if (physicalTestMode) {
+    if (nowMs - physicalTestStartedMs >= PHYSICAL_TEST_TIMEOUT_MS) {
+      physicalTestMode = false;
+    }
+    return;
+  }
+
   if (physicalRecording) {
     if (recordedPasswordLength && nowMs - recordingLastEventMs >= SUCCESS_QUIET_MS) {
       physicalRecording = false;
@@ -420,7 +483,9 @@ void processInterruptQueue() {
             buttonIsPressed = false;
             unsigned long durationMs = evtTime - buttonPressedAtMs;
             publishPhysicalButtonPress(durationMs);
-            processPhysicalSymbol(durationMs >= HOLD_THRESHOLD_MS ? 'H' : 'C', evtTime);
+            if (!physicalTestMode) {
+              processPhysicalSymbol(durationMs >= HOLD_THRESHOLD_MS ? 'H' : 'C', evtTime);
+            }
           }
         }
       }
@@ -531,6 +596,14 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     physicalRecording = true; recordedPasswordLength = 0; recordingLastEventMs = 0; recordingStartedMs = millis(); resetPhysicalAttempt();
     lastCommandId = id; publishAck(id, "executed"); return;
   }
+  if (action == "START_PHYSICAL_TEST") {
+    physicalTestMode = true; physicalTestStartedMs = millis(); resetPhysicalAttempt();
+    lastCommandId = id; publishAck(id, "executed"); return;
+  }
+  if (action == "STOP_PHYSICAL_TEST") {
+    physicalTestMode = false; resetPhysicalAttempt();
+    lastCommandId = id; publishAck(id, "executed"); return;
+  }
 
   if (action == "PING") {
     lastCommandId = id;
@@ -539,6 +612,8 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
   }
 
   if (action == "LED_ON") {
+    ledConfig.enabled = 1;
+    saveLedConfig();
     setArgbWhite();
     lastCommandId = id;
     publishAck(id, "executed");
@@ -546,6 +621,8 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
   }
 
   if (action == "LED_OFF") {
+    ledConfig.enabled = 0;
+    saveLedConfig();
     setArgbOff();
     lastCommandId = id;
     publishAck(id, "executed");
@@ -556,6 +633,8 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     int b = value.toInt();
     if (b > 0 && b <= 255) {
       argbBrightness = (uint8_t)b;
+      ledConfig.brightness = argbBrightness;
+      saveLedConfig();
       if (argbEnabled) setArgbWhite();
       lastCommandId = id;
       publishAck(id, "executed");
@@ -573,6 +652,14 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
       uint8_t r = (uint8_t)value.substring(0, firstComma).toInt();
       uint8_t g = (uint8_t)value.substring(firstComma + 1, secondComma).toInt();
       uint8_t b = (uint8_t)value.substring(secondComma + 1).toInt();
+      argbR = r;
+      argbG = g;
+      argbB = b;
+      ledConfig.r = r;
+      ledConfig.g = g;
+      ledConfig.b = b;
+      ledConfig.enabled = 1;
+      saveLedConfig();
       applyArgbColor(r, g, b);
       argbEnabled = true;
       lastCommandId = id;
@@ -696,8 +783,8 @@ void setup() {
   pinMode(PHYSICAL_BUTTON_PIN, INPUT_PULLUP);
 
   strip.begin();
-  setArgbOff();
   loadPhysicalConfig();
+  loadLedConfig();
   buttonStableState = digitalRead(PHYSICAL_BUTTON_PIN);
   
   attachInterrupt(digitalPinToInterrupt(PHYSICAL_BUTTON_PIN), physicalButtonISR, CHANGE);
@@ -742,7 +829,7 @@ void loop() {
   updatePhysicalAttempt();
 
   static unsigned long lastLedRefreshMs = 0;
-  if (argbEnabled && nowMs - lastLedRefreshMs >= 2000) {
+  if (argbEnabled && nowMs - lastLedRefreshMs >= 30000) {
     lastLedRefreshMs = nowMs;
     setArgbWhite();
   }

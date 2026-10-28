@@ -659,3 +659,68 @@ def test_led_action_rejects_when_esp_offline():
     )
 
 
+def test_esp_reconnect_respects_user_led_state_off():
+    from bot import PcControlBotApp
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = MagicMock()
+    app.mqtt = MagicMock()
+    app.mqtt.system_status = "online"
+    app.mqtt.desktop_status = "online"
+    app.mqtt.system_session = "unlocked"
+    app.mqtt.esp_status = "offline"
+    app.power_flow = MagicMock()
+    app.monitoring = MagicMock()
+    app.physical_btn = MagicMock()
+    app._check_shutdown_confirmation = MagicMock()
+
+    app.user_led_state = "off"
+    app.last_esp_status = "offline"
+    app.last_auto_led_state = None
+
+    data = {
+        "esp_status": "online",
+        "system_status": "online",
+        "desktop_status": "online",
+        "session": "unlocked",
+    }
+    app._on_mqtt_event("health_update", data)
+
+    # When user_led_state is "off", reconnect MUST send LED_OFF, not LED_ON
+    app.mqtt.publish_esp_action.assert_called_with("LED_OFF")
+    assert app.last_auto_led_state == "off"
+
+
+def test_power_scheduler_watchdog_enforces_user_led_state_off():
+    from bot import PcControlBotApp
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = MagicMock()
+    app.mqtt = MagicMock()
+    app.mqtt.system_status = "online"
+    app.mqtt.desktop_status = "online"
+    app.mqtt.system_session = "unlocked"
+    app.monitoring = MagicMock()
+    app.monitoring.telemetry_age.return_value = 5.0
+    app.power_flow = MagicMock()
+    app.pending_screenshots = {}
+    app.pending_telemetry_cmd_ids = {}
+    app.pending_antigravity_cmd_ids = {}
+    app.pending_cmd_timestamps = {}
+    app._check_dashboard_auto_refresh = MagicMock()
+
+    # User explicitly wants LED off
+    app.user_led_state = "off"
+    app.last_auto_led_state = "on"  # cached previous state
+
+    app.scheduler_tick(time.time())
+
+    # Watchdog must enforce LED_OFF and update last_auto_led_state
+    app.mqtt.publish_esp_action.assert_called_with("LED_OFF")
+    assert app.last_auto_led_state == "off"
+
+    # Subsequent tick with last_auto_led_state == "off" must NOT send any commands
+    app.mqtt.publish_esp_action.reset_mock()
+    app.scheduler_tick(time.time())
+    app.mqtt.publish_esp_action.assert_not_called()
+
+
+
