@@ -172,6 +172,7 @@ class PowerFlowManager:
         self.win_online_at = None
         self.logon_ready_at = None
         self.unlocked_at = None
+        self.selecting_mode = False
         if FLOW_STATE_PATH.exists():
             try:
                 FLOW_STATE_PATH.unlink()
@@ -246,8 +247,14 @@ class PowerFlowManager:
             self.logon_ready_at = None
             self.unlocked_at = None
 
-            # Send LED command via ESP
-            self.mqtt.publish_esp_action("LED_ON")
+            # Send LED command via ESP if enabled by user
+            led_state = getattr(getattr(self, "app", None), "user_led_state", "on")
+            if led_state != "off":
+                user_color = getattr(getattr(self, "app", None), "user_led_color", None)
+                if user_color:
+                    self.mqtt.publish_esp_action("LED_COLOR", value=user_color)
+                else:
+                    self.mqtt.publish_esp_action("LED_ON")
 
         self._update_launch_card(force=True, is_initial=True)
         self.save_state()
@@ -276,6 +283,8 @@ class PowerFlowManager:
 
     def _update_launch_card(self, force=False, is_initial=False, chat_id=None):
         if self.stage not in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
+            return
+        if getattr(self, "selecting_mode", False):
             return
         cid = chat_id or self.chat_id
         if not cid:

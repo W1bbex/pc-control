@@ -173,6 +173,7 @@ def test_1_progress_ack_driven_workspace():
         ("yandex_music", "YandexMusic"),
         ("dolphin", "Dolphin"),
         ("chrome", "Chrome"),
+        ("chatgpt", "ChatGPT"),
     ]:
         app._on_mqtt_event("ack", {
             "id": cmd_id,
@@ -206,7 +207,7 @@ def test_1_progress_ack_driven_workspace():
     app._on_mqtt_event("ack", {
         "id": cmd_id,
         "result": "executed",
-        "data": {"desktop_minimized": True}
+        "data": {"desktop_minimized": False}
     })
 
     time.sleep(0.2)
@@ -395,7 +396,7 @@ def test_5_minimize_all_ack_failure_handling():
 
     cmd_id = mqtt.published_messages[0][3]
     # Set all steps to verified
-    for step_id in ["telegram", "yandex_music", "dolphin", "chrome", "happ_vpn", "antigravity"]:
+    for step_id in ["telegram", "yandex_music", "dolphin", "chrome", "happ_vpn", "antigravity", "chatgpt"]:
         app._on_mqtt_event("ack", {"id": cmd_id, "result": "progress", "data": {"step_id": step_id, "state": "verified"}})
     app._on_mqtt_event("ack", {"id": cmd_id, "result": "executed", "data": {}})
 

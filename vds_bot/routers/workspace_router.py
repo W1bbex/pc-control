@@ -77,6 +77,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
     # 3. Unlock Flow Decisions
     if data == "flow_unlock_and_workspace":
         app.ui.answer_callback(callback_id)
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = True
         text = "<b>🌐 Выберите VPN для рабочего сетапа:</b>\n\nСетап и VPN запустятся автоматически сразу после разблокировки ПК."
         markup = app.ui.workspace_vpn_choice_markup(active_vpn=getattr(app, "chosen_vpn", "incy"), prefix="flow_workspace_vpn")
         app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
@@ -87,23 +89,31 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         app.chosen_vpn = selected_vpn
         vpn_name = "INCY" if selected_vpn == "incy" else "Happ"
         app.ui.answer_callback(callback_id, f"🚀 Сетап ({vpn_name} VPN) запланирован!")
-        app.power_flow.chat_id = chat_id
-        app.power_flow.message_id = message_id
-        app.power_flow.set_auto_launch_workspace(True, vpn=selected_vpn, chat_id=chat_id)
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = False
+            app.power_flow.chat_id = chat_id
+            app.power_flow.message_id = message_id
+            app.power_flow.set_auto_launch_workspace(True, vpn=selected_vpn, chat_id=chat_id)
         return True
 
     if data in {"flow_unlock_yes", "flow_unlock_no"}:
         app.ui.answer_callback(callback_id)
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = False
         app.power_flow.handle_unlock_decision(data, chat_id)
         return True
 
     if data == "flow_unlock_retry":
         app.ui.answer_callback(callback_id, "Повторяю разблокировку...")
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = False
         app.power_flow.handle_unlock_retry(chat_id)
         return True
 
     if data == "flow_unlock_cancel":
         app.ui.answer_callback(callback_id)
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = False
         app.power_flow.handle_unlock_cancel(chat_id)
         return True
 
@@ -111,6 +121,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
     if data == "flow_unlock_and_game":
         app.current_menu_view = "game_menu"
         app.ui.answer_callback(callback_id)
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = True
         game_icon = ICONS.get("game")
         game_tag = f'<tg-emoji emoji-id="{game_icon}">🎮</tg-emoji> ' if game_icon else ""
         text = f"<b>{game_tag}Выберите игру для запуска:</b>\n\nИгра и VPN запустятся автоматически после разблокировки ПК."
@@ -120,6 +132,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
 
     if data.startswith("flow_game:"):
         app.current_menu_view = "game_menu"
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = True
         game_key = data.split(":", 1)[1]
         g_info = GAME_INFO.get(game_key, {})
         game_name = g_info.get("name", game_key)
@@ -139,9 +153,11 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         game_name = g_info.get("name", game_key)
         vpn_name = "INCY" if selected_vpn == "incy" else "Happ"
         app.ui.answer_callback(callback_id, f"{game_name} ({vpn_name} VPN) запланирована!")
-        app.power_flow.chat_id = chat_id
-        app.power_flow.message_id = message_id
-        app.power_flow.set_auto_launch_game(game=game_key, vpn=selected_vpn, chat_id=chat_id)
+        if hasattr(app, "power_flow"):
+            app.power_flow.selecting_mode = False
+            app.power_flow.chat_id = chat_id
+            app.power_flow.message_id = message_id
+            app.power_flow.set_auto_launch_game(game=game_key, vpn=selected_vpn, chat_id=chat_id)
         return True
 
     if data == "game_start_direct":
@@ -319,6 +335,49 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         return True
 
     # 6. Single App Launch
+    if data == "codex_diagnostics":
+        app.ui.answer_callback(callback_id)
+        icon = ICONS.get("app_chatgpt") or ICONS.get("apps")
+        markup = {"inline_keyboard": [
+            [{"text": "1 · Напрямую", "style": "primary", "icon_custom_emoji_id": icon, "callback_data": "codex_test:1"}],
+            [{"text": "2 · Ярлык через Проводник", "style": "primary", "icon_custom_emoji_id": icon, "callback_data": "codex_test:2"}],
+            [{"text": "3 · Приложение Windows", "style": "primary", "icon_custom_emoji_id": icon, "callback_data": "codex_test:3"}],
+            app.ui.back_button("apps_menu"),
+        ]}
+        app.ui.send_message(chat_id, "<b>Проверка запуска Codex</b>\n\nЗакрой Codex полностью и выбери вариант. Проверка займёт до 15 секунд.", reply_markup=markup, message_id=message_id)
+        return True
+
+    if data in {"codex_test:1", "codex_test:2", "codex_test:3"}:
+        if getattr(app.mqtt, "desktop_status", None) != "online":
+            app.ui.answer_callback(callback_id, "ПК заблокирован или выключен.", alert=True)
+            return True
+        variant = data.rsplit(":", 1)[1]
+        command_id = app.mqtt.publish_desktop_action("diagnose_codex_launch", {"variant": variant}, timeout=40)
+        app.ui.answer_callback(callback_id, "Проверяю запуск..." if command_id else "Агент недоступен", alert=not bool(command_id))
+        return True
+
+    if data == "app:Happ":
+        if getattr(app.mqtt, "desktop_status", None) != "online":
+            app.ui.answer_callback(callback_id, "ПК заблокирован или выключен.", alert=True)
+            return True
+        app.ui.answer_callback(callback_id)
+        markup = {"inline_keyboard": [
+            [{"text": "Открыть и подключить VPN", "style": "success", "icon_custom_emoji_id": ICONS.get("app_happ"), "callback_data": "happ_launch:connect"}],
+            [{"text": "Только открыть Happ", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_happ"), "callback_data": "happ_launch:open"}],
+            app.ui.back_button("apps_menu"),
+        ]}
+        app.ui.send_message(chat_id, "<b>Запуск Happ</b>\n\nПодключить VPN или только открыть приложение?", reply_markup=markup, message_id=message_id)
+        return True
+
+    if data in {"happ_launch:connect", "happ_launch:open"}:
+        if getattr(app.mqtt, "desktop_status", None) != "online":
+            app.ui.answer_callback(callback_id, "ПК заблокирован или выключен.", alert=True)
+            return True
+        connect = data == "happ_launch:connect"
+        app.ui.answer_callback(callback_id, "Запускаю Happ...")
+        app.mqtt.publish_desktop_action("launch_app", {"app": "Happ", "connect_vpn": connect})
+        return True
+
     if data.startswith("app:"):
         app_name = data.split(":", 1)[1]
         if getattr(app.mqtt, "desktop_status", None) != "online":

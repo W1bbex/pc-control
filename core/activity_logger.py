@@ -125,6 +125,7 @@ class ActivityTracker:
         self.thread.start()
 
     def stop(self):
+        self.stop_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=max(2, self.poll_seconds * 2))
         self.recorder.close()

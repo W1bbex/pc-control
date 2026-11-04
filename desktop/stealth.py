@@ -48,6 +48,7 @@ class StealthMixin:
             LOG.info("Minimizing windows via Win+M fallback (Pass 3)...")
             pyautogui.hotkey("win", "m")
         finally:
+            shell = None
             if com_initialized:
                 pythoncom.CoUninitialize()
         LOG.info("Minimized all windows after workspace launch (completed 3 passes)")

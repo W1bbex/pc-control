@@ -191,6 +191,7 @@ class PcControlBotApp(
             on_event_callback=self._on_mqtt_event,
         )
         self.power_flow = PowerFlowManager(self.ui, self.mqtt)
+        self.power_flow.app = self
         self.physical_btn = PhysicalButtonManager(self.ui, self.mqtt)
         self.monitoring = MonitoringManager(self.ui, self.mqtt)
         self.monitoring.is_shutting_down = lambda: bool(
@@ -210,6 +211,7 @@ class PcControlBotApp(
         self.workspace_executed_event = threading.Event()
         self.minimize_ack_event = threading.Event()
         self.workspace_execution_result = None
+        self.workspace_execution_data = {}
         self.minimize_ack_result = None
         self.pending_screenshots = {}
         self.pending_telemetry_cmd_ids = {}
@@ -241,6 +243,9 @@ class PcControlBotApp(
         self.last_dashboard_auto_refresh = 0.0
         self.last_esp_status = None
         self.last_auto_led_state = None
+        self.user_led_state = "on"
+        self.user_led_color = "255,150,125"
+        self.user_led_brightness = 160
 
         self.console_active_chat_id = None
         self.console_target = "desktop"
@@ -363,6 +368,9 @@ class PcControlBotApp(
                     self.current_menu_view = data.get("current_menu_view", "main")
                     self.console_target = data.get("console_target", "desktop")
                     self.console_shell = data.get("console_shell", "powershell")
+                    self.user_led_state = data.get("user_led_state", "on")
+                    self.user_led_color = data.get("user_led_color", "255,150,125")
+                    self.user_led_brightness = int(data.get("user_led_brightness", 160))
             except Exception:
                 LOG.exception("Could not load state.json")
 
@@ -396,6 +404,9 @@ class PcControlBotApp(
                     "current_menu_view": getattr(self, "current_menu_view", "main"),
                     "console_target": getattr(self, "console_target", "desktop"),
                     "console_shell": getattr(self, "console_shell", "powershell"),
+                    "user_led_state": getattr(self, "user_led_state", "on"),
+                    "user_led_color": getattr(self, "user_led_color", "255,150,125"),
+                    "user_led_brightness": getattr(self, "user_led_brightness", 160),
                 }
                 temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
                 os.chmod(temp, 0o600)
@@ -448,6 +459,11 @@ class PcControlBotApp(
         new_view = resolve_menu_view(data)
         if new_view is not None:
             self.current_menu_view = new_view
+
+        if getattr(getattr(self, "physical_btn", None), "mode", None) == "test" and data != "physical_test":
+            if hasattr(self.mqtt, "publish_esp_action"):
+                self.mqtt.publish_esp_action("STOP_PHYSICAL_TEST")
+            self.physical_btn.mode = None
 
         # Modular Router Delegation
         if route_power_callback(self, data, chat_id, message_id, callback_id):
@@ -636,6 +652,7 @@ class PcControlBotApp(
                     "commands": [
                         {"command": "menu", "description": "🖥 Главное меню"},
                         {"command": "player", "description": "🎵 Музыкальный плеер"},
+                        {"command": "fix_ag", "description": "🌐 Сменить VPN и перезапустить Antigravity"},
                         {"command": "stealth", "description": "🕶️ Режим скрытности (Blackout)"},
                         {"command": "activity", "description": "📊 Активность за день"},
                         {"command": "antigravity", "description": "🔮 Профили Antigravity"},

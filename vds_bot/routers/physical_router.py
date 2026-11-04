@@ -11,6 +11,8 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
     # 1. Physical Button Menu
     if data == "physical_button":
         app.ui.answer_callback(callback_id)
+        if getattr(app.physical_btn, "mode", None) == "test":
+            app.mqtt.publish_esp_action("STOP_PHYSICAL_TEST")
         app.physical_btn.mode = None
         app.physical_btn.active_message_id = None
         app.physical_btn.input_message_id = None
@@ -24,6 +26,7 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
         app.ui.answer_callback(callback_id)
         app.physical_btn.mode = "test"
         app.physical_btn.input_entries = ["Ожидаю нажатия на кнопку..."]
+        app.mqtt.publish_esp_action("START_PHYSICAL_TEST")
         text = "<b>🕹 Физическая кнопка — диагностика</b>\n\nОжидаю нажатия..."
         res = app.ui.send_message(
             chat_id,

@@ -87,7 +87,7 @@ def test_launch_card_markup_hero_layout_and_emergency():
     markup_delayed = ui.launch_card_markup(stage='POWERING_ON', target_mode=None, show_emergency=True)
     rows_delayed = markup_delayed['inline_keyboard']
     assert len(rows_delayed) == 4
-    assert rows_delayed[3][0]['text'] == '⚡ Аварийное выключение'
+    assert rows_delayed[3][0]['text'] == 'Аварийное выключение'
     assert rows_delayed[3][0]['style'] == 'danger'
     assert rows_delayed[3][0]['callback_data'] == 'emergency_power_off'
 

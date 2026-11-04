@@ -130,6 +130,11 @@ class PlayerManagerMixin:
             )
             if res and isinstance(res, dict) and "message_id" in res:
                 is_photo = True
+                self.failed_cover_url = None
+            else:
+                self.failed_cover_url = cover_url
+        else:
+            self.failed_cover_url = None
 
         if not res or not isinstance(res, dict) or "message_id" not in res:
             text = self.ui.player_card_text(media_state)
@@ -163,8 +168,9 @@ class PlayerManagerMixin:
         markup = self.ui.player_card_markup(data)
         is_photo = getattr(self, "active_player_is_photo", False)
         cover_url = data.get("cover_url") if data else None
+        failed_cover = getattr(self, "failed_cover_url", None)
 
-        if not is_photo and cover_url:
+        if not is_photo and cover_url and cover_url != failed_cover:
             self._send_player_card(chat_id, data, business_connection_id=conn_id)
             return
 

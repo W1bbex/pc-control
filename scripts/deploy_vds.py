@@ -100,8 +100,10 @@ def run_ssh(cmd, check=True, input_bytes=None):
     res = subprocess.run(
         ssh_args,
         input=input_bytes,
+        stdin=subprocess.DEVNULL if input_bytes is None else None,
         capture_output=True,
         text=False,
+        timeout=30,
     )
     res.stdout = res.stdout.decode("utf-8", errors="replace") if isinstance(res.stdout, bytes) else (res.stdout or "")
     res.stderr = res.stderr.decode("utf-8", errors="replace") if isinstance(res.stderr, bytes) else (res.stderr or "")
@@ -121,8 +123,10 @@ def run_ssh(cmd, check=True, input_bytes=None):
             retry_res = subprocess.run(
                 retry_args,
                 input=input_bytes,
+                stdin=subprocess.DEVNULL if input_bytes is None else None,
                 capture_output=True,
                 text=False,
+                timeout=30,
             )
             retry_res.stdout = retry_res.stdout.decode("utf-8", errors="replace") if isinstance(retry_res.stdout, bytes) else (retry_res.stdout or "")
             retry_res.stderr = retry_res.stderr.decode("utf-8", errors="replace") if isinstance(retry_res.stderr, bytes) else (retry_res.stderr or "")

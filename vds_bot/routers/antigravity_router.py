@@ -9,8 +9,11 @@ LOG = logging.getLogger("pc-control-bot.routers.antigravity")
 
 
 def route_antigravity_command(app, chat_id: int, text: str) -> bool:
-    """Handle /antigravity, /ag, and text commands. Returns True if handled."""
+    """Handle /antigravity, /ag, /fix_ag and text commands. Returns True if handled."""
     lower = text.lower().strip()
+    if lower in {"/fix_ag", "/heal_ag", "/ag_fix", "почини аг", "лечение аг", "лечение antigravity"}:
+        heal_antigravity(app, chat_id)
+        return True
     if lower in {"/antigravity", "/ag", "antigravity", "аккаунты", "профили", "аккаунты антигравити"}:
         open_antigravity_menu(app, chat_id)
         return True
@@ -18,7 +21,10 @@ def route_antigravity_command(app, chat_id: int, text: str) -> bool:
         parts = text.split(None, 1)
         sub = parts[1].strip() if len(parts) > 1 else ""
         sub_lower = sub.lower()
-        if sub_lower in ("auto", "авто", "лучший", "best"):
+        if sub_lower in ("heal", "fix", "лечение", "почини"):
+            heal_antigravity(app, chat_id)
+            return True
+        elif sub_lower in ("auto", "авто", "лучший", "best"):
             switch_antigravity_account(app, chat_id, account_id="auto")
             return True
         elif sub_lower in ("restart", "рестарт", "перезапуск"):
@@ -54,6 +60,11 @@ def route_antigravity_callback(app, data: str, chat_id: int, message_id: int, ca
     if data == "ag_restart":
         app.ui.answer_callback(callback_id, "Перезапускаю IDE...")
         restart_antigravity_ide(app, chat_id, message_id=message_id)
+        return True
+
+    if data in ("ag_heal", "ag_fix"):
+        app.ui.answer_callback(callback_id, "Запускаю лечение VPN и Antigravity...")
+        heal_antigravity(app, chat_id, message_id=message_id)
         return True
 
     return False
@@ -136,3 +147,28 @@ def export_antigravity_accounts(app, chat_id: int) -> None:
         if not hasattr(app, "pending_cmd_timestamps"):
             app.pending_cmd_timestamps = {}
         app.pending_cmd_timestamps[cmd_id] = time.time()
+
+
+def heal_antigravity(app, chat_id: int, message_id: Optional[int] = None) -> None:
+    """Sends heal/fix command to desktop agent to rotate VPN and restart Antigravity."""
+    if not hasattr(app, "pending_antigravity_cmd_ids"):
+        app.pending_antigravity_cmd_ids = {}
+
+    if getattr(app.mqtt, "desktop_status", None) != "online":
+        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети. Лечение недоступно при выключенном ПК.", message_id=message_id)
+        return
+
+    cmd_id = app.mqtt.publish_desktop_action("heal_antigravity", {"attempts": 3})
+    if cmd_id:
+        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "heal")
+        if not hasattr(app, "pending_cmd_timestamps"):
+            app.pending_cmd_timestamps = {}
+        app.pending_cmd_timestamps[cmd_id] = time.time()
+        app.ui.send_message(
+            chat_id,
+            "🔄 <b>Запущено авто-лечение Antigravity & VPN:</b>\n"
+            "├ Завершаю зависшие процессы IDE...\n"
+            "├ Переключаю сервер INCY VPN на рабочую страну...\n"
+            "├ Проверяю HTTPS-связь с серверами Google...\n"
+            "└ Перезапускаю Antigravity IDE."
+        )

@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SafeKids — Bio-Impedance Hand Spectrometer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Plus+Jakarta+Sans:wght@400;600;700;800&family=Space+Grotesk:wght@600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #07090e;
+      --card-bg: rgba(16, 20, 31, 0.85);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-cyan: #00f0ff;
+      --accent-green: #00ff88;
+      --accent-red: #ff3366;
+      --accent-yellow: #ffd000;
+      --text: #e2e8f0;
+      --text-muted: #64748b;
+      --glow-cyan: 0 0 25px rgba(0, 240, 255, 0.45);
+      --glow-green: 0 0 25px rgba(0, 255, 136, 0.45);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(circle at 20% 15%, rgba(0, 240, 255, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 80% 85%, rgba(0, 255, 136, 0.08) 0%, transparent 40%),
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+      color: var(--text);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    header {
+      padding: 16px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      background: rgba(7, 9, 14, 0.7);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-green));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: var(--glow-cyan);
+    }
+    .brand-icon svg { width: 22px; height: 22px; fill: #000; }
+    .brand-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.25rem;
+      font-weight: 700;
+    }
+    .brand-title span { color: var(--accent-cyan); }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, rgba(0, 240, 255, 0.25), rgba(0, 255, 136, 0.25));
+      border-color: var(--accent-cyan);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, rgba(0, 240, 255, 0.4), rgba(0, 255, 136, 0.4));
+      box-shadow: var(--glow-cyan);
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      font-family: 'Fira Code', monospace;
+      padding: 7px 16px;
+      border-radius: 20px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid var(--card-border);
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-red);
+      box-shadow: 0 0 10px var(--accent-red);
+      transition: all 0.3s ease;
+    }
+    .status-dot.connected {
+      background: var(--accent-green);
+      box-shadow: 0 0 12px var(--accent-green);
+    }
+
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 440px;
+      gap: 28px;
+      padding: 28px 32px;
+      max-width: 1400px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    @media (max-width: 1024px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    /* Left Stage - Interactive Hand */
+    .stage-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      backdrop-filter: blur(20px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      padding: 30px;
+      min-height: 600px;
+    }
+
+    /* Disconnect Warning Overlay */
+    .overlay-connect {
+      position: absolute;
+      inset: 0;
+      background: rgba(7, 9, 14, 0.88);
+      backdrop-filter: blur(8px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      border-radius: 20px;
+      z-index: 20;
+      transition: opacity 0.3s ease;
+    }
+    .overlay-connect.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .hand-svg-container {
+      width: 100%;
+      max-width: 440px;
+      height: 480px;
+      position: relative;
+    }
+    .hand-svg {
+      width: 100%;
+      height: 100%;
+      filter: drop-shadow(0 20px 40px rgba(0,0,0,0.8));
+    }
+
+    /* Anatomical Single Hand Paths */
+    .palm-path {
+      fill: #0d121f;
+      stroke: rgba(0, 240, 255, 0.3);
+      stroke-width: 2.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+
+    .knuckle-line {
+      stroke: rgba(0, 240, 255, 0.2);
+      stroke-dasharray: 4 4;
+      stroke-width: 1.5;
+    }
+
+    .finger-path {
+      fill: rgba(0, 240, 255, 0.05);
+      stroke: rgba(0, 240, 255, 0.35);
+      stroke-width: 2.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .finger-path:hover {
+      fill: rgba(0, 240, 255, 0.2);
+      stroke: var(--accent-cyan);
+    }
+
+    .finger-path.active {
+      fill: rgba(0, 255, 136, 0.4) !important;
+      stroke: var(--accent-green) !important;
+      stroke-width: 4.5 !important;
+      filter: drop-shadow(0 0 20px var(--accent-green));
+    }
+
+    /* Dynamic HUD Pointer Arrow */
+    .hud-pointer {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      z-index: 10;
+    }
+    .hud-pointer.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .hud-line {
+      height: 2px;
+      width: 50px;
+      background: linear-gradient(90deg, transparent, var(--accent-green));
+      box-shadow: var(--glow-green);
+    }
+    .hud-badge {
+      background: rgba(0, 255, 136, 0.2);
+      border: 1px solid var(--accent-green);
+      padding: 6px 14px;
+      border-radius: 8px;
+      color: #fff;
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 700;
+      font-size: 0.95rem;
+      box-shadow: var(--glow-green);
+      white-space: nowrap;
+    }
+
+    /* Right Panel - Metrics & Calibration */
+    .panel-col {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .panel-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 22px;
+      backdrop-filter: blur(16px);
+    }
+
+    .panel-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+    }
+    .panel-title svg { stroke: var(--accent-cyan); }
+
+    /* Live Telemetry Display */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .metric-box {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .metric-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .metric-value {
+      font-family: 'Fira Code', monospace;
+      font-size: 1.35rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .metric-value.highlight {
+      color: var(--accent-green);
+      text-shadow: 0 0 12px rgba(0, 255, 136, 0.5);
+    }
+
+    /* Detected Banner */
+    .detected-banner {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+      transition: all 0.25s ease;
+    }
+    .detected-banner.active {
+      border-color: var(--accent-green);
+      background: rgba(0, 255, 136, 0.1);
+      box-shadow: inset 0 0 25px rgba(0, 255, 136, 0.15);
+    }
+    .detected-title {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+    }
+    .detected-name {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.8rem;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: -0.01em;
+    }
+
+    /* Calibration Wizard */
+    .calib-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .calib-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      font-size: 0.88rem;
+    }
+    .calib-item-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .calib-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--card-border);
+    }
+    .calib-dot.ready {
+      background: var(--accent-green);
+      box-shadow: 0 0 8px var(--accent-green);
+    }
+    .calib-btn {
+      padding: 6px 14px;
+      font-size: 0.8rem;
+      border-radius: 6px;
+      background: rgba(0, 240, 255, 0.12);
+      border: 1px solid rgba(0, 240, 255, 0.35);
+      color: var(--accent-cyan);
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: inherit;
+      font-weight: 600;
+    }
+    .calib-btn:hover {
+      background: var(--accent-cyan);
+      color: #000;
+    }
+    .calib-btn.recording {
+      background: var(--accent-red);
+      border-color: var(--accent-red);
+      color: #fff;
+      animation: pulse 0.8s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.4; }
+      100% { opacity: 1; }
+    }
+
+    /* Console Stream */
+    .console-box {
+      background: #040508;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 12px;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.75rem;
+      height: 130px;
+      overflow-y: auto;
+      color: #94a3b8;
+    }
+    .console-line { margin-bottom: 4px; }
+    .console-line.touch { color: var(--accent-green); }
+    .console-line.idle { color: #475569; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+      </div>
+      <div>
+        <div class="brand-title">SafeKids <span>Bio-Hand UI v2.0</span></div>
+        <div style="font-size: 0.75rem; color: var(--text-muted);">Наносекундный био-спектрометр пальцев</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div class="status-badge">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">ОТКЛЮЧЕНО</span>
+      </div>
+      <button class="btn btn-primary" id="btnConnect">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+        Подключить COM3
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left: Hand Stage -->
+    <div class="stage-card">
+      
+      <!-- Overlay when disconnected -->
+      <div class="overlay-connect" id="overlayConnect">
+        <div style="font-family: 'Space Grotesk', sans-serif; font-size: 1.4rem; font-weight: 700; color: #fff;">
+          Подключите ESP8266
+        </div>
+        <div style="font-size: 0.9rem; color: var(--text-muted); max-width: 320px; text-align: center;">
+          Нажмите кнопку ниже и выберите порт <b>COM3</b> (Silicon Labs / CH340), чтобы начать чтение сигналов
+        </div>
+        <button class="btn btn-primary" style="margin-top: 8px;" onclick="connectSerial()">
+          ⚡ Подключить COM3 прямо сейчас
+        </button>
+      </div>
+
+      <div class="hand-svg-container">
+        <svg class="hand-svg" viewBox="0 0 400 500" xmlns="http://www.w3.org/2000/svg">
+          <!-- Palm (Ладонь) - без пальцев! -->
+          <path class="palm-path" d="M 140 470 C 135 410 120 340 125 300 L 165 285 L 210 280 L 255 285 L 290 305 C 295 345 285 410 270 470 Z"/>
+
+          <!-- Knuckle separator lines -->
+          <line x1="125" y1="300" x2="165" y2="285" class="knuckle-line"/>
+          <line x1="165" y1="285" x2="210" y2="280" class="knuckle-line"/>
+          <line x1="210" y1="280" x2="255" y2="285" class="knuckle-line"/>
+          <line x1="255" y1="285" x2="290" y2="305" class="knuckle-line"/>
+
+          <!-- 1. Большой палец (Thumb) -->
+          <path id="finger-THUMB" class="finger-path" d="M 125 385 C 95 370 55 330 45 300 C 35 270 50 255 70 265 C 95 280 115 315 130 345 Z"/>
+          
+          <!-- 2. Указательный палец (Index) -->
+          <path id="finger-INDEX" class="finger-path" d="M 130 295 C 122 250 115 170 120 135 C 125 105 150 105 155 135 C 160 170 162 250 165 285 Z"/>
+
+          <!-- 3. Средний палец (Middle) -->
+          <path id="finger-MIDDLE" class="finger-path" d="M 172 283 C 175 235 180 130 185 95 C 190 70 215 70 220 95 C 225 130 228 235 228 281 Z"/>
+
+          <!-- 4. Безымянный палец (Ring) -->
+          <path id="finger-RING" class="finger-path" d="M 235 282 C 240 240 245 150 250 125 C 255 100 278 100 282 125 C 285 155 285 240 285 287 Z"/>
+
+          <!-- 5. Мизинец (Pinky) -->
+          <path id="finger-PINKY" class="finger-path" d="M 292 300 C 302 260 318 190 328 175 C 338 155 358 165 355 190 C 348 225 335 285 325 320 Z"/>
+        </svg>
+
+        <!-- Dynamic HUD Pointer -->
+        <div class="hud-pointer" id="hudPointer">
+          <div class="hud-line"></div>
+          <div class="hud-badge" id="hudBadge">УКАЗАТЕЛЬНЫЙ ПАЛЕЦ</div>
+        </div>
+      </div>
+
+      <div style="margin-top: 15px; font-size: 0.85rem; color: var(--text-muted); text-align: center;">
+        Держите опорный провод <code>D6</code> в ладони, а щупом <code>D5</code> касайтесь пальцев
+      </div>
+    </div>
+
+    <!-- Right: Controls & Telemetry -->
+    <div class="panel-col">
+      <!-- Live Finger Detection -->
+      <div class="panel-card">
+        <div class="panel-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          Текущее состояние
+        </div>
+
+        <div class="detected-banner" id="detectedBanner">
+          <div class="detected-title">Распознанный палец</div>
+          <div class="detected-name" id="detectedName">ОЖИДАНИЕ...</div>
+        </div>
+
+        <div class="metrics-grid" style="margin-top: 16px;">
+          <div class="metric-box">
+            <div class="metric-label">Время RC</div>
+            <div class="metric-value highlight" id="valTime">0.0 <span style="font-size:0.8rem">мкс</span></div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Такты CPU</div>
+            <div class="metric-value" id="valCycles">0</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">50 Гц наводка</div>
+            <div class="metric-value" id="valHum">0 <span style="font-size:0.8rem">пер</span></div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Спад RC</div>
+            <div class="metric-value highlight" id="valDecay">0 <span style="font-size:0.8rem">мкс</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Calibration Wizard -->
+      <div class="panel-card">
+        <div class="panel-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          Калибровка пальцев руки
+        </div>
+
+        <div class="calib-list">
+          <div class="calib-item">
+            <div class="calib-item-info">
+              <span class="calib-dot" id="dot-THUMB"></span>
+              <span>1. Большой палец</span>
+            </div>
+            <button class="calib-btn" onclick="startCalibration('THUMB')">Калибровать</button>
+          </div>
+          <div class="calib-item">
+            <div class="calib-item-info">
+              <span class="calib-dot" id="dot-INDEX"></span>
+              <span>2. Указательный</span>
+            </div>
+            <button class="calib-btn" onclick="startCalibration('INDEX')">Калибровать</button>
+          </div>
+          <div class="calib-item">
+            <div class="calib-item-info">
+              <span class="calib-dot" id="dot-MIDDLE"></span>
+              <span>3. Средний палец</span>
+            </div>
+            <button class="calib-btn" onclick="startCalibration('MIDDLE')">Калибровать</button>
+          </div>
+          <div class="calib-item">
+            <div class="calib-item-info">
+              <span class="calib-dot" id="dot-RING"></span>
+              <span>4. Безымянный</span>
+            </div>
+            <button class="calib-btn" onclick="startCalibration('RING')">Калибровать</button>
+          </div>
+          <div class="calib-item">
+            <div class="calib-item-info">
+              <span class="calib-dot" id="dot-PINKY"></span>
+              <span>5. Мизинец</span>
+            </div>
+            <button class="calib-btn" onclick="startCalibration('PINKY')">Калибровать</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Serial Log -->
+      <div class="panel-card">
+        <div class="panel-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Консольный поток (COM3)
+        </div>
+        <div class="console-box" id="consoleBox">
+          <div class="console-line">Готово к подключению. Нажмите кнопку «Подключить COM3».</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const FINGER_COORDS = {
+      THUMB:  { top: '300px', left: '10px' },
+      INDEX:  { top: '120px', left: '60px' },
+      MIDDLE: { top: '80px',  left: '170px' },
+      RING:   { top: '110px', left: '260px' },
+      PINKY:  { top: '170px', left: '330px' }
+    };
+
+    const FINGER_NAMES = {
+      THUMB:  'БОЛЬШОЙ ПАЛЕЦ',
+      INDEX:  'УКАЗАТЕЛЬНЫЙ ПАЛЕЦ',
+      MIDDLE: 'СРЕДНИЙ ПАЛЕЦ',
+      RING:   'БЕЗЫМЯННЫЙ ПАЛЕЦ',
+      PINKY:  'МИЗИНЕЦ'
+    };
+
+    // Load saved calibration or use initial order
+    let calibration = JSON.parse(localStorage.getItem('safekids_bio_calib_v2')) || {
+      THUMB:  { score: 350 },
+      INDEX:  { score: 250 },
+      MIDDLE: { score: 180 },
+      RING:   { score: 120 },
+      PINKY:  { score: 60 }
+    };
+
+    let activeCalibFinger = null;
+    let calibSamples = [];
+
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const btnConnect = document.getElementById('btnConnect');
+    const overlayConnect = document.getElementById('overlayConnect');
+    const detectedBanner = document.getElementById('detectedBanner');
+    const detectedName = document.getElementById('detectedName');
+    const valTime = document.getElementById('valTime');
+    const valCycles = document.getElementById('valCycles');
+    const valHum = document.getElementById('valHum');
+    const valDecay = document.getElementById('valDecay');
+    const hudPointer = document.getElementById('hudPointer');
+    const hudBadge = document.getElementById('hudBadge');
+    const consoleBox = document.getElementById('consoleBox');
+
+    function logConsole(msg, type = '') {
+      const line = document.createElement('div');
+      line.className = `console-line ${type}`;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      consoleBox.appendChild(line);
+      consoleBox.scrollTop = consoleBox.scrollHeight;
+    }
+
+    function highlightFinger(fingerKey) {
+      document.querySelectorAll('.finger-path').forEach(el => el.classList.remove('active'));
+      
+      if (!fingerKey || !FINGER_NAMES[fingerKey]) {
+        detectedBanner.classList.remove('active');
+        detectedName.textContent = 'ОЖИДАНИЕ...';
+        hudPointer.classList.remove('visible');
+        return;
+      }
+
+      const pathEl = document.getElementById(`finger-${fingerKey}`);
+      if (pathEl) pathEl.classList.add('active');
+
+      detectedBanner.classList.add('active');
+      detectedName.textContent = FINGER_NAMES[fingerKey];
+
+      const coords = FINGER_COORDS[fingerKey];
+      if (coords) {
+        hudPointer.style.top = coords.top;
+        hudPointer.style.left = coords.left;
+        hudBadge.textContent = FINGER_NAMES[fingerKey];
+        hudPointer.classList.add('visible');
+      }
+    }
+
+    // Match live score to closest calibrated finger
+    function matchClosestFinger(score) {
+      let closest = null;
+      let minDiff = Infinity;
+      for (const [finger, data] of Object.entries(calibration)) {
+        if (!data || !data.score) continue;
+        const diff = Math.abs(score - data.score);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closest = finger;
+        }
+      }
+      return closest;
+    }
+
+    function startCalibration(fingerKey) {
+      activeCalibFinger = fingerKey;
+      calibSamples = [];
+      const btn = event.target;
+      btn.classList.add('recording');
+      btn.textContent = 'Держите...';
+      logConsole(`Калибровка: приложите ${FINGER_NAMES[fingerKey]} к проводу D5...`);
+
+      setTimeout(() => {
+        btn.classList.remove('recording');
+        btn.textContent = 'Калибровать';
+        if (calibSamples.length > 2) {
+          const avgScore = Math.round(calibSamples.reduce((a, b) => a + b, 0) / calibSamples.length);
+          calibration[fingerKey] = { score: avgScore };
+          localStorage.setItem('safekids_bio_calib_v2', JSON.stringify(calibration));
+          document.getElementById(`dot-${fingerKey}`).classList.add('ready');
+          logConsole(`Успех! ${FINGER_NAMES[fingerKey]} откалиброван: score = ${avgScore}`);
+          highlightFinger(fingerKey);
+        } else {
+          logConsole(`Ошибка: не было касания ${FINGER_NAMES[fingerKey]}! Убедитесь, что держите D6 и касаетесь D5.`);
+        }
+        activeCalibFinger = null;
+      }, 2500);
+    }
+
+    function handlePacket(data) {
+      if (data.touch || data.event === 'TOUCH') {
+        const cycles = data.cycles || 0;
+        const usRise = data.us_rise || (cycles / 80);
+        const decayUs = data.decay_us || 0;
+        const hum = data.hum || 0;
+
+        valTime.textContent = `${usRise.toFixed(1)} мкс`;
+        valCycles.textContent = cycles;
+        valHum.textContent = `${hum} пер`;
+        valDecay.textContent = `${decayUs} мкс`;
+
+        // Combined impedance score
+        const score = Math.round(decayUs * 10 + (cycles / 100) + hum * 5);
+
+        if (activeCalibFinger) {
+          calibSamples.push(score);
+        } else {
+          const match = matchClosestFinger(score);
+          if (match) {
+            highlightFinger(match);
+          }
+        }
+      } else {
+        highlightFinger(null);
+        valTime.textContent = '0.0 мкс';
+        valCycles.textContent = '0';
+        valHum.textContent = '0 пер';
+        valDecay.textContent = '0 мкс';
+      }
+    }
+
+    let port, reader;
+    async function connectSerial() {
+      if (!('serial' in navigator)) {
+        alert('WebSerial поддерживается только в Chrome и Edge.');
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+
+        statusDot.classList.add('connected');
+        statusText.textContent = 'ПОДКЛЮЧЕНО (COM3)';
+        btnConnect.textContent = 'Отключить';
+        overlayConnect.classList.add('hidden');
+        logConsole('Успешное подключение к порту на 115200 бод!');
+
+        const textDecoder = new TextDecoderStream();
+        port.readable.pipeTo(textDecoder.writable);
+        reader = textDecoder.readable.getReader();
+
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += value;
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+              try {
+                const json = JSON.parse(trimmed);
+                handlePacket(json);
+              } catch (e) {}
+            }
+          }
+        }
+      } catch (err) {
+        logConsole(`Ошибка: ${err.message}`);
+      }
+    }
+
+    btnConnect.addEventListener('click', connectSerial);
+  </script>
+</body>
+</html>

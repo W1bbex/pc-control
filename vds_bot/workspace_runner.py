@@ -66,6 +66,13 @@ def get_workspace_steps(vpn="incy"):
             "fallback_emoji": "🚀",
             "icon_key": "terminal",
         },
+        {
+            "id": "chatgpt",
+            "label": "ChatGPT",
+            "emoji_id": ICONS.get("app_chatgpt") or ICONS.get("bot"),
+            "fallback_emoji": "🤖",
+            "icon_key": "bot",
+        },
     ]
 
 
@@ -277,6 +284,7 @@ class WorkspaceRunnerMixin:
         self.workspace_executed_event.clear()
         self.minimize_ack_event.clear()
         self.workspace_execution_result = None
+        self.workspace_execution_data = {}
         self.minimize_ack_result = None
 
         def render_checklist():
@@ -401,10 +409,7 @@ class WorkspaceRunnerMixin:
             return
 
         # 4. Standalone minimize_all and wait for ACK (only if not already minimized by agent)
-        already_minimized = (
-            isinstance(self.workspace_execution_result, dict)
-            and self.workspace_execution_result.get("desktop_minimized")
-        )
+        already_minimized = self.workspace_execution_data.get("desktop_minimized") is True
         if not already_minimized:
             min_cmd_id = self.mqtt.publish_desktop_action("minimize_all")
             self.pending_minimize_cmd_id = min_cmd_id
@@ -495,6 +500,7 @@ class WorkspaceRunnerMixin:
 
         self.workspace_executed_event.clear()
         self.workspace_execution_result = None
+        self.workspace_execution_data = {}
 
         def render_checklist():
             lines = [

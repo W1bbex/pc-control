@@ -7,8 +7,10 @@ import logging
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 import psutil
@@ -58,6 +60,34 @@ class VpnManagerMixin:
                     return True
         except Exception:
             pass
+        return False
+
+    @staticmethod
+    def probe_google_https(timeout=3.5):
+        """
+        Verify TLS / HTTPS connectivity to Google endpoints required by Antigravity IDE.
+        Accepts HTTP 200, 204 or API HTTP responses (400, 401, 403, 404) that confirm TLS
+        handshake with Google succeeded and was not blocked by DPI/censorship/dead tunnel.
+        """
+        probe_urls = [
+            "https://www.google.com/generate_204",
+            "https://oauth2.googleapis.com",
+        ]
+        for url in probe_urls:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "PCControlAgent/2.0"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if resp.getcode() in (200, 204):
+                        return True
+            except urllib.error.HTTPError as e:
+                # Reaching Google server with status code proves TLS handshake completed
+                if e.code in (200, 204, 400, 401, 403, 404):
+                    return True
+            except Exception:
+                pass
         return False
 
     @classmethod
@@ -140,15 +170,20 @@ class VpnManagerMixin:
             LOG.warning("Error checking INCY VPN active status: %s", e)
             return False
 
-    def connect_incy_vpn(self, cancel_event=None, timeout=None):
+    def connect_incy_vpn(self, cancel_event=None, timeout=None, verify_google=True):
         """
         Ensure INCY VPN is connected and verified.
         Ensures autoConnect is set in preferences.json, launches incy.exe if not running,
-        and polls up to timeout for network readiness.
+        and polls up to timeout for network readiness and Google HTTPS accessibility.
         """
         LOG.info("Verifying INCY VPN connection")
         if self.check_incy_vpn_active():
             LOG.info("INCY VPN is already active and verified")
+            if verify_google and not self.probe_google_https(timeout=3.0):
+                LOG.warning("INCY VPN is active, but Google HTTPS probe failed! Auto-switching server...")
+                heal_res = self.switch_next_incy_server()
+                if heal_res.get("success") and self.probe_google_https(timeout=3.5):
+                    return {"verified": True, "server": heal_res.get("server")}
             return {"verified": True, "already_connected": True}
 
         try:
@@ -196,15 +231,228 @@ class VpnManagerMixin:
                 return {"cancelled": True}
             if self.check_incy_vpn_active():
                 LOG.info("INCY VPN connection successfully verified via network probe")
+                if verify_google and not self.probe_google_https(timeout=3.0):
+                    LOG.warning("INCY connected, but Google HTTPS probe failed! Auto-switching server...")
+                    heal_res = self.switch_next_incy_server()
+                    if heal_res.get("success") and self.probe_google_https(timeout=3.5):
+                        return {"verified": True, "server": heal_res.get("server")}
                 return {"verified": True}
             time.sleep(0.5)
 
         if self.check_incy_vpn_active():
             LOG.info("INCY VPN connection verified at deadline")
+            if verify_google and not self.probe_google_https(timeout=3.0):
+                LOG.warning("INCY connected, but Google HTTPS probe failed! Auto-switching server...")
+                heal_res = self.switch_next_incy_server()
+                if heal_res.get("success") and self.probe_google_https(timeout=3.5):
+                    return {"verified": True, "server": heal_res.get("server")}
             return {"verified": True}
 
         LOG.warning("INCY VPN verification timed out after %ds", timeout)
         return {"verified": False, "reason": "vpn_verification_timeout"}
+
+    @classmethod
+    def get_incy_servers(cls):
+        """
+        Reads server list from %LOCALAPPDATA%\\incy\\incy.db.
+        Excludes Russia and dead servers.
+        Returns list of dicts sorted by latency ascending.
+        """
+        db_path = Path(os.path.expandvars(r"%LOCALAPPDATA%\incy\incy.db"))
+        if not db_path.exists():
+            return []
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cur = conn.cursor()
+            cur.execute("SELECT id, name, latency FROM servers WHERE name NOT LIKE '%Россия%'")
+            rows = cur.fetchall()
+            conn.close()
+            servers = []
+            for s_id, s_name, s_lat in rows:
+                lat = int(s_lat) if s_lat is not None and s_lat >= 0 else 9999
+                servers.append({
+                    "id": str(s_id),
+                    "name": str(s_name),
+                    "latency": lat,
+                })
+            servers.sort(key=lambda s: s["latency"])
+            return servers
+        except Exception as e:
+            LOG.warning("Failed to query INCY servers from db: %s", e)
+            return []
+
+    def switch_next_incy_server(self, target_server_id=None):
+        """
+        Switches INCY VPN to the specified server or the next best healthy server from incy.db.
+        Updates preferences.json, restarts incy.exe, and awaits tunnel readiness.
+        """
+        servers = self.get_incy_servers()
+        if not servers:
+            return {"success": False, "error": "No available servers in INCY database"}
+
+        pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
+        current_id = None
+        prefs = {}
+        if pref_path.exists():
+            try:
+                with open(pref_path, "r", encoding="utf-8") as f:
+                    prefs = json.load(f)
+                current_id = prefs.get("selectedServerId")
+            except Exception as e:
+                LOG.warning("Could not read INCY preferences: %s", e)
+
+        target = None
+        if target_server_id:
+            for s in servers:
+                if s["id"] == target_server_id:
+                    target = s
+                    break
+
+        if not target:
+            current_idx = -1
+            for idx, s in enumerate(servers):
+                if s["id"] == current_id:
+                    current_idx = idx
+                    break
+            next_idx = (current_idx + 1) % len(servers)
+            target = servers[next_idx]
+
+        LOG.info("Switching INCY VPN server to: %s (%s, %dms)", target["name"], target["id"], target["latency"])
+
+        prefs["selectedServerId"] = target["id"]
+        prefs["lastConnectedServerId"] = target["id"]
+        prefs["autoConnect"] = True
+        try:
+            pref_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(pref_path, "w", encoding="utf-8") as f:
+                json.dump(prefs, f, indent=2)
+        except Exception as e:
+            LOG.warning("Failed to write INCY preferences: %s", e)
+            return {"success": False, "error": f"Failed to write preferences: {e}"}
+
+        # Terminate running incy.exe
+        incy_procs = [
+            p for p in psutil.process_iter(["name", "pid"])
+            if (p.info["name"] or "").lower() == "incy.exe"
+        ]
+        for p in incy_procs:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        if incy_procs:
+            try:
+                psutil.wait_procs(incy_procs, timeout=3.0)
+            except Exception:
+                pass
+
+        # Launch incy.exe
+        incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
+        resolved_exe = os.path.expandvars(str(incy_cmd))
+        if Path(resolved_exe).exists():
+            try:
+                subprocess.Popen(
+                    [resolved_exe],
+                    cwd=str(Path(resolved_exe).parent),
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+            except OSError as e:
+                if getattr(e, "winerror", None) == 740:
+                    ctypes.windll.shell32.ShellExecuteW(
+                        None, "runas", str(resolved_exe), "", str(Path(resolved_exe).parent), 1
+                    )
+                else:
+                    raise
+        else:
+            LOG.warning("INCY executable not found at %s", resolved_exe)
+
+        deadline = time.monotonic() + 25.0
+        while time.monotonic() < deadline:
+            if self.check_incy_vpn_active():
+                LOG.info("INCY VPN reconnected on server %s", target["name"])
+                return {
+                    "success": True,
+                    "server": target["name"],
+                    "server_id": target["id"],
+                    "latency": target["latency"],
+                }
+            time.sleep(0.5)
+
+        return {
+            "success": False,
+            "error": "Timeout waiting for INCY tunnel after server switch",
+            "server": target["name"],
+            "server_id": target["id"],
+        }
+
+    def heal_vpn_and_antigravity(self, attempts=3):
+        """
+        Auto-recovery routine for Antigravity blank window / bad VPN connection:
+        1. Kills stuck Antigravity IDE processes.
+        2. Cycles INCY server to a working country that successfully passes Google HTTPS probe.
+        3. Restarts Antigravity IDE.
+        """
+        LOG.info("Starting Antigravity & VPN healing routine (attempts=%d)", attempts)
+
+        # 1. Kill Antigravity IDE
+        try:
+            from core.antigravity_switcher import AntigravityAccountManager
+            AntigravityAccountManager.kill_ide()
+        except Exception:
+            for p in psutil.process_iter(["name", "pid"]):
+                if "antigravity" in (p.info["name"] or "").lower():
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+
+        # 2. Rotate servers until Google HTTPS passes
+        working_server = None
+        for attempt in range(1, attempts + 1):
+            LOG.info("Healing attempt %d/%d: switching INCY server", attempt, attempts)
+            switch_res = self.switch_next_incy_server()
+            if not switch_res.get("success"):
+                LOG.warning("Server switch attempt %d failed: %s", attempt, switch_res.get("error"))
+                time.sleep(1.0)
+                continue
+
+            time.sleep(1.5)
+            if self.probe_google_https(timeout=4.0):
+                LOG.info("Google HTTPS probe succeeded on server %s", switch_res.get("server"))
+                working_server = switch_res
+                break
+            else:
+                LOG.warning("Google HTTPS probe failed on server %s; trying next", switch_res.get("server"))
+
+        if not working_server:
+            if self.probe_google_https(timeout=4.0):
+                working_server = {"server": "Текущий сервер INCY", "latency": 0}
+            else:
+                return {
+                    "success": False,
+                    "error": "Не удалось найти сервер INCY с рабочим доступом к Google HTTPS",
+                }
+
+        # 3. Relaunch Antigravity IDE
+        restarted = False
+        try:
+            from core.antigravity_switcher import AntigravityAccountManager
+            restarted = AntigravityAccountManager.launch_ide()
+        except Exception as e:
+            LOG.error("Failed to launch Antigravity via switcher: %s", e)
+            ag_cmd = self.config.get("apps", {}).get("Antigravity", r"%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe")
+            ag_exe = os.path.expandvars(str(ag_cmd))
+            if Path(ag_exe).exists():
+                subprocess.Popen([ag_exe], cwd=str(Path(ag_exe).parent), creationflags=subprocess.DETACHED_PROCESS)
+                restarted = True
+
+        return {
+            "success": True,
+            "server": working_server.get("server"),
+            "latency": working_server.get("latency", 0),
+            "google_https_ok": True,
+            "restarted_ide": restarted,
+        }
 
     def connect_happ_vpn(self, cancel_event=None, timeout=None):
         """

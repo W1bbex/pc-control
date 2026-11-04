@@ -66,7 +66,7 @@ EXCLUDE_FILES = {
     "*.tar", "*.gz", "*.7z", "*.iso", "*.pyc", "*.pyo",
     "*.png", "*.jpg", "*.jpeg", "*.ico", "*.svg", "*.webp",
     "*.mp3", "*.wav", "*.flac", "*.log",
-    ".env", "*.env"
+    ".env", "*.env", "secrets.h", "*secrets.h*"
 }
 
 VDS_MANIFEST_FILES = [

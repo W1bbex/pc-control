@@ -2,6 +2,8 @@
 .env
 *.env
 !vds_bot/pc-control-bot.env.example
+secrets.h
+hardware/esp8266/pc_remote_mqtt/secrets.h
 
 # Python bytecode and caches
 __pycache__/

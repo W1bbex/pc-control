@@ -279,7 +279,7 @@ def test_bot_runner_waits_for_chosen_vpn():
     assert app.vpn_ready_event.is_set()
     assert app.app_statuses["incy_vpn"] == "✅"
 
-    for s in ["telegram", "yandex_music", "dolphin", "chrome", "antigravity"]:
+    for s in ["telegram", "yandex_music", "dolphin", "chrome", "antigravity", "chatgpt"]:
         app.app_statuses[s] = "✅"
 
     # Full execution ACK
@@ -413,11 +413,13 @@ def test_workspace_steps_app_emojis_and_no_generic_shield_lightning():
     ym_step = next(s for s in steps_happ if s["id"] == "yandex_music")
     chrome_step = next(s for s in steps_happ if s["id"] == "chrome")
     ag_step = next(s for s in steps_happ if s["id"] == "antigravity")
+    chatgpt_step = next(s for s in steps_happ if s["id"] == "chatgpt")
 
     assert tg_step["emoji_id"] == ICONS.get("app_telegram")
     assert ym_step["emoji_id"] == ICONS.get("app_yandex_music")
     assert chrome_step["emoji_id"] == ICONS.get("app_chrome")
     assert ag_step["emoji_id"] == ICONS.get("app_antigravity")
+    assert chatgpt_step["emoji_id"] == (ICONS.get("app_chatgpt") or ICONS.get("bot"))
 
     # Verify formatted checklist lines contain tg-emoji
     line_queued = format_workspace_step_line(happ_step, "⏳ В очереди")

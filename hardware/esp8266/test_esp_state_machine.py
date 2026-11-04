@@ -30,6 +30,8 @@ class ESPStateMachine:
         self.buttonPressedAtMs = 0
         
         self.events = []
+        self.physicalTestMode = False
+        self.physicalTestStartedMs = 0
         
     def resetPhysicalAttempt(self):
         self.attemptLength = 0
@@ -47,6 +49,9 @@ class ESPStateMachine:
             self.events.append("failed")
 
     def processPhysicalSymbol(self, symbol, evtTime):
+        if self.physicalTestMode:
+            return
+
         if self.passwordLength < PASSWORD_MIN_STEPS or self.locked:
             return
 
@@ -77,6 +82,11 @@ class ESPStateMachine:
                 self.failPhysicalAttempt()
 
     def updatePhysicalAttempt(self, nowMs):
+        if self.physicalTestMode:
+            if nowMs - self.physicalTestStartedMs >= 120000:
+                self.physicalTestMode = False
+            return
+
         if self.physicalSuccessPending and nowMs - self.lastPhysicalEventMs >= SUCCESS_QUIET_MS:
             self.resetPhysicalAttempt()
             self.failedAttempts = 0
@@ -225,6 +235,38 @@ class TestESPLogic(unittest.TestCase):
         self.assertFalse(esp.physicalSuccessPending)
         self.assertFalse(esp.relayPressed)
         self.assertEqual(len(esp.isrTimeQueue), 0)
+
+    def test_physical_test_mode_bypasses_morse_and_avoids_lock(self):
+        esp = ESPStateMachine()
+        esp.physicalTestMode = True
+        esp.physicalTestStartedMs = 10000
+
+        # In test mode, enter multiple clicks (which would normally fail and lock out after 3)
+        for i in range(10):
+            now = 10000 + i * 2000
+            esp.hardware_interrupt(now, 0)
+            esp.hardware_interrupt(now + 100, 1)
+            esp.loop(now + 200)
+            self.assertEqual(esp.attemptLength, 0)
+            esp.loop(now + ATTEMPT_QUIET_MS + 200)
+            self.assertEqual(esp.failedAttempts, 0)
+            self.assertEqual(esp.locked, 0)
+            self.assertFalse(esp.relayPressed)
+
+        self.assertNotIn("locked", esp.events)
+        self.assertNotIn("failed", esp.events)
+        self.assertNotIn("success", esp.events)
+
+    def test_physical_test_mode_auto_timeout(self):
+        esp = ESPStateMachine()
+        esp.physicalTestMode = True
+        esp.physicalTestStartedMs = 1000
+        # Check before timeout
+        esp.loop(50000)
+        self.assertTrue(esp.physicalTestMode)
+        # Check after timeout (>= 120s)
+        esp.loop(122000)
+        self.assertFalse(esp.physicalTestMode)
 
 if __name__ == '__main__':
     unittest.main()

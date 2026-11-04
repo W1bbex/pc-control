@@ -471,6 +471,10 @@ class PhysicalButtonManager:
 
         elif event_type in {"locked", "record_too_short", "record_timeout"}:
             if event_type == "locked":
+                if self.mode in ("test", "record_password", "record_unlock_pattern") or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0):
+                    LOG.info("Suppressing ESP locked event caused by active diagnostic/record mode, resetting lock")
+                    self.mqtt.publish_esp_action("UNLOCK_PHYSICAL_INPUT")
+                    return
                 self.esp_locked = True
                 if self.on_state_change_cb:
                     self.on_state_change_cb()

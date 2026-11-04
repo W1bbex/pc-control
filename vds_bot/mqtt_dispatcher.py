@@ -184,6 +184,8 @@ class MqttDispatcherMixin:
 
         elif event_type == "command_timeout":
             cmd_id = data.get("id")
+            if data.get("action") == "diagnose_codex_launch":
+                self.ui.send_message(target_user, "<b>Проверка Codex</b>\n\nАгент не ответил вовремя. Результат неизвестен.")
             pending = getattr(self, "pending_screenshots", {}).pop(cmd_id, None)
             if pending:
                 self.ui.send_message(pending["chat_id"], "❌ Desktop-агент не прислал скриншот за 30 секунд.")
@@ -221,6 +223,26 @@ class MqttDispatcherMixin:
             cmd_id = data.get("id")
             result = data.get("result")
             ack_data = data.get("data") or {}
+
+            if ack_data.get("codex_diagnostic") is True:
+                variant = html.escape(str(ack_data.get("variant", "?")))
+                state = ack_data.get("state")
+                messages = {
+                    "already_running": "Codex ещё работает. Полностью закрой его и повтори проверку.",
+                    "busy": "Предыдущая проверка ещё выполняется. Дождись результата.",
+                    "window_visible": "Окно Codex появилось. Проверь, что приложение работает.",
+                    "process_without_window": "Процесс работает, но видимое окно за 15 секунд не появилось.",
+                    "process_exited": "Процесс появился, но завершился до появления окна.",
+                    "not_started": "Окно и процесс за 15 секунд не появились.",
+                    "error": "Не удалось выполнить проверку запуска.",
+                }
+                detail = messages.get(state, "Неизвестный результат.")
+                code = ack_data.get("exit_code")
+                if code is not None:
+                    detail += f"\nКод процесса запуска: <code>{html.escape(str(code))}</code>."
+                if state == "error" and ack_data.get("error"):
+                    detail += f"\n<code>{html.escape(str(ack_data['error']))}</code>"
+                self.ui.send_message(target_user, f"<b>Codex · вариант {variant}</b>\n\n{detail}")
 
             if cmd_id in getattr(self, "pending_console_cmds", {}):
                 pending_cmd = self.pending_console_cmds.pop(cmd_id)
@@ -266,6 +288,8 @@ class MqttDispatcherMixin:
                             step_id = "incy_vpn"
                         elif "antigravity" in an:
                             step_id = "antigravity"
+                        elif "chatgpt" in an or "gpt" in an:
+                            step_id = "chatgpt"
                         elif "gta5" in an or "gta 5" in an:
                             step_id = "game_gta5"
                         elif "roblox" in an:
@@ -299,6 +323,7 @@ class MqttDispatcherMixin:
                 elif result == "executed":
                     LOG.info("Workspace setup launch_app executed ACK received.")
                     self.workspace_execution_result = "executed"
+                    self.workspace_execution_data = ack_data if isinstance(ack_data, dict) else {}
                     self.workspace_executed_event.set()
 
                 elif result in ("failed", "cancelled"):

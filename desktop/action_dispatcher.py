@@ -6,6 +6,7 @@ import os
 import subprocess
 import threading
 import time
+from desktop.codex_launch import diagnose_codex_launch
 
 LOG = logging.getLogger("pc-control-agent")
 
@@ -15,6 +16,16 @@ class ActionDispatcherMixin:
 
     def execute_action(self, command_id, action, args):
         try:
+            if action == "diagnose_codex_launch":
+                variant = str(args.get("variant", ""))
+                try:
+                    result = diagnose_codex_launch(variant, self.config.get("apps", {}).get("ChatGPT", ""), self._has_visible_window)
+                except (OSError, ValueError) as error:
+                    LOG.exception("Codex diagnostic variant %s failed", variant)
+                    result = {"codex_diagnostic": True, "variant": variant, "state": "error", "error": str(error)}
+                self.acknowledge(command_id, "executed", result)
+                return
+
             if action == "telemetry":
                 data = self.collect_telemetry()
                 self.acknowledge(command_id, "executed", data)
@@ -106,6 +117,7 @@ class ActionDispatcherMixin:
                     workspace_id=ws_id,
                     progress_callback=report_progress,
                     vpn=args.get("vpn"),
+                    **({"connect_vpn": False} if args.get("connect_vpn") is False else {}),
                 )
                 if isinstance(res, dict) and (res.get("cancelled") or res.get("success") is False):
                     status = "cancelled" if res.get("cancelled") else "failed"
@@ -290,6 +302,16 @@ class ActionDispatcherMixin:
                     command_id,
                     "executed",
                     {"success": True, "restarted": restarted},
+                )
+                return
+
+            if action in ("heal_antigravity", "fix_antigravity", "antigravity_heal"):
+                attempts = int(args.get("attempts", 3)) if isinstance(args, dict) else 3
+                res = self.heal_vpn_and_antigravity(attempts=attempts)
+                self.acknowledge(
+                    command_id,
+                    "executed" if res.get("success") else "failed",
+                    res,
                 )
                 return
 

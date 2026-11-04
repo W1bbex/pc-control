@@ -181,14 +181,14 @@ def test_codex_completely_removed_from_config():
         assert "id" in step and "label" in step and "command" in step and "verification" in step
 
 
-def test_codex_absent_from_workspace_constants_and_menus():
+def test_codex_absent_from_workspace_constants_but_available_in_menu():
     step_ids = [s["id"] for s in WORKSPACE_STEPS]
     assert "codex" not in step_ids
 
     ui = TelegramBotApi("mock_token")
     menu = ui.apps_menu_markup()
     buttons = [btn["text"] for row in menu["inline_keyboard"] for btn in row]
-    assert not any("Codex" in b for b in buttons), "Codex button found in apps menu"
+    assert "Codex" in buttons
 
 
 def test_false_checkmark_elimination_in_runner():
@@ -223,7 +223,7 @@ def test_false_checkmark_elimination_in_runner():
 
     # Acknowledge Happ ready and other apps EXCEPT chrome
     cmd_id = app.active_workspace_cmd_id
-    for step_id in ["telegram", "yandex_music", "happ_vpn", "antigravity"]:
+    for step_id in ["telegram", "yandex_music", "happ_vpn", "antigravity", "chatgpt"]:
         app._on_mqtt_event("ack", {"id": cmd_id, "result": "progress", "data": {"step_id": step_id, "state": "verified"}})
 
     # Now acknowledge full workspace execution
@@ -721,6 +721,72 @@ def test_power_scheduler_watchdog_enforces_user_led_state_off():
     app.mqtt.publish_esp_action.reset_mock()
     app.scheduler_tick(time.time())
     app.mqtt.publish_esp_action.assert_not_called()
+
+
+# ==============================================================================
+# Task: Chrome Launch Normalization & Background Mode Fixes + ChatGPT Setup
+# ==============================================================================
+
+def test_launcher_command_list_normalization():
+    from desktop.launcher import LauncherMixin
+    launcher = LauncherMixin()
+    launcher.config = {
+        "apps": {
+            "Chrome": [
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                "--profile-directory=Default"
+            ]
+        }
+    }
+    mock_proc = MagicMock()
+    mock_proc.info = {"name": "chrome.exe", "pid": 1234}
+    with patch("psutil.process_iter", return_value=[mock_proc]), \
+         patch.object(LauncherMixin, "_has_visible_window", return_value=True):
+        res = launcher.launch_app("Chrome")
+        assert res.get("app") == "Chrome"
+        assert any("already running verified" in item for item in res.get("launched", []))
+
+
+def test_launcher_chrome_bg_mode_triggers_launch():
+    from desktop.launcher import LauncherMixin
+    launcher = LauncherMixin()
+    launcher.config = {
+        "apps": {
+            "Chrome": [
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                "--profile-directory=Default"
+            ]
+        }
+    }
+    mock_proc = MagicMock()
+    mock_proc.info = {"name": "chrome.exe", "pid": 1234}
+
+    with patch("psutil.process_iter", return_value=[mock_proc]), \
+         patch.object(LauncherMixin, "_has_visible_window", return_value=False), \
+         patch("subprocess.Popen") as mock_popen, \
+         patch("shutil.which", return_value="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"), \
+         patch("pathlib.Path.exists", return_value=True):
+        mock_popen.return_value.poll.return_value = None
+        res = launcher.launch_app("Chrome")
+        assert mock_popen.called
+        cmd_launched = mock_popen.call_args[0][0]
+        assert "--profile-directory=Default" in cmd_launched
+
+
+def test_chatgpt_in_config_and_workspace_steps():
+    import json
+    with open("config.json", "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    assert "ChatGPT" in cfg.get("apps", {})
+    assert "%LOCALAPPDATA%" in cfg["apps"]["ChatGPT"] or "chatgpt" in cfg["apps"]["ChatGPT"].lower()
+
+    workspace_steps = cfg.get("apps", {}).get("Рабочий сетап", {}).get("steps", [])
+    chatgpt_step = next((s for s in workspace_steps if s.get("id") == "chatgpt"), None)
+    assert chatgpt_step is not None
+    assert "ChatGPT" in chatgpt_step.get("label", "")
+    assert "chatgpt.exe" in [t.lower() for t in chatgpt_step.get("verification", {}).get("targets", [])]
+
 
 
 

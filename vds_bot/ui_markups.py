@@ -174,7 +174,7 @@ class UiMarkupsMixin:
         if not is_pc_on:
             rows = [[{"text": "Включить ПК", "style": "success", "callback_data": "power_on"}]]
             if state_val == "UNREACHABLE":
-                emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
+                emerg_btn = {"text": "Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
                 if ICONS.get("power"):
                     emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
                 rows.append([emerg_btn])
@@ -210,9 +210,9 @@ class UiMarkupsMixin:
             ],
             [
                 (
-                    {"text": "☀️ Выйти из скрытности", "style": "danger", "callback_data": "stealth_off"}
+                    {"text": "Выйти из скрытности", "style": "danger", "callback_data": "stealth_off"}
                     if stealth_active
-                    else {"text": "🕶️ Скрытность (Blackout)", "style": "primary", "callback_data": "stealth_on"}
+                    else {"text": "Скрытность (Blackout)", "style": "primary", "callback_data": "stealth_on"}
                 ),
             ],
             [
@@ -222,7 +222,7 @@ class UiMarkupsMixin:
         ]
 
         if state_val in ("BOOTING", "DEGRADED") and sys_val != "online":
-            emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
+            emerg_btn = {"text": "Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
             if ICONS.get("power"):
                 emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
             rows.append([emerg_btn])
@@ -232,9 +232,9 @@ class UiMarkupsMixin:
 
     def stealth_menu_markup(self, active: bool = False):
         if active:
-            toggle_btn = {"text": "☀️ Выйти из скрытности", "style": "danger", "callback_data": "stealth_off"}
+            toggle_btn = {"text": "Выйти из скрытности", "style": "danger", "callback_data": "stealth_off"}
         else:
-            toggle_btn = {"text": "🕶️ Включить скрытность", "style": "primary", "callback_data": "stealth_on"}
+            toggle_btn = {"text": "Включить скрытность", "style": "primary", "callback_data": "stealth_on"}
         return {
             "inline_keyboard": [
                 [toggle_btn],
@@ -303,11 +303,13 @@ class UiMarkupsMixin:
                 ],
                 [
                     {"text": "Antigravity", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"), "callback_data": "app:Antigravity"},
-                    {"text": "🔮 Профили AG", "style": "primary", "icon_custom_emoji_id": ICONS.get("gear"), "callback_data": "antigravity_menu"},
-                ],
-                [
+                    {"text": "Codex", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chatgpt") or ICONS.get("bot"), "callback_data": "app:ChatGPT"},
                     {"text": "Консоль (Терминал)", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
-                    {"text": "⚡ Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
+                ],
+                [{"text": "Codex: варианты запуска", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chatgpt") or ICONS.get("bot"), "callback_data": "codex_diagnostics"}],
+                [
+                    {"text": "Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
+                    {"text": "Лечение AG & VPN", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh") or ICONS.get("terminal"), "callback_data": "ag_heal"},
                 ],
                 self.back_button("menu"),
             ]
@@ -431,7 +433,7 @@ class UiMarkupsMixin:
             "inline_keyboard": [
                 [{"text": "Обновить состояние", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "telemetry_now"}],
                 [{"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"}],
-                [{"text": "📊 Активность за день", "style": "primary", "icon_custom_emoji_id": ICONS.get("clock"), "callback_data": "menu_activity"}],
+                [{"text": "Активность за день", "style": "primary", "icon_custom_emoji_id": ICONS.get("clock"), "callback_data": "menu_activity"}],
                 [{"text": "Графики", "style": "primary", "icon_custom_emoji_id": ICONS.get("chart"), "callback_data": "history_menu"}],
                 self.back_button("settings_menu"),
             ]
@@ -602,7 +604,7 @@ class UiMarkupsMixin:
 
         if show_emergency:
             emerg_btn = {
-                "text": "⚡ Аварийное выключение",
+                "text": "Аварийное выключение",
                 "style": "danger",
                 "callback_data": "emergency_power_off",
             }
@@ -617,7 +619,7 @@ class UiMarkupsMixin:
         cross_icon = ICONS.get("cross")
 
         force_btn = {
-            "text": "⚡ Да, выключить принудительно",
+            "text": "Да, выключить принудительно",
             "style": "danger",
             "callback_data": "emergency_power_off_confirm",
         }
@@ -625,7 +627,7 @@ class UiMarkupsMixin:
             force_btn["icon_custom_emoji_id"] = power_icon
 
         cancel_btn = {
-            "text": "✖ Отмена",
+            "text": "Отмена",
             "style": "primary",
             "callback_data": "power_menu",
         }
@@ -648,6 +650,7 @@ class UiMarkupsMixin:
         back_icon = ICONS.get("back")
         gear_icon = ICONS.get("gear")
         power_icon = ICONS.get("power")
+        term_icon = ICONS.get("terminal")
 
         # 1. Accounts grid (buttons to switch)
         for acc in accounts:
@@ -658,7 +661,7 @@ class UiMarkupsMixin:
 
             if is_active:
                 btn = {
-                    "text": f"✓ {name} (Активен)",
+                    "text": f"{name} (Активен)",
                     "style": "success",
                     "callback_data": "ag_noop",
                 }
@@ -666,36 +669,47 @@ class UiMarkupsMixin:
                     btn["icon_custom_emoji_id"] = check_icon
             else:
                 btn = {
-                    "text": f"🔄 {name} ({pct}%)",
+                    "text": f"{name} ({pct}%)",
                     "style": "primary",
                     "callback_data": f"ag_switch:{acc_id}",
                 }
             rows.append([btn])
 
-        # 2. Auto-switch & Restart actions
+        # 2. Auto-switch, Heal & Restart actions
         action_row = [
             {
-                "text": "⚡ Авто-выбор лучшего",
+                "text": "Авто-выбор лучшего",
                 "style": "primary",
+                "icon_custom_emoji_id": gear_icon,
                 "callback_data": "ag_switch:auto",
             },
             {
-                "text": "🔄 Перезапуск IDE",
+                "text": "Лечение AG & VPN",
                 "style": "secondary",
-                "callback_data": "ag_restart",
+                "icon_custom_emoji_id": refresh_icon,
+                "callback_data": "ag_heal",
             },
         ]
         rows.append(action_row)
 
+        rows.append([
+            {
+                "text": "Перезапуск IDE",
+                "style": "secondary",
+                "icon_custom_emoji_id": term_icon,
+                "callback_data": "ag_restart",
+            }
+        ])
+
         # 3. Bottom controls
         bottom_row = [
             {
-                "text": "📊 Обновить",
+                "text": "Обновить",
                 "style": "primary",
                 "callback_data": "ag_refresh",
             },
             {
-                "text": "« Меню",
+                "text": "Меню",
                 "style": "secondary",
                 "callback_data": "menu",
             },

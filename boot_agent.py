@@ -16,6 +16,7 @@ from pathlib import Path
 
 import certifi
 import paho.mqtt.client as mqtt
+from core.mqtt_fallback import MqttClientWithIpFallback
 import psutil
 
 # Re-export all symbols from system package for 100% backward compatibility
@@ -118,11 +119,15 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             except Exception:
                 pass
 
-        self.mqtt = mqtt.Client(
+        fallback_ip = self.config["mqtt"].get("fallback_ip")
+        client_class = MqttClientWithIpFallback if fallback_ip else mqtt.Client
+        fallback_options = {"fallback_ip": fallback_ip} if fallback_ip else {}
+        self.mqtt = client_class(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=f"windows-system-{socket.gethostname().lower()}",
             clean_session=True,
             protocol=mqtt.MQTTv311,
+            **fallback_options,
         )
         self.mqtt.username_pw_set(
             self.config["mqtt"]["username"],

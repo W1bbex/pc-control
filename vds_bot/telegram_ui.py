@@ -5,6 +5,7 @@
 import html
 import json
 import logging
+import re
 import threading
 import time
 import requests
@@ -37,6 +38,12 @@ except ImportError:
 
 LOG = logging.getLogger("pc-control-bot.telegram_ui")
 
+# Strategic sanitizer: strips leading Unicode emojis, variation selectors, and joiners
+# from button labels when icon_custom_emoji_id is used, preventing duplicate icons in Telegram UI.
+EMOJI_PREFIX_RE = re.compile(
+    r"^[\s\u200d\ufe0e\ufe0f\U0001f000-\U0001faff\u2600-\u27bf\u2300-\u23ff\u2b50\u25aa-\u25fe\u2190-\u21ff\u2900-\u297f\u2b00-\u2bff]+\s*"
+)
+
 
 class TelegramBotApi(UiTemplatesMixin):
     def __init__(self, token):
@@ -67,6 +74,7 @@ class TelegramBotApi(UiTemplatesMixin):
                     for btn in row:
                         if isinstance(btn, dict):
                             btn_copy = {k: v for k, v in btn.items() if v is not None}
+                            has_custom_icon = False
                             if "icon_custom_emoji_id" in btn_copy:
                                 val = btn_copy["icon_custom_emoji_id"]
                                 val_str = str(val).strip() if val is not None else ""
@@ -74,6 +82,13 @@ class TelegramBotApi(UiTemplatesMixin):
                                     btn_copy.pop("icon_custom_emoji_id", None)
                                 else:
                                     btn_copy["icon_custom_emoji_id"] = val_str
+                                    has_custom_icon = True
+                            # Strategic fix: when custom emoji chip is displayed (or in all styled buttons),
+                            # strip redundant leading unicode emojis from button text so they never double-render.
+                            if has_custom_icon and "text" in btn_copy and isinstance(btn_copy["text"], str):
+                                cleaned_text = EMOJI_PREFIX_RE.sub("", btn_copy["text"]).strip()
+                                if cleaned_text:
+                                    btn_copy["text"] = cleaned_text
                             new_row.append(btn_copy)
                         else:
                             new_row.append(btn)

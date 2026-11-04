@@ -55,6 +55,7 @@ from desktop.launcher import LauncherMixin
 from desktop.action_dispatcher import ActionDispatcherMixin
 
 from core.activity_logger import ActivityTracker
+from core.mqtt_fallback import MqttClientWithIpFallback
 from core.antigravity_switcher import AntigravityAccountManager
 from core.app_emoji_manager import AppEmojiManager
 from core.stealth_guard import StealthManager
@@ -262,11 +263,15 @@ class PCControlAgent(
             except Exception:
                 pass
 
-        self.mqtt = mqtt.Client(
+        fallback_ip = self.config["mqtt"].get("fallback_ip")
+        client_class = MqttClientWithIpFallback if fallback_ip else mqtt.Client
+        fallback_options = {"fallback_ip": fallback_ip} if fallback_ip else {}
+        self.mqtt = client_class(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=f"windows-agent-{socket.gethostname().lower()}",
             clean_session=True,
             protocol=mqtt.MQTTv311,
+            **fallback_options,
         )
         self.mqtt.username_pw_set(
             self.config["mqtt"]["username"],
