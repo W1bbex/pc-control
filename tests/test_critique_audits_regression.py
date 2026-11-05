@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Regression tests verifying fixes for verified defects from CRITIQUE_REPORT.md:
+Regression tests verifying core stability, win32 API types, and router resilience:
 1. monitoring.py: dashboard_text works without NameError when media is paused.
 2. telegram_ui.py: reboot_menu_markup returns strict 2D inline keyboard matrix.
 3. workspace_router.py: power-on fallback returns strict 2D inline keyboard matrix.

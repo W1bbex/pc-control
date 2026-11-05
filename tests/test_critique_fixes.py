@@ -1,4 +1,4 @@
-"""Regression and validation tests for fixes identified in CRITIQUE_REPORT.md."""
+"""Regression and validation tests for core stability and win32 API fixes."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
