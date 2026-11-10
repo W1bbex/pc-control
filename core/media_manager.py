@@ -181,6 +181,10 @@ class MediaManager:
                 type(e).__name__,
                 e,
             )
+            try:
+                self._http_session.close()
+            except Exception:
+                pass
             self._http_session = requests.Session()
             func = getattr(self._http_session, method.lower(), self._http_session.request)
             return func(url, **kwargs)
@@ -710,7 +714,13 @@ class MediaManager:
         def _target():
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._run_loop())
+            try:
+                self._loop.run_until_complete(self._run_loop())
+            finally:
+                try:
+                    self._loop.close()
+                except Exception:
+                    pass
 
         self._thread = threading.Thread(
             target=_target,

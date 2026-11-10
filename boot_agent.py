@@ -85,6 +85,9 @@ patch_paho_sockpair()
 
 class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMixin):
     def __init__(self):
+        if not CONFIG_PATH.exists():
+            LOG.error("Required configuration file not found: %s", CONFIG_PATH)
+            sys.exit(1)
         self.config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         mqtt_pw = os.getenv("MQTT_PASSWORD")
         if mqtt_pw:

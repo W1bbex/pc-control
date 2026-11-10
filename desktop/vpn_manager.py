@@ -261,12 +261,12 @@ class VpnManagerMixin:
         db_path = Path(os.path.expandvars(r"%LOCALAPPDATA%\incy\incy.db"))
         if not db_path.exists():
             return []
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             cur = conn.cursor()
             cur.execute("SELECT id, name, latency FROM servers WHERE name NOT LIKE '%Россия%'")
             rows = cur.fetchall()
-            conn.close()
             servers = []
             for s_id, s_name, s_lat in rows:
                 lat = int(s_lat) if s_lat is not None and s_lat >= 0 else 9999
@@ -280,6 +280,12 @@ class VpnManagerMixin:
         except Exception as e:
             LOG.warning("Failed to query INCY servers from db: %s", e)
             return []
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def switch_next_incy_server(self, target_server_id=None):
         """

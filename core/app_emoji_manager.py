@@ -190,10 +190,11 @@ class AppEmojiManager:
 
     def clear_all_emojis(self):
         """Wipe local cache and reset state."""
-        self.cache = {}
-        self._save_cache()
-        self.last_notified_exe = None
-        self.last_notified_time = 0.0
+        with self.upload_lock:
+            self.cache = {}
+            self._save_cache()
+            self.last_notified_exe = None
+            self.last_notified_time = 0.0
 
     def notify_app_opened(self, exe_path, exe_name, window_title=None, send_telegram_message=False):
         key = exe_name.lower()

@@ -30,11 +30,7 @@ from desktop.constants import (
     AGENT_VERSION,
     BASE_DIR,
     CONFIG_PATH,
-    DATA_DIR,
-    ICONS,
     LOG_DIR,
-    PROTECTED_PROCESSES,
-    REAL_BOOT_TIME,
     STATE_PATH,
     TOPIC_ACK,
     TOPIC_ACTIVITY_QUERY,
@@ -45,7 +41,6 @@ from desktop.constants import (
     TOPIC_SCREENSHOT,
     TOPIC_STATUS,
     TOPIC_TELEMETRY,
-    get_real_boot_time,
 )
 from desktop.sensors import SensorHelper
 from desktop.telemetry import TelemetryMixin
@@ -263,7 +258,8 @@ class PCControlAgent(
             except Exception:
                 pass
 
-        fallback_ip = self.config["mqtt"].get("fallback_ip")
+        mqtt_cfg = self.config.get("mqtt", {})
+        fallback_ip = mqtt_cfg.get("fallback_ip")
         client_class = MqttClientWithIpFallback if fallback_ip else mqtt.Client
         fallback_options = {"fallback_ip": fallback_ip} if fallback_ip else {}
         self.mqtt = client_class(
@@ -274,8 +270,8 @@ class PCControlAgent(
             **fallback_options,
         )
         self.mqtt.username_pw_set(
-            self.config["mqtt"]["username"],
-            self.config["mqtt"]["password"],
+            mqtt_cfg.get("username", ""),
+            mqtt_cfg.get("password", ""),
         )
         self.mqtt.tls_set(
             ca_certs=certifi.where(),

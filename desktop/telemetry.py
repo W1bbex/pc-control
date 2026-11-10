@@ -508,8 +508,13 @@ class TelemetryMixin:
                         exe_path, exe_name, title
                     )
                     if new_emoji_id:
-                        self.current_session_emoji_id = new_emoji_id
-                        if new_emoji_id != emoji_id:
+                        should_publish = False
+                        with self.state_lock:
+                            if self.current_session_app == exe_name:
+                                self.current_session_emoji_id = new_emoji_id
+                                if new_emoji_id != emoji_id:
+                                    should_publish = True
+                        if should_publish:
                             self.publish_active_app_update(exe_name, new_emoji_id, title)
                 except Exception:
                     LOG.exception("Error in _bg_notify")

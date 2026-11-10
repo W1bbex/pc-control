@@ -57,9 +57,18 @@ class LauncherMixin:
     @staticmethod
     def _has_visible_window(target_names):
         """Check if any process matching target_names has at least one visible top-level window."""
+        hdesk = None
+        orig_desk = None
+        user32 = None
         try:
             import psutil
             user32 = ctypes.windll.user32
+            kernel32 = getattr(ctypes.windll, "kernel32", None)
+            if kernel32 and hasattr(user32, "GetThreadDesktop"):
+                try:
+                    orig_desk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+                except Exception:
+                    orig_desk = None
             hdesk = user32.OpenDesktopW("Default", 0, False, 0x0100)
             if hdesk:
                 user32.SetThreadDesktop(hdesk)
@@ -94,6 +103,17 @@ class LauncherMixin:
         except Exception as err:
             LOG.warning("Failed checking visible window: %s", err)
             return False
+        finally:
+            if hdesk and user32:
+                try:
+                    if orig_desk:
+                        user32.SetThreadDesktop(orig_desk)
+                except Exception:
+                    pass
+                try:
+                    user32.CloseDesktop(hdesk)
+                except Exception:
+                    pass
 
     def launch_app(self, app_key, workspace_id=None, progress_callback=None, vpn=None, connect_vpn=True):
         app_config = self.config.get("apps", {}).get(app_key)
