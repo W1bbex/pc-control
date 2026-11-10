@@ -118,6 +118,8 @@ unsigned long lastBeatMs = 0;
 bool relayHasPressed = false;
 bool beatHasPlayed = false;
 
+#include "network_diagnostics.h"
+
 // --- ISR Queue for Physical Input ---
 #define ISR_QUEUE_SIZE 16
 volatile unsigned long isrTimeQueue[ISR_QUEUE_SIZE];
@@ -273,15 +275,19 @@ void publishHeartbeat() {
   if (!mqtt.connected()) return;
   const time_t now = time(nullptr);
   
-  char payload[200];
+  char payload[384];
   snprintf(
     payload,
     sizeof(payload),
-    "{\"state\":\"online\",\"ts\":%ld,\"boot_id\":\"%s\",\"version\":\"2.0\"}",
+    "{\"state\":\"online\",\"ts\":%ld,\"boot_id\":\"%s\",\"version\":\"2.1\","
+    "\"uptime_ms\":%lu,\"heap\":%u,\"max_block\":%u,\"rssi\":%d}",
     (now >= 1700000000) ? (long)now : 0L,
-    espBootId.c_str()
+    espBootId.c_str(), millis(), ESP.getFreeHeap(), ESP.getMaxFreeBlockSize(), WiFi.RSSI()
   );
-  mqtt.publish(TOPIC_ESP_STATUS, payload, true);
+  if (!mqtt.publish(TOPIC_ESP_STATUS, payload, true)) {
+    recordNetworkFailure("heartbeat_publish_failed", mqtt.state());
+    secureClient.stop();
+  }
 }
 
 void resetPhysicalAttempt() {
@@ -715,7 +721,6 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
   publishAck(id, "executed");
 }
 
-static unsigned long lastMqttOkMs = 0;
 static unsigned long lastWifiAttemptMs = 0;
 
 void connectWiFi() {
@@ -750,7 +755,20 @@ void connectMqtt() {
 
   if (ESP.getFreeHeap() < 10000) {
     Serial.printf("Low heap (%u bytes). Delaying MQTT connect.\n", ESP.getFreeHeap());
+    recordNetworkFailure("low_heap", mqtt.state());
     return;
+  }
+
+  IPAddress brokerIp;
+  if (WiFi.hostByName(MQTT_HOST, brokerIp, 1500) != 1) {
+    recordNetworkFailure("dns_failed", mqtt.state());
+    return;
+  }
+  mqtt.setServer(brokerIp, MQTT_PORT);
+  static uint32_t lastConnectStartMs = 0;
+  if (!lastConnectStartMs || millis() - lastConnectStartMs >= 60000) {
+    lastConnectStartMs = millis();
+    networkDiagnostics.record("mqtt_connect_start", brokerIp.toString().c_str());
   }
 
   Serial.printf("MQTT connecting... (Free heap: %u bytes)\n", ESP.getFreeHeap());
@@ -767,14 +785,25 @@ void connectMqtt() {
   if (!connected) {
     Serial.print("MQTT connect failed, state=");
     Serial.println(mqtt.state());
+    char tlsDetail[120];
+    const int tlsError = secureClient.getLastSSLError(tlsDetail, sizeof(tlsDetail));
+    Serial.printf("TLS error=%d detail=%s connect_ms=%lu\n", tlsError, tlsDetail, millis() - nowMs);
+    recordNetworkFailure("mqtt_connect_failed", mqtt.state(), tlsError, millis() - nowMs);
     return;
   }
 
-  mqtt.subscribe(TOPIC_COMMAND, 1);
+  if (!mqtt.subscribe(TOPIC_COMMAND, 1)) {
+    recordNetworkFailure("subscribe_failed", mqtt.state());
+    secureClient.stop();
+    return;
+  }
+  char connectionDetail[100];
+  snprintf(connectionDetail, sizeof(connectionDetail), "connect_ms=%lu ip=%s", millis() - nowMs, brokerIp.toString().c_str());
+  networkDiagnostics.record("mqtt_connected", connectionDetail);
   publishHeartbeat();
   lastHeartbeatMs = millis();
   Serial.println("MQTT connected");
-  lastMqttOkMs = nowMs;
+  networkDiagnostics.startReplay();
 }
 
 void setup() {
@@ -796,7 +825,12 @@ void setup() {
 
   mqttClientId = "pc-power-";
   mqttClientId += String(ESP.getChipId(), HEX);
-  espBootId = "esp-" + String(ESP.getChipId(), HEX) + "-" + String(millis());
+  espBootId = "esp-" + String(ESP.getChipId(), HEX) + "-" + String(ESP.random(), HEX);
+
+  networkDiagnostics.begin();
+  wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& event) {
+    wifiDisconnectReason = event.reason;
+  });
 
   connectWiFi();
   syncClock();
@@ -813,7 +847,7 @@ void setup() {
   mqtt.setSocketTimeout(1);
 
   lastMqttAttemptMs = millis() - 5000;
-  lastMqttOkMs = millis();
+  lastNetworkOkMs = millis();
   connectMqtt();
 }
 
@@ -842,10 +876,9 @@ void loop() {
     }
   } else {
     if (!mqtt.connected()) {
-      connectMqtt();
+      if (relayOnUntilMs == 0) connectMqtt();
     } else {
-      lastMqttOkMs = nowMs;
-      mqtt.loop();
+      if (!mqtt.loop()) recordNetworkFailure("mqtt_loop_failed", mqtt.state());
 
       if (nowMs - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
         lastHeartbeatMs = nowMs;
@@ -853,4 +886,6 @@ void loop() {
       }
     }
   }
+  serviceNetworkRecovery(WiFi.status() == WL_CONNECTED && mqtt.connected(), relayOnUntilMs != 0);
+  if (relayOnUntilMs == 0) networkDiagnostics.replay(mqtt);
 }

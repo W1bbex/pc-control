@@ -159,9 +159,13 @@ class MqttGateway:
         if topic == TOPIC_ESP_STATUS:
             try:
                 data = json.loads(payload)
+                if isinstance(data, dict) and "event" in data and "state" not in data:
+                    LOG.info("ESP diagnostic retained=%s data=%s", message.retain, payload[:1024])
+                    return
                 current = str(data.get("state", "unknown"))
                 boot_id = data.get("boot_id")
                 ts = data.get("ts")
+                LOG.info("ESP status retained=%s data=%s", message.retain, payload[:1024])
             except Exception:
                 current, boot_id, ts = payload, None, None
                 
