@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import threading
 import time
 
 LOG = logging.getLogger("pc-control-bot.physical_button")
@@ -44,13 +45,16 @@ class PhysicalButtonManager:
         self.on_state_change_cb = None
         self.last_unlock_triggered_at = 0.0
         self.last_unlock_gesture_at = 0.0
+        self._lock = threading.RLock()
 
     def set_saved_password(self, password):
-        self.saved_password = password
+        with self._lock:
+            self.saved_password = password
 
     def revoke_morse_eligibility(self):
-        self.physical_morse_unlock_eligible = False
-        self.gesture_buffer.clear()
+        with self._lock:
+            self.physical_morse_unlock_eligible = False
+            self.gesture_buffer.clear()
         if self.on_state_change_cb:
             self.on_state_change_cb()
 
@@ -340,83 +344,105 @@ class PhysicalButtonManager:
 
             # 1. Diagnostics mode
             if self.mode == "test" or self.input_message_id:
-                self.input_entries.append(f"{kind.title()} {duration} ms")
-                self.input_entries = self.input_entries[-12:]
-                target_msg_id = self.input_message_id or self.active_message_id
+                with self._lock:
+                    self.input_entries.append(f"{kind.title()} {duration} ms")
+                    self.input_entries = self.input_entries[-12:]
+                    entries_snapshot = list(self.input_entries)
+                    target_msg_id = self.input_message_id or self.active_message_id
                 if target_msg_id:
-                    text = "<b>🕹 Физическая кнопка — диагностика</b>\n\n" + "\n".join(self.input_entries)
+                    text = "<b>🕹 Физическая кнопка — диагностика</b>\n\n" + "\n".join(entries_snapshot)
                     res = self.ui.send_message(chat_id, text, reply_markup={"inline_keyboard": [self.ui.back_button("physical_button")]}, message_id=target_msg_id)
                     if res and res.get("message_id"):
-                        self.input_message_id = res["message_id"]
-                        self.active_message_id = res["message_id"]
+                        with self._lock:
+                            self.input_message_id = res["message_id"]
+                            self.active_message_id = res["message_id"]
                 return
 
             # 2. Live password recording mode via physical button
             if self.mode == "record_password" and self.active_message_id:
-                if len(self.password_draft) < 12:
-                    self.password_draft.append(symbol)
-                text = self.password_record_text()
-                markup = self.password_record_markup()
-                res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.active_message_id)
+                with self._lock:
+                    if len(self.password_draft) < 12:
+                        self.password_draft.append(symbol)
+                    text = self.password_record_text()
+                    markup = self.password_record_markup()
+                    msg_id = self.active_message_id
+                res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=msg_id)
                 if res and res.get("message_id"):
-                    self.active_message_id = res["message_id"]
+                    with self._lock:
+                        self.active_message_id = res["message_id"]
                 return
 
             # 3. Live unlock pattern recording mode via physical button
             if self.mode == "record_unlock_pattern" and self.active_message_id:
-                if len(self.unlock_draft) < 8:
-                    self.unlock_draft.append(symbol)
-                text = self.unlock_builder_text()
-                markup = self.unlock_builder_markup()
-                res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.active_message_id)
+                with self._lock:
+                    if len(self.unlock_draft) < 8:
+                        self.unlock_draft.append(symbol)
+                    text = self.unlock_builder_text()
+                    markup = self.unlock_builder_markup()
+                    msg_id = self.active_message_id
+                res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=msg_id)
                 if res and res.get("message_id"):
-                    self.active_message_id = res["message_id"]
+                    with self._lock:
+                        self.active_message_id = res["message_id"]
                 return
 
             # 4. Normal gesture recognition (only when not in configuration modes)
-            within_combo_window = (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 6.0 and len(self.gesture_buffer) > 0)
-            if not self.physical_morse_unlock_eligible and not within_combo_window:
+            trigger_action = None
+            state_changed = False
+            with self._lock:
+                within_combo_window = (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 6.0 and len(self.gesture_buffer) > 0)
+                if not self.physical_morse_unlock_eligible and not within_combo_window:
+                    return
+
+                if self.physical_morse_unlock_eligible:
+                    eligible, _ = self.is_morse_unlock_eligible(now=now)
+                    if not eligible:
+                        self.physical_morse_unlock_eligible = False
+                        state_changed = True
+                        trigger_action = "ineligible"
+
+                if trigger_action != "ineligible":
+                    # Track gesture buffer (keep only presses from last 6.0 seconds to allow 2 clicks + 2 holds)
+                    old_buffer_len = len(self.gesture_buffer)
+                    self.gesture_buffer = [(s, t) for (s, t) in self.gesture_buffer if now - t <= 6.0]
+                    if len(self.gesture_buffer) < old_buffer_len or (now - getattr(self, "last_unlock_triggered_at", 0.0) > 6.0):
+                        self.last_unlock_consumed_count = 0
+                    self.gesture_buffer.append((symbol, now))
+
+                    unlock_pattern = self.saved_unlock_pattern or "CC"
+                    ws_pattern = unlock_pattern + "HH"
+
+                    # 1. Check workspace combo pattern first (e.g. CCHH)
+                    ws_len = len(ws_pattern)
+                    if len(self.gesture_buffer) >= ws_len:
+                        recent_ws = "".join(s for (s, t) in self.gesture_buffer[-ws_len:])
+                        if recent_ws == ws_pattern:
+                            self.gesture_buffer.clear()
+                            self.last_unlock_consumed_count = 0
+                            trigger_action = "unlock_and_workspace"
+
+                    # 2. Check unlock pattern (e.g. CC)
+                    if trigger_action is None:
+                        pattern_len = len(unlock_pattern)
+                        if len(self.gesture_buffer) >= pattern_len:
+                            recent = "".join(s for (s, t) in self.gesture_buffer[-pattern_len:])
+                            if recent == unlock_pattern:
+                                consumed = getattr(self, "last_unlock_consumed_count", 0)
+                                new_presses = len(self.gesture_buffer) - min(consumed, len(self.gesture_buffer))
+                                if (now - getattr(self, "last_unlock_triggered_at", 0.0) > 3.0) and new_presses >= pattern_len:
+                                    self.last_unlock_triggered_at = now
+                                    self.last_unlock_consumed_count = len(self.gesture_buffer)
+                                    trigger_action = "unlock"
+
+            if state_changed and self.on_state_change_cb:
+                self.on_state_change_cb()
+            if trigger_action == "ineligible":
                 return
-
-            if self.physical_morse_unlock_eligible:
-                eligible, _ = self.is_morse_unlock_eligible(now=now)
-                if not eligible:
-                    self.physical_morse_unlock_eligible = False
-                    if self.on_state_change_cb:
-                        self.on_state_change_cb()
-                    return
-
-            # Track gesture buffer (keep only presses from last 6.0 seconds to allow 2 clicks + 2 holds)
-            old_buffer_len = len(self.gesture_buffer)
-            self.gesture_buffer = [(s, t) for (s, t) in self.gesture_buffer if now - t <= 6.0]
-            if len(self.gesture_buffer) < old_buffer_len or (now - getattr(self, "last_unlock_triggered_at", 0.0) > 6.0):
-                self.last_unlock_consumed_count = 0
-            self.gesture_buffer.append((symbol, now))
-
-            unlock_pattern = self.saved_unlock_pattern or "CC"
-            ws_pattern = unlock_pattern + "HH"
-
-            # 1. Check workspace combo pattern first (e.g. CCHH)
-            ws_len = len(ws_pattern)
-            if len(self.gesture_buffer) >= ws_len:
-                recent_ws = "".join(s for (s, t) in self.gesture_buffer[-ws_len:])
-                if recent_ws == ws_pattern:
-                    self.gesture_buffer.clear()
-                    self.last_unlock_consumed_count = 0
-                    self._handle_unlock_and_workspace_gesture_triggered(chat_id)
-                    return
-
-            # 2. Check unlock pattern (e.g. CC)
-            pattern_len = len(unlock_pattern)
-            if len(self.gesture_buffer) >= pattern_len:
-                recent = "".join(s for (s, t) in self.gesture_buffer[-pattern_len:])
-                if recent == unlock_pattern:
-                    consumed = getattr(self, "last_unlock_consumed_count", 0)
-                    new_presses = len(self.gesture_buffer) - min(consumed, len(self.gesture_buffer))
-                    if (now - getattr(self, "last_unlock_triggered_at", 0.0) > 3.0) and new_presses >= pattern_len:
-                        self.last_unlock_triggered_at = now
-                        self.last_unlock_consumed_count = len(self.gesture_buffer)
-                        self._handle_unlock_gesture_triggered(chat_id)
+            elif trigger_action == "unlock_and_workspace":
+                self._handle_unlock_and_workspace_gesture_triggered(chat_id)
+                return
+            elif trigger_action == "unlock":
+                self._handle_unlock_gesture_triggered(chat_id)
 
         elif event_type == "success":
             self.esp_locked = False

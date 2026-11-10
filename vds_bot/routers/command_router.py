@@ -39,7 +39,7 @@ def route_message(app, message: dict) -> None:
         return
     chat_type = chat.get("type", "private")
     from_id = message.get("from", {}).get("id") if isinstance(message.get("from"), dict) else None
-    text = message.get("text", "").strip()
+    text = (message.get("text") or "").strip()
     allowed_id = _get_allowed_user_id(app)
 
     # Group chats support: only allow authorized user to trigger player

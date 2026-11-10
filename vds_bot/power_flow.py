@@ -150,34 +150,35 @@ class PowerFlowManager:
                 LOG.exception("Could not save flow_state.json")
 
     def reset_flow(self):
-        self.flow_id = None
-        self.chat_id = None
-        self.stage = PowerFlowStage.IDLE
-        self.message_id = None
-        self.created_at = 0.0
-        self.expires_at = 0.0
-        self.unlock_attempts = 0
-        self.pending_unlock_command_id = None
-        self.active_workspace_id = None
-        self.workspace_cancelled = False
-        self.auto_launch_workspace = False
-        self.auto_launch_game = False
-        self.target_game = None
-        self.target_game_vpn = None
-        self.target_workspace_vpn = None
-        self.reboot_with_unlock = False
-        self.reboot_started_at = 0.0
-        self.reboot_offline_detected = False
-        self.last_card_update_at = 0.0
-        self.win_online_at = None
-        self.logon_ready_at = None
-        self.unlocked_at = None
-        self.selecting_mode = False
-        if FLOW_STATE_PATH.exists():
-            try:
-                FLOW_STATE_PATH.unlink()
-            except Exception:
-                pass
+        with self._lock:
+            self.flow_id = None
+            self.chat_id = None
+            self.stage = PowerFlowStage.IDLE
+            self.message_id = None
+            self.created_at = 0.0
+            self.expires_at = 0.0
+            self.unlock_attempts = 0
+            self.pending_unlock_command_id = None
+            self.active_workspace_id = None
+            self.workspace_cancelled = False
+            self.auto_launch_workspace = False
+            self.auto_launch_game = False
+            self.target_game = None
+            self.target_game_vpn = None
+            self.target_workspace_vpn = None
+            self.reboot_with_unlock = False
+            self.reboot_started_at = 0.0
+            self.reboot_offline_detected = False
+            self.last_card_update_at = 0.0
+            self.win_online_at = None
+            self.logon_ready_at = None
+            self.unlocked_at = None
+            self.selecting_mode = False
+            if FLOW_STATE_PATH.exists():
+                try:
+                    FLOW_STATE_PATH.unlink()
+                except Exception:
+                    pass
 
     def start_power_on(self, chat_id):
         with self._lock:
@@ -460,19 +461,20 @@ class PowerFlowManager:
         self.save_state()
 
     def start_reboot_flow(self, chat_id, message_id=None, unlock=True):
-        self.flow_id = str(uuid.uuid4())
-        self.chat_id = chat_id
-        self.message_id = message_id
-        self.stage = PowerFlowStage.REBOOTING
-        self.reboot_with_unlock = bool(unlock)
-        self.reboot_started_at = time.time()
-        self.reboot_offline_detected = False
-        self.created_at = time.time()
-        self.expires_at = self.created_at + FLOW_TTL_SECONDS
-        self.unlock_attempts = 0
-        self.pending_unlock_command_id = None
-        self.workspace_cancelled = False
-        self.auto_launch_workspace = False
+        with self._lock:
+            self.flow_id = str(uuid.uuid4())
+            self.chat_id = chat_id
+            self.message_id = message_id
+            self.stage = PowerFlowStage.REBOOTING
+            self.reboot_with_unlock = bool(unlock)
+            self.reboot_started_at = time.time()
+            self.reboot_offline_detected = False
+            self.created_at = time.time()
+            self.expires_at = self.created_at + FLOW_TTL_SECONDS
+            self.unlock_attempts = 0
+            self.pending_unlock_command_id = None
+            self.workspace_cancelled = False
+            self.auto_launch_workspace = False
 
         self.save_state()
 
@@ -497,14 +499,32 @@ class PowerFlowManager:
         }
         res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
         if res and res.get("message_id"):
-            self.message_id = res["message_id"]
+            with self._lock:
+                self.message_id = res["message_id"]
             self.save_state()
 
     def start_manual_unlock(self, chat_id, message_id=None, auto_launch_workspace=False):
-        if self.stage == PowerFlowStage.UNLOCKING and self.pending_unlock_command_id:
+        already_in_flight = False
+        with self._lock:
+            if self.stage == PowerFlowStage.UNLOCKING and self.pending_unlock_command_id:
+                already_in_flight = True
+                if auto_launch_workspace:
+                    self.auto_launch_workspace = True
+            else:
+                self.flow_id = str(uuid.uuid4())
+                self.chat_id = chat_id
+                self.message_id = message_id
+                self.stage = PowerFlowStage.UNLOCKING
+                self.created_at = time.time()
+                self.expires_at = self.created_at + FLOW_TTL_SECONDS
+                self.unlock_attempts = 0
+                self.pending_unlock_command_id = None
+                self.workspace_cancelled = False
+                self.auto_launch_workspace = bool(auto_launch_workspace)
+
+        if already_in_flight:
             LOG.info("Manual unlock requested while an unlock command is already in-flight. Ignoring duplicate trigger.")
             if auto_launch_workspace:
-                self.auto_launch_workspace = True
                 self.save_state()
             text = (
                 "<b>🔐 Разблокировка уже выполняется...</b>\n\n"
@@ -512,17 +532,6 @@ class PowerFlowManager:
             )
             self.ui.send_message(chat_id, text, reply_markup=None, message_id=message_id or self.message_id)
             return
-
-        self.flow_id = str(uuid.uuid4())
-        self.chat_id = chat_id
-        self.message_id = message_id
-        self.stage = PowerFlowStage.UNLOCKING
-        self.created_at = time.time()
-        self.expires_at = self.created_at + FLOW_TTL_SECONDS
-        self.unlock_attempts = 0
-        self.pending_unlock_command_id = None
-        self.workspace_cancelled = False
-        self.auto_launch_workspace = bool(auto_launch_workspace)
 
         self.save_state()
 
@@ -533,7 +542,8 @@ class PowerFlowManager:
         markup = self._get_unlocking_markup()
         res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
         if res and res.get("message_id"):
-            self.message_id = res["message_id"]
+            with self._lock:
+                self.message_id = res["message_id"]
             self.save_state()
 
         self.check_and_trigger_unlock(chat_id)
@@ -588,8 +598,13 @@ class PowerFlowManager:
         result = ack_data.get("result")
         data = ack_data.get("data") or {}
 
-        if self.stage == PowerFlowStage.UNLOCKING and cmd_id == self.pending_unlock_command_id:
-            self.pending_unlock_command_id = None
+        matched = False
+        with self._lock:
+            if self.stage == PowerFlowStage.UNLOCKING and cmd_id == self.pending_unlock_command_id:
+                self.pending_unlock_command_id = None
+                matched = True
+
+        if matched:
 
             sess = data.get("session") or self.mqtt.system_session
             if result == "executed":

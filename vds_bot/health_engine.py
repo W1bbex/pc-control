@@ -129,7 +129,12 @@ class HealthEngine:
             # it is strictly newer than the shutdown observation timestamp (or a confirmed reboot occurred)!
             if status in ("online", "unlocked", "locked", "fresh"):
                 msg_ts = ts if ts is not None else time.time()
-                reboot_detected = bool(boot_id and ((old_boot_id and boot_id != old_boot_id) or self.graceful_shutdown_until > 0.0))
+                reboot_detected = bool(
+                    boot_id and (
+                        (old_boot_id and boot_id != old_boot_id)
+                        or (old_boot_id is None and not is_retained)
+                    )
+                )
                 if reboot_detected or msg_ts > self.shutdown_observed_at:
                     self.clear_shutdown_observed()
                 if reboot_detected or msg_ts > self.graceful_shutdown_at:

@@ -6,6 +6,7 @@ Handles delayed power-off countdowns, SHUTDOWN_OBSERVED confirmation loops, auto
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +22,7 @@ except ImportError:
     from telegram_ui import ICONS
 
 LOG = logging.getLogger("pc-control-bot.scheduler")
-ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "0"))
+ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID") or 0)
 SCREENSHOT_TIMEOUT_SECONDS = 35
 SHUTDOWN_CONFIRM_TIMEOUT_SECONDS = 120
 
@@ -48,7 +49,10 @@ class PowerSchedulerMixin:
             or telem_age >= 20.0
             or (self.pending_shutdown_started_at and self.monitoring.latest_received_at < self.pending_shutdown_started_at)
         )
-        both_offline = (self.mqtt.system_status == "offline" and self.mqtt.desktop_status == "offline")
+        both_offline = (
+            self.mqtt.system_status in ("offline", "stale")
+            and self.mqtt.desktop_status in ("offline", "stale")
+        )
 
         if (
             getattr(self, "shutdown_acknowledged", False)
@@ -249,27 +253,28 @@ class PowerSchedulerMixin:
             watchdog_pc_online = False
 
         user_led_pref = getattr(self, "user_led_state", "on")
-        if user_led_pref == "off":
-            if getattr(self, "last_auto_led_state", None) != "off":
-                if hasattr(self.mqtt, "publish_esp_action"):
-                    if self.mqtt.publish_esp_action("LED_OFF"):
-                        self.last_auto_led_state = "off"
-                        LOG.info("Auto-LED Watchdog: user_led_state=off -> LED_OFF enforced")
-        else:
-            if (not watchdog_pc_online) and getattr(self, "last_auto_led_state", None) != "off":
-                if hasattr(self.mqtt, "publish_esp_action"):
-                    if self.mqtt.publish_esp_action("LED_OFF"):
-                        self.last_auto_led_state = "off"
-                        LOG.info("Auto-LED Watchdog: PC offline/sleeping (telem_age=%s) -> LED_OFF sent to cooler", telem_age)
-            elif watchdog_pc_online and getattr(self, "last_auto_led_state", None) != "on":
-                if hasattr(self.mqtt, "publish_esp_action"):
-                    color = getattr(self, "user_led_color", None)
-                    if color:
-                        self.mqtt.publish_esp_action("LED_COLOR", value=color)
-                    else:
-                        self.mqtt.publish_esp_action("LED_ON")
-                    self.last_auto_led_state = "on"
-                    LOG.info("Auto-LED Watchdog: PC online/awake -> LED sent to cooler")
+        with getattr(self, "state_lock", threading.RLock()):
+            if user_led_pref == "off":
+                if getattr(self, "last_auto_led_state", None) != "off":
+                    if hasattr(self.mqtt, "publish_esp_action"):
+                        if self.mqtt.publish_esp_action("LED_OFF"):
+                            self.last_auto_led_state = "off"
+                            LOG.info("Auto-LED Watchdog: user_led_state=off -> LED_OFF enforced")
+            else:
+                if (not watchdog_pc_online) and getattr(self, "last_auto_led_state", None) != "off":
+                    if hasattr(self.mqtt, "publish_esp_action"):
+                        if self.mqtt.publish_esp_action("LED_OFF"):
+                            self.last_auto_led_state = "off"
+                            LOG.info("Auto-LED Watchdog: PC offline/sleeping (telem_age=%s) -> LED_OFF sent to cooler", telem_age)
+                elif watchdog_pc_online and getattr(self, "last_auto_led_state", None) != "on":
+                    if hasattr(self.mqtt, "publish_esp_action"):
+                        color = getattr(self, "user_led_color", None)
+                        if color:
+                            self.mqtt.publish_esp_action("LED_COLOR", value=color)
+                        else:
+                            self.mqtt.publish_esp_action("LED_ON")
+                        self.last_auto_led_state = "on"
+                        LOG.info("Auto-LED Watchdog: PC online/awake -> LED sent to cooler")
 
         for cmd_id, pending in list(getattr(self, "pending_screenshots", {}).items()):
             if now - pending["requested_at"] >= SCREENSHOT_TIMEOUT_SECONDS:

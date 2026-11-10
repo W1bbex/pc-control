@@ -269,94 +269,94 @@ class TelemetryHistory:
                 sharex=True,
                 constrained_layout=True,
             )
-            figure.patch.set_facecolor("#111827")
-            figure.suptitle(
-                f"PC CONTROL — {title}",
-                fontsize=17,
-                fontweight="bold",
-            )
-
-            for axis in axes:
-                axis.set_facecolor("#111827")
-                axis.grid(True, color="#334155", alpha=0.45)
-                axis.spines[:].set_color("#475569")
-
-            axes[0].plot(times, [row[1] for row in rows], label="CPU", color="#22d3ee")
-            axes[0].plot(times, [row[3] for row in rows], label="GPU", color="#a78bfa")
-            axes[0].fill_between(
-                times,
-                0,
-                [100 if (row[10] or 0) >= 0.5 else 0 for row in rows],
-                color="#22c55e",
-                alpha=0.08,
-                label="Пользователь активен",
-            )
-            axes[0].fill_between(
-                times,
-                0,
-                [100 if row[1] is not None else 0 for row in rows],
-                color="#38bdf8",
-                alpha=0.04,
-                label="ПК включён",
-            )
-            axes[0].set_ylabel("Нагрузка, %")
-            axes[0].set_ylim(0, 105)
-            axes[0].legend(loc="upper left", ncol=4)
-
-            axes[1].plot(
-                times,
-                [row[2] for row in rows],
-                label="CPU",
-                color="#fb923c",
-            )
-            axes[1].plot(
-                times,
-                [row[4] for row in rows],
-                label="GPU",
-                color="#f43f5e",
-            )
-            axes[1].set_ylabel("Температура, °C")
-            axes[1].legend(loc="upper left", ncol=2)
-
-            axes[2].plot(
-                times,
-                [row[6] for row in rows],
-                label="RAM",
-                color="#34d399",
-            )
-            axes[2].plot(
-                times,
-                [row[7] for row in rows],
-                label="Диск C:",
-                color="#facc15",
-            )
-            axes[2].set_ylabel("Использовано, %")
-            axes[2].set_ylim(0, 105)
-            axes[2].legend(loc="upper left", ncol=2)
-
-            axes[3].plot(
-                times,
-                [row[8] for row in rows],
-                label="Скачивание",
-                color="#38bdf8",
-            )
-            axes[3].plot(
-                times,
-                [row[9] for row in rows],
-                label="Отдача",
-                color="#f472b6",
-            )
-            axes[3].set_ylabel("Сеть, Мбит/с")
-            axes[3].legend(loc="upper left", ncol=2)
-
-            locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
-            axes[3].xaxis.set_major_locator(locator)
-            axes[3].xaxis.set_major_formatter(
-                mdates.ConciseDateFormatter(locator, tz=MOSCOW)
-            )
-
-            output = io.BytesIO()
             try:
+                figure.patch.set_facecolor("#111827")
+                figure.suptitle(
+                    f"PC CONTROL — {title}",
+                    fontsize=17,
+                    fontweight="bold",
+                )
+
+                for axis in axes:
+                    axis.set_facecolor("#111827")
+                    axis.grid(True, color="#334155", alpha=0.45)
+                    axis.spines[:].set_color("#475569")
+
+                axes[0].plot(times, [row[1] for row in rows], label="CPU", color="#22d3ee")
+                axes[0].plot(times, [row[3] for row in rows], label="GPU", color="#a78bfa")
+                axes[0].fill_between(
+                    times,
+                    0,
+                    [100 if (row[10] or 0) >= 0.5 else 0 for row in rows],
+                    color="#22c55e",
+                    alpha=0.08,
+                    label="Пользователь активен",
+                )
+                axes[0].fill_between(
+                    times,
+                    0,
+                    [100 if row[1] is not None else 0 for row in rows],
+                    color="#38bdf8",
+                    alpha=0.04,
+                    label="ПК включён",
+                )
+                axes[0].set_ylabel("Нагрузка, %")
+                axes[0].set_ylim(0, 105)
+                axes[0].legend(loc="upper left", ncol=4)
+
+                axes[1].plot(
+                    times,
+                    [row[2] for row in rows],
+                    label="CPU",
+                    color="#fb923c",
+                )
+                axes[1].plot(
+                    times,
+                    [row[4] for row in rows],
+                    label="GPU",
+                    color="#f43f5e",
+                )
+                axes[1].set_ylabel("Температура, °C")
+                axes[1].legend(loc="upper left", ncol=2)
+
+                axes[2].plot(
+                    times,
+                    [row[6] for row in rows],
+                    label="RAM",
+                    color="#34d399",
+                )
+                axes[2].plot(
+                    times,
+                    [row[7] for row in rows],
+                    label="Диск C:",
+                    color="#facc15",
+                )
+                axes[2].set_ylabel("Использовано, %")
+                axes[2].set_ylim(0, 105)
+                axes[2].legend(loc="upper left", ncol=2)
+
+                axes[3].plot(
+                    times,
+                    [row[8] for row in rows],
+                    label="Скачивание",
+                    color="#38bdf8",
+                )
+                axes[3].plot(
+                    times,
+                    [row[9] for row in rows],
+                    label="Отдача",
+                    color="#f472b6",
+                )
+                axes[3].set_ylabel("Сеть, Мбит/с")
+                axes[3].legend(loc="upper left", ncol=2)
+
+                locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+                axes[3].xaxis.set_major_locator(locator)
+                axes[3].xaxis.set_major_formatter(
+                    mdates.ConciseDateFormatter(locator, tz=MOSCOW)
+                )
+
+                output = io.BytesIO()
                 figure.savefig(
                     output,
                     format="png",

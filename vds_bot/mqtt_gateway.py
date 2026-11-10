@@ -256,9 +256,14 @@ class MqttGateway:
         cmd_id = ack_data.get("id")
         if not cmd_id:
             return
+        result = ack_data.get("result")
         with self.pending_lock:
             if cmd_id in self.pending_commands:
-                del self.pending_commands[cmd_id]
+                if result == "progress":
+                    entry = self.pending_commands[cmd_id]
+                    entry["expires"] = int(time.time()) + int(entry.get("timeout", 30))
+                else:
+                    del self.pending_commands[cmd_id]
 
     def _health_loop(self):
         while True:
@@ -342,7 +347,7 @@ class MqttGateway:
             payload += f"|{value}"
             
         with self.pending_lock:
-            self.pending_commands[action_id] = {"action": action, "expires": expires, "target": "esp"}
+            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": 30, "target": "esp"}
             
         success = self.publish(TOPIC_ESP_COMMAND, payload)
         if not success:
@@ -368,7 +373,7 @@ class MqttGateway:
         }
         
         with self.pending_lock:
-            self.pending_commands[action_id] = {"action": action, "expires": expires, "target": "system"}
+            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": timeout, "target": "system"}
             
         success = self.publish(TOPIC_SYSTEM_COMMAND, json.dumps(payload_data))
         if not success:
@@ -394,7 +399,7 @@ class MqttGateway:
         }
         
         with self.pending_lock:
-            self.pending_commands[action_id] = {"action": action, "expires": expires, "target": "desktop"}
+            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": timeout, "target": "desktop"}
             
         success = self.publish(TOPIC_DESKTOP_COMMAND, json.dumps(payload_data))
         if not success:

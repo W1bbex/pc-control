@@ -102,11 +102,11 @@ logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 LOG = logging.getLogger("pc-control-bot")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "0"))
+ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID") or 0)
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "telegram_bot")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_PORT = int(os.environ.get("MQTT_PORT") or 1883)
 
 from typing import Optional
 

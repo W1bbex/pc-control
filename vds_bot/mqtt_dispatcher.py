@@ -24,7 +24,7 @@ except ImportError:
     from telegram_ui import ICONS
 
 LOG = logging.getLogger("pc-control-bot.mqtt_dispatcher")
-ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "0"))
+ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID") or 0)
 
 
 def unpack_screenshot_payload(payload):
@@ -71,57 +71,59 @@ class MqttDispatcherMixin:
             self.last_esp_status = esp_status
             esp_just_reconnected = (prev_esp_status is not None and prev_esp_status != "online" and esp_status == "online")
 
-            if esp_just_reconnected:
-                LOG.info("Auto-LED: ESP reconnected (status=%s, prev=%s, pc_online=%s)", esp_status, prev_esp_status, pc_online)
-                if pc_online:
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        if getattr(self, "user_led_state", "on") != "off":
+            with getattr(self, "state_lock", threading.RLock()):
+                if esp_just_reconnected:
+                    LOG.info("Auto-LED: ESP reconnected (status=%s, prev=%s, pc_online=%s)", esp_status, prev_esp_status, pc_online)
+                    if pc_online:
+                        if hasattr(self.mqtt, "publish_esp_action"):
+                            if getattr(self, "user_led_state", "on") != "off":
+                                color = getattr(self, "user_led_color", None)
+                                if color:
+                                    self.mqtt.publish_esp_action("LED_COLOR", value=color)
+                                else:
+                                    self.mqtt.publish_esp_action("LED_ON")
+                                self.last_auto_led_state = "on"
+                                LOG.info("Auto-LED: ESP reconnected while PC is online -> resynced LED to cooler")
+                            else:
+                                if self.mqtt.publish_esp_action("LED_OFF"):
+                                    self.last_auto_led_state = "off"
+                                    LOG.info("Auto-LED: ESP reconnected while PC online, but user_led_state=off -> LED_OFF sent to cooler")
+                    else:
+                        if hasattr(self.mqtt, "publish_esp_action"):
+                            if self.mqtt.publish_esp_action("LED_OFF"):
+                                self.last_auto_led_state = "off"
+                                LOG.info("Auto-LED: ESP reconnected while PC is offline -> resynced LED_OFF to cooler")
+                else:
+                    if pc_offline and getattr(self, "last_auto_led_state", None) != "off":
+                        if hasattr(self.mqtt, "publish_esp_action"):
+                            if self.mqtt.publish_esp_action("LED_OFF"):
+                                self.last_auto_led_state = "off"
+                                LOG.info("Auto-LED: PC went offline/asleep (sys=%s, desk=%s, sess=%s) -> LED_OFF sent to cooler", sys_status, desk_status, session)
+                    elif pc_online and getattr(self, "user_led_state", "on") != "off" and getattr(self, "last_auto_led_state", None) != "on":
+                        if hasattr(self.mqtt, "publish_esp_action"):
                             color = getattr(self, "user_led_color", None)
                             if color:
                                 self.mqtt.publish_esp_action("LED_COLOR", value=color)
                             else:
                                 self.mqtt.publish_esp_action("LED_ON")
                             self.last_auto_led_state = "on"
-                            LOG.info("Auto-LED: ESP reconnected while PC is online -> resynced LED to cooler")
-                        else:
+                            LOG.info("Auto-LED: PC came online/awake (sys=%s, desk=%s, sess=%s) -> LED sent to cooler", sys_status, desk_status, session)
+                    elif pc_online and getattr(self, "user_led_state", "on") == "off" and getattr(self, "last_auto_led_state", None) != "off":
+                        if hasattr(self.mqtt, "publish_esp_action"):
                             if self.mqtt.publish_esp_action("LED_OFF"):
                                 self.last_auto_led_state = "off"
-                                LOG.info("Auto-LED: ESP reconnected while PC online, but user_led_state=off -> LED_OFF sent to cooler")
-                else:
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_OFF"):
-                            self.last_auto_led_state = "off"
-                            LOG.info("Auto-LED: ESP reconnected while PC is offline -> resynced LED_OFF to cooler")
-            else:
-                if pc_offline and getattr(self, "last_auto_led_state", None) != "off":
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_OFF"):
-                            self.last_auto_led_state = "off"
-                            LOG.info("Auto-LED: PC went offline/asleep (sys=%s, desk=%s, sess=%s) -> LED_OFF sent to cooler", sys_status, desk_status, session)
-                elif pc_online and getattr(self, "user_led_state", "on") != "off" and getattr(self, "last_auto_led_state", None) != "on":
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        color = getattr(self, "user_led_color", None)
-                        if color:
-                            self.mqtt.publish_esp_action("LED_COLOR", value=color)
-                        else:
-                            self.mqtt.publish_esp_action("LED_ON")
-                        self.last_auto_led_state = "on"
-                        LOG.info("Auto-LED: PC came online/awake (sys=%s, desk=%s, sess=%s) -> LED sent to cooler", sys_status, desk_status, session)
-                elif pc_online and getattr(self, "user_led_state", "on") == "off" and getattr(self, "last_auto_led_state", None) != "off":
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_OFF"):
-                            self.last_auto_led_state = "off"
-                            LOG.info("Auto-LED: PC came online/awake, but user_led_state=off -> enforced LED_OFF")
+                                LOG.info("Auto-LED: PC came online/awake, but user_led_state=off -> enforced LED_OFF")
 
         elif event_type == "graceful_shutdown":
             LOG.info("Graceful shutdown event received from Windows: %s", data)
             self._clear_pending_shutdown()
             if hasattr(self.power_flow, "reset_flow"):
                 self.power_flow.reset_flow()
-            if hasattr(self.mqtt, "publish_esp_action"):
-                if self.mqtt.publish_esp_action("LED_OFF"):
-                    self.last_auto_led_state = "off"
-                    LOG.info("Auto-LED: Graceful shutdown -> LED_OFF sent to cooler")
+            with getattr(self, "state_lock", threading.RLock()):
+                if hasattr(self.mqtt, "publish_esp_action"):
+                    if self.mqtt.publish_esp_action("LED_OFF"):
+                        self.last_auto_led_state = "off"
+                        LOG.info("Auto-LED: Graceful shutdown -> LED_OFF sent to cooler")
 
         elif event_type == "physical_input":
             self.physical_btn.handle_event(data, target_user)
@@ -188,7 +190,7 @@ class MqttDispatcherMixin:
                 self.ui.send_message(target_user, "<b>Проверка Codex</b>\n\nАгент не ответил вовремя. Результат неизвестен.")
             pending = getattr(self, "pending_screenshots", {}).pop(cmd_id, None)
             if pending:
-                self.ui.send_message(pending["chat_id"], "❌ Desktop-агент не прислал скриншот за 30 секунд.")
+                self.ui.send_message(pending["chat_id"], "❌ Desktop-агент не прислал скриншот за 35 секунд.")
             getattr(self, "pending_telemetry_cmd_ids", {}).pop(cmd_id, None)
             if cmd_id == getattr(self, "pending_shutdown_cmd_id", None):
                 self.ui.send_message(
