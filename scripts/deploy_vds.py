@@ -213,6 +213,8 @@ def run_preflight(remote_release_dir):
         f"import sys; "
         f"import bot; import health_engine; import history; import monitoring; "
         f"import mqtt_gateway; import physical_button; import power_flow; import telegram_ui; "
+        f"from routers import antigravity_router, command_router, console_router, monitoring_router, "
+        f"physical_router, player_router, power_router, workspace_router; "
         f"print('ALL_MODULES_IMPORTED_OK')\""
     )
     res = run_ssh(import_cmd)
