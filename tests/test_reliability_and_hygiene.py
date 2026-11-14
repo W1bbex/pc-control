@@ -15,7 +15,8 @@ import pytest
 
 import boot_agent
 from core.activity_db import ActivityDB
-from core.antigravity_switcher import AntigravityAccountManager, AntigravityCrypto
+from core.antigravity_crypto import AntigravityCrypto
+from core.antigravity_switcher import AntigravityAccountManager
 from core.app_emoji_manager import AppEmojiManager
 from core.media_manager import MediaManager
 from desktop.stealth import StealthMixin
@@ -253,3 +254,85 @@ def test_boot_agent_acknowledge_catches_publish_error():
     # Must not raise
     agent.acknowledge("cmd-99", "failed", {"error": "test"})
     agent.mqtt.publish.assert_called_once()
+
+
+def test_extracted_antigravity_crypto_and_protobuf_helpers():
+    from core.antigravity_crypto import ProtobufHelper
+    encoded = ProtobufHelper.encode_varint(300)
+    val, pos = ProtobufHelper.read_varint(encoded, 0)
+    assert val == 300
+    assert pos == len(encoded)
+
+    oauth_bytes = ProtobufHelper.create_oauth_info("token123", "refresh123", 1800000000)
+    assert b"token123" in oauth_bytes
+    assert b"Bearer" in oauth_bytes
+
+
+def test_extracted_antigravity_process_helpers():
+    from core.antigravity_process import is_ide_running, kill_ide
+    mock_proc = MagicMock()
+    mock_proc.info = {"pid": 9999, "name": "antigravity.exe"}
+
+    with patch("core.antigravity_process.psutil.process_iter", return_value=[mock_proc]):
+        assert is_ide_running() is True
+
+    with patch("core.antigravity_process.psutil.process_iter", return_value=[mock_proc]), \
+         patch("core.antigravity_process.psutil.wait_procs", return_value=([mock_proc], [])):
+        kill_ide(timeout_sec=0.1)
+        assert mock_proc.terminate.called
+
+
+def test_extracted_power_state_atomic_persistence(tmp_path):
+    from vds_bot.power_state import clear_persisted_flow_state, load_persisted_flow_state, save_persisted_flow_state
+    state_file = tmp_path / "flow.json"
+    data = {"stage": "POWERING_ON", "created_at": 100.0, "expires_at": 400.0}
+
+    assert save_persisted_flow_state(data, path=state_file) is True
+    loaded = load_persisted_flow_state(path=state_file)
+    assert loaded == data
+
+    clear_persisted_flow_state(path=state_file)
+    assert not state_file.exists()
+
+
+def test_extracted_power_ui_presentation():
+    from vds_bot.power_ui import (
+        build_flow_btn,
+        get_unlock_failed_markup,
+        get_unlock_success_markup,
+        get_unlocking_markup,
+        resolve_target_mode_info,
+    )
+    btn = build_flow_btn("Test", "primary", "cb_test", icon="123")
+    assert btn["text"] == "Test"
+    assert btn["style"] == "primary"
+    assert btn["icon_custom_emoji_id"] == "123"
+
+    mode, detail, label = resolve_target_mode_info(
+        auto_launch_workspace=True,
+        auto_launch_game=False,
+        target_workspace_vpn="happ",
+        target_game=None,
+        target_game_vpn=None,
+        stage="UNLOCKING",
+    )
+    assert mode == "workspace"
+    assert "Happ" in label
+
+    markup = get_unlocking_markup(auto_workspace=True)
+    assert len(markup["inline_keyboard"]) == 2
+
+    text, s_markup = get_unlock_success_markup(manual=True)
+    assert "вручную" in text
+    assert len(s_markup["inline_keyboard"]) == 2
+
+    f_text, f_markup = get_unlock_failed_markup("Password rejected")
+    assert "Password rejected" in f_text
+    assert len(f_markup["inline_keyboard"]) == 2
+
+
+def test_extracted_desktop_os_events_helpers():
+    from desktop.os_events import is_telegram_control_chat
+    assert is_telegram_control_chat("telegram.exe", "pc control bot") is True
+    assert is_telegram_control_chat("telegram.exe", "Family Chat") is False
+    assert is_telegram_control_chat("notepad.exe", "pc control") is False

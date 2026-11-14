@@ -15,11 +15,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from core.antigravity_switcher import (
+from core.antigravity_crypto import (
     AntigravityCrypto,
     ProtobufHelper,
-    AntigravityAccountManager,
 )
+from core.antigravity_switcher import AntigravityAccountManager
 from vds_bot.telegram_ui import TelegramBotApi
 from vds_bot.routers.antigravity_router import (
 
@@ -117,9 +117,9 @@ def test_replace_unified_topic_entry():
 def test_launch_ide_raises_runtime_error_when_binary_missing(tmp_path):
     from unittest.mock import patch
 
-    with patch("core.antigravity_switcher.sys.platform", "win32"), \
-         patch.dict("core.antigravity_switcher.os.environ", {"LOCALAPPDATA": str(tmp_path)}), \
-         patch("core.antigravity_switcher.subprocess.Popen", side_effect=FileNotFoundError("Antigravity.exe")):
+    with patch("core.antigravity_process.sys.platform", "win32"), \
+         patch.dict("core.antigravity_process.os.environ", {"LOCALAPPDATA": str(tmp_path)}), \
+         patch("core.antigravity_process.subprocess.Popen", side_effect=FileNotFoundError("Antigravity.exe")):
         with pytest.raises(RuntimeError, match="Failed to launch Antigravity IDE"):
             AntigravityAccountManager.launch_ide()
 

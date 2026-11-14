@@ -13,7 +13,8 @@ import urllib.error
 from unittest.mock import MagicMock, patch
 
 from agent import PCControlAgent
-from core.antigravity_switcher import AntigravityAccountManager, ProtobufHelper
+from core.antigravity_crypto import ProtobufHelper
+from core.antigravity_switcher import AntigravityAccountManager
 from desktop.action_dispatcher import ActionDispatcherMixin as DesktopActionDispatcher
 from desktop.launcher import LauncherMixin
 from desktop.vpn_manager import VpnManagerMixin
@@ -35,8 +36,8 @@ def test_kill_ide_waits_for_terminated_and_killed_processes():
     mock_proc2 = MagicMock()
     mock_proc2.info = {"name": "antigravity.exe"}
 
-    with patch("core.antigravity_switcher.psutil.process_iter", return_value=[mock_proc1, mock_proc2]), \
-         patch("core.antigravity_switcher.psutil.wait_procs", side_effect=[
+    with patch("core.antigravity_process.psutil.process_iter", return_value=[mock_proc1, mock_proc2]), \
+         patch("core.antigravity_process.psutil.wait_procs", side_effect=[
              ([mock_proc1], [mock_proc2]),
              ([mock_proc2], []),
          ]) as mock_wait:
@@ -276,7 +277,7 @@ def test_action_dispatcher_acknowledges_cancelled_workspace():
 
 
 def test_antigravity_switcher_declares_64bit_dpapi_signatures():
-    import core.antigravity_switcher  # noqa: F401
+    import core.antigravity_crypto  # noqa: F401
 
     assert hasattr(ctypes.windll.crypt32.CryptUnprotectData, "argtypes")
     assert ctypes.windll.crypt32.CryptUnprotectData.restype == wintypes.BOOL

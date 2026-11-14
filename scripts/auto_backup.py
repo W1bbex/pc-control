@@ -82,6 +82,8 @@ VDS_MANIFEST_FILES = [
     "player_manager.py",
     "power_flow.py",
     "power_scheduler.py",
+    "power_state.py",
+    "power_ui.py",
     "telegram_ui.py",
     "ui_icons.py",
     "ui_markups.py",

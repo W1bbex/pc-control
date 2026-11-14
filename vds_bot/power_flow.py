@@ -11,22 +11,39 @@ from pathlib import Path
 LOG = logging.getLogger("pc-control-bot.power_flow")
 
 try:
+    from .power_state import (
+        FLOW_STATE_PATH,
+        FLOW_TTL_SECONDS,
+        PowerFlowStage,
+        clear_persisted_flow_state,
+        load_persisted_flow_state,
+        save_persisted_flow_state,
+    )
+    from .power_ui import (
+        build_flow_btn,
+        get_unlock_failed_markup,
+        get_unlock_success_markup,
+        get_unlocking_markup,
+        resolve_target_mode_info,
+    )
     from .telegram_ui import ICONS
 except ImportError:
+    from power_state import (
+        FLOW_STATE_PATH,
+        FLOW_TTL_SECONDS,
+        PowerFlowStage,
+        clear_persisted_flow_state,
+        load_persisted_flow_state,
+        save_persisted_flow_state,
+    )
+    from power_ui import (
+        build_flow_btn,
+        get_unlock_failed_markup,
+        get_unlock_success_markup,
+        get_unlocking_markup,
+        resolve_target_mode_info,
+    )
     from telegram_ui import ICONS
-
-FLOW_STATE_PATH = Path(os.environ.get("FLOW_STATE_PATH", "/var/lib/pc-control-bot/flow_state.json"))
-FLOW_TTL_SECONDS = 300  # 5 minutes
-
-
-class PowerFlowStage:
-    IDLE = "IDLE"
-    POWERING_ON = "POWERING_ON"
-    REBOOTING = "REBOOTING"
-    UNLOCKING = "UNLOCKING"
-    UNLOCK_FAILED = "UNLOCK_FAILED"
-    WAITING_WORKSPACE_DECISION = "WAITING_WORKSPACE_DECISION"
-    WORKSPACE_RUNNING = "WORKSPACE_RUNNING"
 
 
 class PowerFlowManager:
@@ -67,9 +84,9 @@ class PowerFlowManager:
 
     def load_state(self):
         try:
-            if not FLOW_STATE_PATH.exists():
+            data = load_persisted_flow_state(FLOW_STATE_PATH)
+            if not data:
                 return
-            data = json.loads(FLOW_STATE_PATH.read_text(encoding="utf-8"))
             expires_at = float(data.get("expires_at", 0))
             if time.time() > expires_at:
                 LOG.info("Persisted flow_state expired. Resetting to IDLE.")
@@ -110,53 +127,37 @@ class PowerFlowManager:
 
     def save_state(self):
         with self._lock:
-            try:
-                FLOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                temp = FLOW_STATE_PATH.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
-                msg_id = None
-                if isinstance(self.message_id, int):
-                    msg_id = self.message_id
-                elif isinstance(self.message_id, str) and self.message_id.isdigit():
-                    msg_id = int(self.message_id)
+            msg_id = None
+            if isinstance(self.message_id, int):
+                msg_id = self.message_id
+            elif isinstance(self.message_id, str) and self.message_id.isdigit():
+                msg_id = int(self.message_id)
 
-                chat_id = None
-                if isinstance(self.chat_id, int):
-                    chat_id = self.chat_id
-                elif isinstance(self.chat_id, str) and self.chat_id.isdigit():
-                    chat_id = int(self.chat_id)
+            chat_id = None
+            if isinstance(self.chat_id, int):
+                chat_id = self.chat_id
+            elif isinstance(self.chat_id, str) and self.chat_id.isdigit():
+                chat_id = int(self.chat_id)
 
-                data = {
-                    "flow_id": str(self.flow_id) if self.flow_id else None,
-                    "chat_id": chat_id,
-                    "stage": str(self.stage),
-                    "message_id": msg_id,
-                    "created_at": float(self.created_at) if isinstance(self.created_at, (int, float)) else 0.0,
-                    "expires_at": float(self.expires_at) if isinstance(self.expires_at, (int, float)) else 0.0,
-                    "unlock_attempts": int(self.unlock_attempts) if isinstance(self.unlock_attempts, (int, float)) else 0,
-                    "active_workspace_id": str(self.active_workspace_id) if self.active_workspace_id else None,
-                    "auto_launch_workspace": bool(self.auto_launch_workspace),
-                    "auto_launch_game": bool(self.auto_launch_game),
-                    "target_game": str(self.target_game) if self.target_game else None,
-                    "target_game_vpn": str(self.target_game_vpn) if self.target_game_vpn else None,
-                    "target_workspace_vpn": str(self.target_workspace_vpn) if getattr(self, "target_workspace_vpn", None) else None,
-                    "reboot_with_unlock": bool(self.reboot_with_unlock),
-                    "reboot_started_at": float(self.reboot_started_at) if isinstance(self.reboot_started_at, (int, float)) else 0.0,
-                    "reboot_offline_detected": bool(self.reboot_offline_detected),
-                }
-                temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                try:
-                    os.chmod(temp, 0o600)
-                except Exception:
-                    pass
-                os.replace(temp, FLOW_STATE_PATH)
-                return True
-            except Exception:
-                LOG.exception("Could not save flow_state.json")
-                try:
-                    temp.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                return False
+            data = {
+                "flow_id": str(self.flow_id) if self.flow_id else None,
+                "chat_id": chat_id,
+                "stage": str(self.stage),
+                "message_id": msg_id,
+                "created_at": float(self.created_at) if isinstance(self.created_at, (int, float)) else 0.0,
+                "expires_at": float(self.expires_at) if isinstance(self.expires_at, (int, float)) else 0.0,
+                "unlock_attempts": int(self.unlock_attempts) if isinstance(self.unlock_attempts, (int, float)) else 0,
+                "active_workspace_id": str(self.active_workspace_id) if self.active_workspace_id else None,
+                "auto_launch_workspace": bool(self.auto_launch_workspace),
+                "auto_launch_game": bool(self.auto_launch_game),
+                "target_game": str(self.target_game) if self.target_game else None,
+                "target_game_vpn": str(self.target_game_vpn) if self.target_game_vpn else None,
+                "target_workspace_vpn": str(self.target_workspace_vpn) if getattr(self, "target_workspace_vpn", None) else None,
+                "reboot_with_unlock": bool(self.reboot_with_unlock),
+                "reboot_started_at": float(self.reboot_started_at) if isinstance(self.reboot_started_at, (int, float)) else 0.0,
+                "reboot_offline_detected": bool(self.reboot_offline_detected),
+            }
+            return save_persisted_flow_state(data, FLOW_STATE_PATH)
 
     def reset_flow(self):
         with self._lock:
@@ -183,11 +184,7 @@ class PowerFlowManager:
             self.logon_ready_at = None
             self.unlocked_at = None
             self.selecting_mode = False
-            if FLOW_STATE_PATH.exists():
-                try:
-                    FLOW_STATE_PATH.unlink()
-                except Exception:
-                    pass
+        clear_persisted_flow_state(FLOW_STATE_PATH)
 
     def start_power_on(self, chat_id, message_id=None):
         with self._lock:
@@ -279,26 +276,14 @@ class PowerFlowManager:
         self.save_state()
 
     def _get_target_mode_info(self):
-        if getattr(self, "auto_launch_workspace", False):
-            vpn = getattr(self, "target_workspace_vpn", None) or "incy"
-            vpn_label = "INCY VPN" if vpn == "incy" else "Happ VPN"
-            return "workspace", vpn_label, f"Сетап ({vpn_label})"
-        elif getattr(self, "auto_launch_game", False):
-            game = getattr(self, "target_game", None) or "Игра"
-            game_map = {
-                "minecraft": "Minecraft",
-                "warcraft3": "Warcraft 3",
-                "gta5": "GTA 5 Legacy",
-                "roblox": "Roblox",
-                "gtasa": "GTA SA",
-            }
-            game_label = game_map.get(str(game).lower(), str(game))
-            vpn = getattr(self, "target_game_vpn", None) or "incy"
-            vpn_label = "INCY VPN" if vpn == "incy" else "Happ VPN"
-            return "game", f"{game_label} ({vpn_label})", f"Игра: {game_label}"
-        elif self.stage == PowerFlowStage.UNLOCKING:
-            return "unlock", None, "Разблок запланирован"
-        return None, None, None
+        return resolve_target_mode_info(
+            auto_launch_workspace=getattr(self, "auto_launch_workspace", False),
+            auto_launch_game=getattr(self, "auto_launch_game", False),
+            target_workspace_vpn=getattr(self, "target_workspace_vpn", None),
+            target_game=getattr(self, "target_game", None),
+            target_game_vpn=getattr(self, "target_game_vpn", None),
+            stage=self.stage,
+        )
 
     def _update_launch_card(self, force=False, is_initial=False, chat_id=None):
         now = time.time()
@@ -419,10 +404,7 @@ class PowerFlowManager:
 
     @staticmethod
     def _btn(text, style, callback_data, icon=None):
-        btn = {"text": text, "style": style, "callback_data": callback_data}
-        if icon:
-            btn["icon_custom_emoji_id"] = icon
-        return btn
+        return build_flow_btn(text, style, callback_data, icon=icon)
 
     @staticmethod
     def _invoke_cb_filtered(cb, cb_name, chat_id, card_message_id, optional_kwargs, **fixed_kwargs):
@@ -441,17 +423,10 @@ class PowerFlowManager:
             LOG.exception("Failed to invoke %s", cb_name)
 
     def _get_unlocking_markup(self):
-        with self._lock:
-            auto_game = getattr(self, "auto_launch_game", False)
-            auto_workspace = getattr(self, "auto_launch_workspace", False)
-        cancel_btn = self._btn("Отмена", "danger", "flow_unlock_no", ICONS.get("cross"))
-        if auto_game:
-            top_btn = self._btn("Игра запланирована", "success", "noop", ICONS.get("game") or ICONS.get("check"))
-        elif auto_workspace:
-            top_btn = self._btn("Сетап запланирован", "success", "noop", ICONS.get("check"))
-        else:
-            top_btn = self._btn("+ Запустить рабочий сетап", "primary", "flow_unlock_and_workspace", ICONS.get("apps"))
-        return {"inline_keyboard": [[top_btn], [cancel_btn]]}
+        return get_unlocking_markup(
+            auto_game=getattr(self, "auto_launch_game", False),
+            auto_workspace=getattr(self, "auto_launch_workspace", False),
+        )
 
     def set_auto_launch_workspace(self, enable=True, vpn="incy", chat_id=None, message_id=None):
         cid = None
@@ -893,21 +868,7 @@ class PowerFlowManager:
             )
             return
 
-        status_title = "<b>ℹ️ Windows разблокирована вручную.</b>" if manual else "<b>✅ Windows разблокирована!</b>"
-        happ_icon = ICONS.get("app_happ") or ICONS.get("network")
-        incy_icon = ICONS.get("app_incy") or ICONS.get("network")
-        cancel_btn = self._btn("Не сейчас", "danger", "flow_workspace_no", ICONS.get("cross"))
-
-        text = f"{status_title}\n\nЗапустить рабочий сетап? Выберите VPN:"
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Сетап с INCY", "style": "primary", "icon_custom_emoji_id": incy_icon, "callback_data": "workspace_vpn:incy"},
-                    {"text": "Сетап с Happ", "style": "primary", "icon_custom_emoji_id": happ_icon, "callback_data": "workspace_vpn:happ"},
-                ],
-                [cancel_btn],
-            ]
-        }
+        text, markup = get_unlock_success_markup(manual=manual)
         self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
 
     def on_unlock_failed(self, chat_id, reason):
@@ -916,15 +877,7 @@ class PowerFlowManager:
             mid = self.message_id
         self.save_state()
 
-        text = (
-            f"<b>Ошибка разблокировки Windows</b>\n\n"
-            f"{reason}\n\n"
-            "Пароль отклонён или экран входа недоступен."
-        )
-        retry_btn = self._btn("Попробовать снова", "success", "flow_unlock_retry", ICONS.get("refresh"))
-        cancel_btn = self._btn("Отмена", "danger", "flow_unlock_cancel", ICONS.get("cross"))
-        emerg_btn = self._btn("⚡ Аварийное выключение", "danger", "emergency_power_off", ICONS.get("power"))
-        markup = {"inline_keyboard": [[retry_btn, cancel_btn], [emerg_btn]]}
+        text, markup = get_unlock_failed_markup(reason)
         self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
 
     def handle_unlock_retry(self, chat_id):

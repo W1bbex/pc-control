@@ -22,7 +22,6 @@ from pathlib import Path
 
 import certifi
 import paho.mqtt.client as mqtt
-from PIL import ImageGrab
 import psutil
 
 from desktop.constants import (
@@ -41,6 +40,13 @@ from desktop.constants import (
     TOPIC_SCREENSHOT,
     TOPIC_STATUS,
     TOPIC_TELEMETRY,
+)
+from desktop.os_events import (
+    capture_desktop_screenshot,
+    get_window_title,
+    is_telegram_control_chat,
+    resolve_hwnd_app_info,
+    start_shutdown_watcher,
 )
 from desktop.sensors import SensorHelper
 from desktop.telemetry import TelemetryMixin
@@ -469,27 +475,7 @@ class PCControlAgent(
         self.last_status_publish = now
 
     def make_screenshot(self, command_id):
-        image = ImageGrab.grab(all_screens=True)
-        image = image.convert("RGB")
-        image.thumbnail((1600, 1000))
-
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=72, optimize=True)
-        image_data = buffer.getvalue()
-
-        header = json.dumps(
-            {
-                "id": command_id,
-                "format": "jpeg",
-                "width": image.width,
-                "height": image.height,
-            }
-        ).encode("utf-8")
-
-        payload = len(header).to_bytes(4, "big") + header + image_data
-        if len(payload) > 950_000:
-            raise RuntimeError("Screenshot exceeds MQTT safety limit")
-
+        payload, meta = capture_desktop_screenshot(command_id)
         info = self.mqtt.publish(
             TOPIC_SCREENSHOT,
             payload=payload,
@@ -498,26 +484,12 @@ class PCControlAgent(
         )
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError("MQTT rejected screenshot")
-
-        return {
-            "bytes": len(image_data),
-            "width": image.width,
-            "height": image.height,
-        }
+        return meta
 
     def _fast_foreground_watcher_loop(self):
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-
         last_hwnd = None
         last_exe_key = None
         last_title = None
-        telegram_clients = ("telegram", "ayugram", "kotatogram", "64gram", "unigram")
 
         while not self.stop_event.is_set():
             try:
@@ -533,60 +505,20 @@ class PCControlAgent(
                         self.stop_event.wait(0.5)
                         continue
 
-                    pid = ctypes.c_ulong()
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    exe_path = None
-                    exe_name = None
-
-                    if pid.value:
-                        hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-                        if hproc:
-                            try:
-                                buf = ctypes.create_unicode_buffer(1024)
-                                size = ctypes.c_ulong(1024)
-                                if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                                    exe_path = buf.value
-                                    exe_name = os.path.basename(exe_path)
-                            finally:
-                                kernel32.CloseHandle(hproc)
-
-                        if not exe_name:
-                            try:
-                                proc = psutil.Process(pid.value)
-                                exe_name = proc.name()
-                                exe_path = proc.exe()
-                            except Exception:
-                                pass
-
-                    if not exe_name or exe_name.lower() == "explorer.exe":
-                        cls_buf = ctypes.create_unicode_buffer(256)
-                        user32.GetClassNameW(hwnd, cls_buf, 256)
-                        if cls_buf.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
-                            exe_name = "explorer.exe"
+                    exe_path, exe_name, title = resolve_hwnd_app_info(hwnd)
 
                     if exe_name:
                         exe_key = exe_name.lower()
-                        title = None
-                        tlen = user32.GetWindowTextLengthW(hwnd)
-                        if tlen:
-                            tbuf = ctypes.create_unicode_buffer(tlen + 1)
-                            user32.GetWindowTextW(hwnd, tbuf, tlen + 1)
-                            title = tbuf.value or None
+                        in_chat = is_telegram_control_chat(exe_key, title)
 
                         if exe_key != last_exe_key:
                             last_exe_key = exe_key
                             last_title = title
-                            in_chat = any(c in exe_key for c in telegram_clients) and bool(
-                                title and ("pc control" in title.lower() or "your_pc_bot" in title.lower())
-                            )
                             with self.state_lock:
                                 self.in_pc_control_chat = in_chat
                             self._handle_active_app_change(exe_path, exe_name, title)
                         elif title != last_title:
                             last_title = title
-                            in_chat = any(c in exe_key for c in telegram_clients) and bool(
-                                title and ("pc control" in title.lower() or "your_pc_bot" in title.lower())
-                            )
                             with self.state_lock:
                                 self.current_session_title = title
                                 self.in_pc_control_chat = in_chat
@@ -600,27 +532,21 @@ class PCControlAgent(
                         with self.state_lock:
                             self.in_pc_control_chat = False
                 else:
-                    tlen = user32.GetWindowTextLengthW(hwnd)
-                    if tlen:
-                        tbuf = ctypes.create_unicode_buffer(tlen + 1)
-                        user32.GetWindowTextW(hwnd, tbuf, tlen + 1)
-                        title = tbuf.value or None
-                        if title != last_title:
-                            last_title = title
-                            in_chat = bool(last_exe_key and any(c in last_exe_key for c in telegram_clients)) and bool(
-                                title and ("pc control" in title.lower() or "your_pc_bot" in title.lower())
-                            )
-                            with self.state_lock:
-                                self.current_session_title = title
-                                self.in_pc_control_chat = in_chat
-                                target_app = self.current_session_app or last_exe_key
-                            if getattr(self, "mqtt_online", False) and last_exe_key:
-                                try:
-                                    from core.app_emoji_manager import read_cached_emoji_id
-                                    emoji_id = read_cached_emoji_id(self.emoji_manager, last_exe_key)
-                                    self.publish_active_app_update(target_app, emoji_id, title)
-                                except Exception:
-                                    pass
+                    title = get_window_title(hwnd)
+                    if title and title != last_title:
+                        last_title = title
+                        in_chat = is_telegram_control_chat(last_exe_key, title)
+                        with self.state_lock:
+                            self.current_session_title = title
+                            self.in_pc_control_chat = in_chat
+                            target_app = self.current_session_app or last_exe_key
+                        if getattr(self, "mqtt_online", False) and last_exe_key:
+                            try:
+                                from core.app_emoji_manager import read_cached_emoji_id
+                                emoji_id = read_cached_emoji_id(self.emoji_manager, last_exe_key)
+                                self.publish_active_app_update(target_app, emoji_id, title)
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
@@ -658,65 +584,39 @@ class PCControlAgent(
         return False
 
     def _start_shutdown_watcher(self):
-        def _watcher():
+        def _on_shutdown():
+            self._shutdown_detected = True
             try:
-                import win32gui
-                import win32con
-
-                def wndproc(hwnd, msg, wparam, lparam):
-                    if msg == win32con.WM_QUERYENDSESSION:
-                        return 1
-                    if msg == win32con.WM_ENDSESSION:
-                        if not wparam:
-                            return 0
-                        LOG.info("Windows shutdown/logoff confirmed via WM_ENDSESSION (msg=0x%x, lparam=0x%x)", msg, lparam)
-                        self._shutdown_detected = True
-                        try:
-                            now_ts = int(time.time())
-                            self.mqtt.publish(
-                                "pc/main/command",
-                                f"LED_OFF|agent-shutdown-{now_ts}|{now_ts+30}",
-                                qos=1,
-                            )
-                            status_payload = {
-                                "state": "offline",
-                                "event": "graceful_shutdown",
-                                "reason": "windows_shutdown",
-                                "agent": "desktop",
-                                "ts": time.time(),
-                                "boot_id": AGENT_BOOT_ID,
-                            }
-                            pub_info = self.mqtt.publish(
-                                TOPIC_STATUS,
-                                json.dumps(status_payload, ensure_ascii=False),
-                                qos=1,
-                                retain=True,
-                            )
-                            try:
-                                pub_info.wait_for_publish(timeout=1.5)
-                            except Exception:
-                                pass
-                            time.sleep(0.3)
-                        except Exception:
-                            pass
-                        self.stop_event.set()
-                        return 0
-                    return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
-
-                wc = win32gui.WNDCLASS()
-                wc.lpfnWndProc = wndproc
-                wc.lpszClassName = f"PCControlDesktopShutdownWatcher_{os.getpid()}"
-                hinst = wc.hInstance = win32gui.GetModuleHandle(None)
-                class_atom = win32gui.RegisterClass(wc)
-                hwnd = win32gui.CreateWindow(
-                    class_atom, "PCControlShutdownWatcher", 0, 0, 0, 0, 0, 0, 0, hinst, None
+                now_ts = int(time.time())
+                self.mqtt.publish(
+                    "pc/main/command",
+                    f"LED_OFF|agent-shutdown-{now_ts}|{now_ts+30}",
+                    qos=1,
                 )
-                LOG.info("Shutdown watcher window initialized (hwnd=%s)", hwnd)
-                win32gui.PumpMessages()
+                status_payload = {
+                    "state": "offline",
+                    "event": "graceful_shutdown",
+                    "reason": "windows_shutdown",
+                    "agent": "desktop",
+                    "ts": time.time(),
+                    "boot_id": AGENT_BOOT_ID,
+                }
+                pub_info = self.mqtt.publish(
+                    TOPIC_STATUS,
+                    json.dumps(status_payload, ensure_ascii=False),
+                    qos=1,
+                    retain=True,
+                )
+                try:
+                    pub_info.wait_for_publish(timeout=1.5)
+                except Exception:
+                    pass
+                time.sleep(0.3)
             except Exception:
-                LOG.exception("Shutdown watcher window failed to initialize")
+                pass
+            self.stop_event.set()
 
-        threading.Thread(target=_watcher, name="shutdown-watcher", daemon=True).start()
+        start_shutdown_watcher(_on_shutdown)
 
     def run(self):
         self.sensor_helper.start()

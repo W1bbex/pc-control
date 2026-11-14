@@ -43,6 +43,8 @@ MANIFEST_FILES = [
     "player_manager.py",
     "power_flow.py",
     "power_scheduler.py",
+    "power_state.py",
+    "power_ui.py",
     "telegram_ui.py",
     "ui_icons.py",
     "ui_markups.py",
@@ -228,7 +230,7 @@ def run_preflight(remote_release_dir):
         f"PYTHONPATH={remote_release_dir} {REMOTE_BASE}/venv/bin/python -c \""
         f"import sys; "
         f"import action_helpers; import bot; import health_engine; import history; import monitoring; "
-        f"import mqtt_gateway; import physical_button; import power_flow; import telegram_ui; "
+        f"import mqtt_gateway; import physical_button; import power_flow; import power_state; import power_ui; import telegram_ui; "
         f"from routers import antigravity_router, command_router, console_router, monitoring_router, "
         f"physical_router, player_router, power_router, workspace_router; "
         f"print('ALL_MODULES_IMPORTED_OK')\""
