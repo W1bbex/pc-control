@@ -11,12 +11,21 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "vds_bot"))
 
-# Set required test env vars before importing bot
-os.environ["TELEGRAM_BOT_TOKEN"] = "test_token_123"
-os.environ["TELEGRAM_ALLOWED_USER_ID"] = "123456789"
-
-from vds_bot.telegram_ui import TelegramBotApi
-from vds_bot.bot import PcControlBotApp, ALLOWED_USER_ID
+_ORIG_ENV = {
+    k: os.environ.get(k)
+    for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_ID")
+}
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test_token_123")
+os.environ.setdefault("TELEGRAM_ALLOWED_USER_ID", "123456789")
+try:
+    from vds_bot.telegram_ui import TelegramBotApi
+    from vds_bot.bot import PcControlBotApp, ALLOWED_USER_ID
+finally:
+    for _k, _v in _ORIG_ENV.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
 
 
 class TestConsoleUI(unittest.TestCase):
@@ -45,7 +54,7 @@ class TestConsoleUI(unittest.TestCase):
     def test_console_menu_markup(self):
         markup = self.ui.console_menu_markup(target="desktop", shell="powershell")
         buttons = markup["inline_keyboard"]
-        self.assertEqual(len(buttons), 3)
+        self.assertEqual(len(buttons), 4)
 
         # Row 1: Toggles
         r1 = buttons[0]
@@ -54,18 +63,17 @@ class TestConsoleUI(unittest.TestCase):
         self.assertEqual(r1[1]["callback_data"], "console_toggle_target")
         self.assertIn("Desktop", r1[1]["text"])
 
-        # Row 2: Quick commands
-        r2 = buttons[1]
-        quick_cmds = [b["callback_data"] for b in r2]
+        # Row 2 & 3: Quick commands
+        quick_cmds = [b["callback_data"] for row in (buttons[1], buttons[2]) for b in row]
         self.assertIn("console_quick:whoami", quick_cmds)
         self.assertIn("console_quick:ipconfig", quick_cmds)
         self.assertIn("console_quick:tasklist", quick_cmds)
         self.assertIn("console_quick:dir", quick_cmds)
 
-        # Row 3: Close button
-        r3 = buttons[2]
-        self.assertEqual(r3[0]["callback_data"], "console_close")
-        self.assertIn("icon_custom_emoji_id", r3[0])
+        # Row 4: Close button
+        r4 = buttons[3]
+        self.assertEqual(r4[0]["callback_data"], "console_close")
+        self.assertIn("icon_custom_emoji_id", r4[0])
 
     def test_apps_menu_markup_contains_console(self):
         markup = self.ui.apps_menu_markup()

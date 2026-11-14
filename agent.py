@@ -50,7 +50,7 @@ from desktop.launcher import LauncherMixin
 from desktop.action_dispatcher import ActionDispatcherMixin
 
 from core.activity_logger import ActivityTracker
-from core.mqtt_fallback import MqttClientWithIpFallback
+from core.mqtt_fallback import MqttClientWithIpFallback, patch_paho_sockpair
 from core.antigravity_switcher import AntigravityAccountManager
 from core.app_emoji_manager import AppEmojiManager
 from core.stealth_guard import StealthManager
@@ -60,6 +60,15 @@ def load_agent_config(path: Path = CONFIG_PATH) -> dict:
     if not path.exists():
         return {}
     config = json.loads(path.read_text(encoding="utf-8"))
+    mqtt_host = os.getenv("MQTT_HOST")
+    if mqtt_host:
+        config.setdefault("mqtt", {})["host"] = mqtt_host
+    mqtt_fallback_ip = os.getenv("MQTT_FALLBACK_IP")
+    if mqtt_fallback_ip:
+        config.setdefault("mqtt", {})["fallback_ip"] = mqtt_fallback_ip
+    mqtt_username = os.getenv("MQTT_USERNAME")
+    if mqtt_username:
+        config.setdefault("mqtt", {})["username"] = mqtt_username
     mqtt_password = os.getenv("MQTT_PASSWORD")
     if mqtt_password:
         config.setdefault("mqtt", {})["password"] = mqtt_password
@@ -106,37 +115,7 @@ def configure_logging():
 
 LOG = configure_logging()
 
-
-def patch_paho_sockpair():
-    """Protect paho-mqtt against Windows socketpair crashes on sleep/reset."""
-    orig_loop = mqtt.Client._loop
-
-    def safe_loop(self, timeout=1.0):
-        try:
-            return orig_loop(self, timeout)
-        except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
-            LOG.warning("MQTT _loop caught Windows socket error: %s (triggering reconnect)", e)
-            try:
-                self.disconnect()
-            except Exception:
-                pass
-            return mqtt.MQTT_ERR_CONN_LOST
-
-    mqtt.Client._loop = safe_loop
-
-    orig_packet_queue = mqtt.Client._packet_queue
-
-    def safe_packet_queue(self, command, packet, mid=0, qos=0, info=None):
-        try:
-            return orig_packet_queue(self, command, packet, mid, qos, info)
-        except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
-            LOG.warning("MQTT _packet_queue caught Windows socketpair error: %s", e)
-            return mqtt.MQTT_ERR_NO_CONN
-
-    mqtt.Client._packet_queue = safe_packet_queue
-
-
-patch_paho_sockpair()
+patch_paho_sockpair(LOG)
 
 
 def acquire_single_instance():
@@ -174,6 +153,19 @@ class PCControlAgent(
 
     def __init__(self):
         self.config = load_agent_config(CONFIG_PATH)
+        mqtt_cfg = self.config.get("mqtt")
+        if not isinstance(mqtt_cfg, dict) or not str(mqtt_cfg.get("host") or "").strip():
+            LOG.error("Missing required 'mqtt.host' configuration")
+            sys.exit(1)
+        try:
+            mqtt_port = int(mqtt_cfg.get("port", 8883))
+            if not (1 <= mqtt_port <= 65535):
+                raise ValueError("port out of range")
+            mqtt_cfg["port"] = mqtt_port
+        except (TypeError, ValueError):
+            LOG.error("Invalid 'mqtt.port' configuration: %r", mqtt_cfg.get("port") if isinstance(mqtt_cfg, dict) else None)
+            sys.exit(1)
+
         self.stop_event = threading.Event()
         self.boot_id = AGENT_BOOT_ID
 
@@ -188,12 +180,6 @@ class PCControlAgent(
         )
         self.fast_watcher_thread = None
 
-        def _on_foreground_change(exe_path, proc_name, title):
-            # If fast_watcher_thread is active, it handles active app transitions with
-            # low latency. Prevent duplicate transitions, DB writes and MQTT bursts.
-            if not getattr(self, "fast_watcher_thread", None) or not self.fast_watcher_thread.is_alive():
-                self._handle_active_app_change(exe_path, proc_name, title)
-
         activity_config = self.config.get("activity_logging", {})
         self.activity_tracker = None
         if activity_config.get("enabled", True):
@@ -201,7 +187,7 @@ class PCControlAgent(
                 activity_config,
                 LOG_DIR,
                 self.stop_event,
-                on_foreground_change=_on_foreground_change,
+                on_foreground_change=self._on_foreground_change,
             )
         self.command_queue = queue.Queue()
         self.state_lock = threading.Lock()
@@ -298,6 +284,7 @@ class PCControlAgent(
         if thread_alive:
             return
 
+        self.mqtt_online = False
         now = time.time()
         last_attempt = getattr(self, "_last_reconnect_attempt", 0.0)
         if now - last_attempt < 10.0:
@@ -307,10 +294,11 @@ class PCControlAgent(
         LOG.warning("Desktop MQTT loop thread died! Resurrecting MQTT client...")
         try:
             self.setup_mqtt_client()
-            if self.connect_with_retry(max_attempts=2, timeout_per_attempt=20):
+            if self.connect_with_retry(max_attempts=1, timeout_per_attempt=5):
                 self.mqtt.loop_start()
                 LOG.info("Desktop MQTT loop restarted successfully")
         except Exception:
+            self.mqtt_online = False
             LOG.exception("Failed to recover MQTT in desktop ensure_mqtt_connection")
 
     def publish_media_status(self, state):
@@ -450,6 +438,11 @@ class PCControlAgent(
         except Exception as err:
             LOG.warning("Failed publishing ACK for %s: %s", command_id, err)
 
+    def _on_foreground_change(self, exe_path, proc_name, title):
+        """Route ActivityTracker transitions unless fast_watcher_thread is active."""
+        if not getattr(self, "fast_watcher_thread", None) or not self.fast_watcher_thread.is_alive():
+            self._handle_active_app_change(exe_path, proc_name, title)
+
     def publish_status(self, force=False):
         if not getattr(self, "mqtt_online", False):
             return
@@ -535,7 +528,8 @@ class PCControlAgent(
                     if not hwnd:
                         last_exe_key = None
                         last_title = None
-                        self.in_pc_control_chat = False
+                        with self.state_lock:
+                            self.in_pc_control_chat = False
                         self.stop_event.wait(0.5)
                         continue
 
@@ -567,7 +561,7 @@ class PCControlAgent(
                     if not exe_name or exe_name.lower() == "explorer.exe":
                         cls_buf = ctypes.create_unicode_buffer(256)
                         user32.GetClassNameW(hwnd, cls_buf, 256)
-                        if cls_buf.value in ("Progman", "WorkerW", "Shell_TrayWnd") or not exe_name:
+                        if cls_buf.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
                             exe_name = "explorer.exe"
 
                     if exe_name:
@@ -582,24 +576,29 @@ class PCControlAgent(
                         if exe_key != last_exe_key:
                             last_exe_key = exe_key
                             last_title = title
-                            if any(c in exe_key for c in telegram_clients):
-                                self.in_pc_control_chat = bool(title and ("pc control" in title.lower() or "your_pc_bot" in title.lower()))
-                            else:
-                                self.in_pc_control_chat = False
+                            in_chat = any(c in exe_key for c in telegram_clients) and bool(
+                                title and ("pc control" in title.lower() or "your_pc_bot" in title.lower())
+                            )
+                            with self.state_lock:
+                                self.in_pc_control_chat = in_chat
                             self._handle_active_app_change(exe_path, exe_name, title)
                         elif title != last_title:
                             last_title = title
-                            self.current_session_title = title
-                            if any(c in exe_key for c in telegram_clients):
-                                self.in_pc_control_chat = bool(title and ("pc control" in title.lower() or "your_pc_bot" in title.lower()))
-                            else:
-                                self.in_pc_control_chat = False
-                            emoji_id = self.emoji_manager.cache.get(exe_key, {}).get("emoji_id")
-                            self.publish_active_app_update(self.current_session_app or exe_name, emoji_id, title)
+                            in_chat = any(c in exe_key for c in telegram_clients) and bool(
+                                title and ("pc control" in title.lower() or "your_pc_bot" in title.lower())
+                            )
+                            with self.state_lock:
+                                self.current_session_title = title
+                                self.in_pc_control_chat = in_chat
+                                target_app = self.current_session_app or exe_name
+                            from core.app_emoji_manager import read_cached_emoji_id
+                            emoji_id = read_cached_emoji_id(self.emoji_manager, exe_key)
+                            self.publish_active_app_update(target_app, emoji_id, title)
                     else:
                         last_exe_key = None
                         last_title = None
-                        self.in_pc_control_chat = False
+                        with self.state_lock:
+                            self.in_pc_control_chat = False
                 else:
                     tlen = user32.GetWindowTextLengthW(hwnd)
                     if tlen:
@@ -608,15 +607,18 @@ class PCControlAgent(
                         title = tbuf.value or None
                         if title != last_title:
                             last_title = title
-                            self.current_session_title = title
-                            if last_exe_key and any(c in last_exe_key for c in telegram_clients):
-                                self.in_pc_control_chat = bool(title and ("pc control" in title.lower() or "your_pc_bot" in title.lower()))
-                            else:
-                                self.in_pc_control_chat = False
+                            in_chat = bool(last_exe_key and any(c in last_exe_key for c in telegram_clients)) and bool(
+                                title and ("pc control" in title.lower() or "your_pc_bot" in title.lower())
+                            )
+                            with self.state_lock:
+                                self.current_session_title = title
+                                self.in_pc_control_chat = in_chat
+                                target_app = self.current_session_app or last_exe_key
                             if getattr(self, "mqtt_online", False) and last_exe_key:
                                 try:
-                                    emoji_id = self.emoji_manager.cache.get(last_exe_key, {}).get("emoji_id")
-                                    self.publish_active_app_update(self.current_session_app or last_exe_key, emoji_id, title)
+                                    from core.app_emoji_manager import read_cached_emoji_id
+                                    emoji_id = read_cached_emoji_id(self.emoji_manager, last_exe_key)
+                                    self.publish_active_app_update(target_app, emoji_id, title)
                                 except Exception:
                                     pass
             except Exception:
@@ -627,13 +629,24 @@ class PCControlAgent(
     def connect_with_retry(self, max_attempts=None, timeout_per_attempt=20):
         retry_delay = 1
         attempts = 0
+        connect_timeout = max(1.0, min(float(timeout_per_attempt), 5.0))
+        keepalive_s = max(20, int(timeout_per_attempt))
+        mqtt_cfg = self.config.get("mqtt", {})
+        host = mqtt_cfg.get("host")
+        port = int(mqtt_cfg.get("port", 8883))
+        if not host:
+            LOG.error("Missing mqtt.host in connect_with_retry")
+            return False
+
         while not self.stop_event.is_set():
             attempts += 1
             try:
+                if hasattr(self.mqtt, "_connect_timeout"):
+                    self.mqtt._connect_timeout = connect_timeout
                 self.mqtt.connect(
-                    self.config["mqtt"]["host"],
-                    int(self.config["mqtt"]["port"]),
-                    keepalive=timeout_per_attempt,
+                    host,
+                    port,
+                    keepalive=keepalive_s,
                 )
                 return True
             except Exception:
@@ -747,7 +760,9 @@ class PCControlAgent(
                     except queue.Empty:
                         pass
 
-                    current_interval = 5 if getattr(self, "in_pc_control_chat", False) else interval
+                    with self.state_lock:
+                        in_pc_control_chat = getattr(self, "in_pc_control_chat", False)
+                    current_interval = 5 if in_pc_control_chat else interval
                     if getattr(self, "mqtt_online", False) and time.time() >= next_telemetry:
                         try:
                             self.publish_telemetry()

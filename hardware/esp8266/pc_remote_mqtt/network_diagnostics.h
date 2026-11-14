@@ -37,6 +37,8 @@ class NetworkDiagnostics {
     if (!file) { Serial.println("DIAG append failed"); return; }
     if (file.size() + strlen(line) + 1 > 12288) {
       file.close();
+      replayFile.close();
+      replayRetryCount = 0;
       LittleFS.remove("/network.previous.jsonl");
       if (!LittleFS.rename("/network.jsonl", "/network.previous.jsonl")) {
         Serial.println("DIAG rotation failed");
@@ -49,15 +51,20 @@ class NetworkDiagnostics {
 
   void startReplay() {
     replayFile.close();
+    replayRetryCount = 0;
     replayPhase = 0;
   }
 
   void replay(PubSubClient& client) {
     if (!mounted || replayPhase >= 2 || !client.connected()) return;
     const char* paths[] = {"/network.previous.jsonl", "/network.jsonl"};
-    if (!replayFile) replayFile = LittleFS.open(paths[replayPhase], "r");
+    if (!replayFile) {
+      replayFile = LittleFS.open(paths[replayPhase], "r");
+      replayRetryCount = 0;
+    }
     if (!replayFile || !replayFile.available()) {
       replayFile.close();
+      replayRetryCount = 0;
       ++replayPhase;
       return;
     }
@@ -65,13 +72,36 @@ class NetworkDiagnostics {
     const size_t position = replayFile.position();
     String line = replayFile.readStringUntil('\n');
     line.trim();
-    if (line.length() && !client.publish("pc/main/esp/status", line.c_str())) replayFile.seek(position);
+    if (!line.length()) {
+      replayRetryCount = 0;
+      return;
+    }
+    if (line.length() > 476) {
+      Serial.println("DIAG replay skip oversized line");
+      replayRetryCount = 0;
+      return;
+    }
+    if (!client.publish("pc/main/esp/status", line.c_str())) {
+      if (!client.connected()) {
+        replayFile.seek(position);
+        return;
+      }
+      if (++replayRetryCount < 3) {
+        replayFile.seek(position);
+      } else {
+        Serial.println("DIAG replay drop unpublishable line");
+        replayRetryCount = 0;
+      }
+      return;
+    }
+    replayRetryCount = 0;
   }
 
  private:
   bool mounted = false;
   File replayFile;
   uint8_t replayPhase = 2;
+  uint8_t replayRetryCount = 0;
 };
 
 NetworkDiagnostics networkDiagnostics;
@@ -94,10 +124,16 @@ void recordNetworkFailure(const char* event, int state, int tls = 0, uint32_t el
 void serviceNetworkRecovery(bool connected, bool relayActive) {
   const uint32_t now = millis();
   const int status = WiFi.status();
-  if (status != lastWifiStatus || wifiDisconnectReason >= 0) {
-    char detail[64];
-    snprintf(detail, sizeof(detail), "status=%d reason=%d", status, wifiDisconnectReason);
+  int disconnectReason;
+  noInterrupts();
+  disconnectReason = wifiDisconnectReason;
+  if (disconnectReason >= 0) {
     wifiDisconnectReason = -1;
+  }
+  interrupts();
+  if (status != lastWifiStatus || disconnectReason >= 0) {
+    char detail[64];
+    snprintf(detail, sizeof(detail), "status=%d reason=%d", status, disconnectReason);
     lastWifiStatus = status;
     networkDiagnostics.record("wifi_change", detail);
   }

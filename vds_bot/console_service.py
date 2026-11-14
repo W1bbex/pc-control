@@ -110,20 +110,27 @@ class ConsoleServiceMixin:
         if not full_output:
             full_output = "(нет вывода)"
 
-        combined_len = len(header) + len(full_output) + 30
-        if combined_len <= 3500:
-            formatted_text = f"{header}\n<pre><code>{html.escape(full_output)}</code></pre>"
+        escaped_output = html.escape(full_output)
+        combined_len = len(header) + len(escaped_output) + 30
+        if combined_len <= 3800:
+            formatted_text = f"{header}\n<pre><code>{escaped_output}</code></pre>"
             res = None
             if status_msg_id:
                 res = self.ui.send_message(chat_id, formatted_text, message_id=status_msg_id)
             if not res:
                 self.ui.send_message(chat_id, formatted_text)
         else:
-            preview = full_output[:1000]
+            max_preview_escaped = max(200, 3500 - len(header))
+            raw_limit = min(1000, max_preview_escaped)
+            preview = full_output[:raw_limit]
+            while preview and len(html.escape(preview)) > max_preview_escaped:
+                raw_limit = max(50, raw_limit - 50)
+                preview = full_output[:raw_limit]
+            escaped_preview = html.escape(preview)
             summary_text = (
                 f"{header}\n"
                 f"⚠️ <i>Вывод слишком большой ({len(full_output)} симв.). Полный вывод прикреплён файлом.</i>\n\n"
-                f"<pre><code>{html.escape(preview)}\n... [см. вложенный файл]</code></pre>"
+                f"<pre><code>{escaped_preview}\n... [см. вложенный файл]</code></pre>"
             )
             res = None
             if status_msg_id:

@@ -25,18 +25,31 @@ if (!(Test-Path -LiteralPath $collector)) {
 }
 
 # Files created by the SYSTEM collector must remain readable by the desktop
-# agent. Grant only read/execute and inheritance to the current owner; SYSTEM
-# keeps its existing full-control permissions.
+# agent. Resolve an interactive desktop user reliably even under SSH/WinRM.
 $consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
-$currentUser = if ($consoleUser) { $consoleUser } else { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name }
-$currentUserSid = try {
-    (New-Object System.Security.Principal.NTAccount($currentUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-} catch {
-    [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if (-not $consoleUser) {
+    $explorerProc = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1
+    if ($explorerProc) {
+        $owner = Invoke-CimMethod -InputObject $explorerProc -MethodName GetOwner
+        if ($owner -and $owner.User) {
+            $consoleUser = if ($owner.Domain) { "$($owner.Domain)\$($owner.User)" } else { $owner.User }
+        }
+    }
 }
-& icacls.exe $hardwareDir /grant "*$($currentUserSid):(OI)(CI)(RX)" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not grant desktop-agent read access to: $hardwareDir"
+$currentUser = if ($consoleUser) { $consoleUser } else { $null }
+if (-not $currentUser -or $currentUser -eq "NT AUTHORITY\SYSTEM") {
+    throw "No interactive desktop user found. Run installer with an active user session or pass an explicit user."
+}
+$currentUserSid = (New-Object System.Security.Principal.NTAccount($currentUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+$snapshotDir = Split-Path -Parent $snapshot
+if (-not (Test-Path -LiteralPath $snapshotDir)) {
+    New-Item -ItemType Directory -Force -Path $snapshotDir | Out-Null
+}
+foreach ($aclPath in @($hardwareDir, $snapshotDir)) {
+    & icacls.exe $aclPath /grant "*$($currentUserSid):(OI)(CI)(RX)" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not grant desktop-agent read access to: $aclPath"
+    }
 }
 
 $startup = New-ScheduledTaskTrigger -AtStartup

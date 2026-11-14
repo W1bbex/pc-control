@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+from core.process_utils import run_shell_command
 from system.constants import BASE_DIR, LOG
 from system.session_manager import (
     active_console_session,
@@ -33,11 +34,13 @@ class ActionDispatcherMixin:
                 )
                 return
             if action == "lock":
-                self.acknowledge(command_id, "executed")
                 sid = find_active_interactive_session_id()
                 if not sid or sid in (0xFFFFFFFF, -1, 0):
-                    sid = 1
+                    raise RuntimeError("No active interactive Windows session found to lock")
                 locked = False
+                method = None
+                last_error = None
+                no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 unlock_cfg = self.config.get("unlock", {})
                 psexec_candidates = [
                     unlock_cfg.get("psexec_path"),
@@ -49,16 +52,33 @@ class ActionDispatcherMixin:
                 psexec = next((p for p in psexec_candidates if p and Path(p).is_file()), None)
                 if psexec:
                     try:
-                        subprocess.Popen([psexec, "-accepteula", "-nobanner", "-i", str(sid), "-d", "-s", "rundll32.exe", "user32.dll,LockWorkStation"])
+                        subprocess.Popen(
+                            [psexec, "-accepteula", "-nobanner", "-i", str(sid), "-d", "-s", "rundll32.exe", "user32.dll,LockWorkStation"],
+                            creationflags=no_window,
+                        )
                         locked = True
+                        method = "psexec"
                     except Exception as err:
+                        last_error = str(err)
                         LOG.warning("PsExec lock failed: %s", err)
                 if not locked:
                     tsdiscon = shutil.which("tsdiscon.exe")
                     if tsdiscon:
-                        subprocess.Popen([tsdiscon, str(sid)])
-                    else:
-                        subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"])
+                        try:
+                            subprocess.Popen([tsdiscon, str(sid)], creationflags=no_window)
+                            locked = True
+                            method = "tsdiscon"
+                        except Exception as err:
+                            last_error = str(err)
+                            LOG.warning("tsdiscon lock failed: %s", err)
+                if locked:
+                    self.acknowledge(command_id, "executed", {"method": method, "session_id": sid})
+                else:
+                    self.acknowledge(
+                        command_id,
+                        "failed",
+                        {"error": last_error or "Neither PsExec nor tsdiscon.exe is available in Session 0"},
+                    )
                 return
             if action == "shutdown":
                 self._turn_off_led_esp()
@@ -136,46 +156,12 @@ class ActionDispatcherMixin:
                 timeout_s = max(1, min(int(args.get("timeout", 60)), 300))
                 cwd = args.get("cwd") or os.environ.get("USERPROFILE") or "C:\\"
 
-                if use_ps:
-                    exec_args = [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {cmd_text}",
-                    ]
-                else:
-                    exec_args = ["cmd.exe", "/c", f"chcp 65001 >nul & {cmd_text}"]
-
-                try:
-                    p = subprocess.run(
-                        exec_args,
-                        capture_output=True,
-                        timeout=timeout_s,
-                        cwd=cwd,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                    stdout = p.stdout
-                    stderr = p.stderr
-                    code = p.returncode
-                except subprocess.TimeoutExpired:
-                    stdout = ""
-                    stderr = f"Command timed out after {timeout_s}s"
-                    code = 124
-                except Exception as e:
-                    stdout = ""
-                    stderr = f"Execution error: {e}"
-                    code = -1
-
-                max_len = 8000
-                if len(stdout) > max_len:
-                    stdout = stdout[:max_len] + f"\n... [обрезано {len(stdout) - max_len} симв.]"
-                if len(stderr) > 4000:
-                    stderr = stderr[:4000] + f"\n... [обрезано]"
+                code, stdout, stderr = run_shell_command(
+                    cmd_text,
+                    use_ps=use_ps,
+                    timeout_s=timeout_s,
+                    cwd=cwd,
+                )
 
                 self.acknowledge(
                     command_id,
@@ -257,7 +243,7 @@ class ActionDispatcherMixin:
 
                     sid = find_active_interactive_session_id()
                     if not sid or sid in (0xFFFFFFFF, -1, 0):
-                        sid = 1
+                        raise RuntimeError("No active interactive Windows session found for unlock")
                     target_session = str(sid)
 
                     completed = subprocess.run(

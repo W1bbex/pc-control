@@ -23,6 +23,10 @@ def route_console_callback(app, data: str, chat_id: int, message_id: int, callba
         app.ui.answer_callback(callback_id)
         app.console_active_chat_id = None
         app.current_menu_view = "main"
+        if message_id:
+            app.active_main_menu_message_id = message_id
+        if hasattr(app, "save_state"):
+            app.save_state()
         app.ui.send_message(
             chat_id,
             app.monitoring.dashboard_text(),

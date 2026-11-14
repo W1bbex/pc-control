@@ -158,11 +158,28 @@ def test_boot_agent_fail_fast_missing_config(tmp_path):
 
 
 def test_bot_env_empty_string_conversion_safety():
-    with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USER_ID": "", "MQTT_PORT": ""}):
-        allowed_id = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID") or 0)
-        port = int(os.environ.get("MQTT_PORT") or 1883)
-        assert allowed_id == 0
-        assert port == 1883
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env.update({
+        "TELEGRAM_BOT_TOKEN": "test_token_dummy",
+        "TELEGRAM_ALLOWED_USER_ID": "",
+        "MQTT_PORT": "",
+    })
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.path.insert(0, 'vds_bot'); import bot; assert bot.ALLOWED_USER_ID == 0; assert bot.MQTT_PORT == 1883",
+        ],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_command_router_null_text_safety():
@@ -175,7 +192,9 @@ def test_command_router_null_text_safety():
     }
 
     # Should not raise AttributeError when message['text'] is None
-    route_message(mock_app, message)
+    res = route_message(mock_app, message)
+    assert res is None
+    mock_app.ui.send_message.assert_not_called()
 
 
 def test_power_scheduler_stale_status_shutdown_detection():

@@ -107,43 +107,36 @@ class AntigravityCrypto:
         # 2. Windows Local State + .mk file
         if sys.platform == "win32":
             appdata = os.environ.get("APPDATA")
-            if not appdata:
-                raise FileNotFoundError("APPDATA environment variable is missing")
+            if appdata:
+                local_state_path = Path(appdata) / "Antigravity Manager" / "Local State"
+                mk_path = Path(appdata) / "Antigravity Manager" / ".mk"
 
-            local_state_path = Path(appdata) / "Antigravity Manager" / "Local State"
-            mk_path = Path(appdata) / "Antigravity Manager" / ".mk"
+                if local_state_path.exists() and mk_path.exists():
+                    try:
+                        with open(local_state_path, "r", encoding="utf-8") as f:
+                            local_state = json.load(f)
 
-            if not local_state_path.exists():
-                raise FileNotFoundError(f"Local State not found at {local_state_path}")
-            if not mk_path.exists():
-                raise FileNotFoundError(f".mk master key not found at {mk_path}")
+                        encrypted_key_b64 = local_state.get("os_crypt", {}).get("encrypted_key")
+                        if encrypted_key_b64:
+                            raw_enc_key = base64.b64decode(encrypted_key_b64)
+                            if raw_enc_key.startswith(b"DPAPI"):
+                                raw_enc_key = raw_enc_key[5:]
 
-            with open(local_state_path, "r", encoding="utf-8") as f:
-                local_state = json.load(f)
+                            oscrypt_key = _dpapi_decrypt(raw_enc_key)
 
-            encrypted_key_b64 = local_state.get("os_crypt", {}).get("encrypted_key")
-            if not encrypted_key_b64:
-                raise ValueError("os_crypt.encrypted_key missing in Local State")
+                            with open(mk_path, "rb") as f:
+                                mk_enc = f.read()
 
-            raw_enc_key = base64.b64decode(encrypted_key_b64)
-            if raw_enc_key.startswith(b"DPAPI"):
-                raw_enc_key = raw_enc_key[5:]
+                            if mk_enc.startswith(b"v10"):
+                                nonce = mk_enc[3:15]
+                                ciphertext_and_tag = mk_enc[15:]
+                                aesgcm = AESGCM(oscrypt_key)
+                                decrypted_hex = aesgcm.decrypt(nonce, ciphertext_and_tag, None).decode("utf-8")
 
-            oscrypt_key = _dpapi_decrypt(raw_enc_key)
-
-            with open(mk_path, "rb") as f:
-                mk_enc = f.read()
-
-            if not mk_enc.startswith(b"v10"):
-                raise ValueError(f"Unexpected header in .mk: {mk_enc[:3]!r}")
-
-            nonce = mk_enc[3:15]
-            ciphertext_and_tag = mk_enc[15:]
-            aesgcm = AESGCM(oscrypt_key)
-            decrypted_hex = aesgcm.decrypt(nonce, ciphertext_and_tag, None).decode("utf-8")
-
-            self._cached_key_bytes = bytes.fromhex(decrypted_hex.strip())
-            return self._cached_key_bytes
+                                self._cached_key_bytes = bytes.fromhex(decrypted_hex.strip())
+                                return self._cached_key_bytes
+                    except Exception as e:
+                        LOG.warning("Failed to decrypt master key via Antigravity Manager: %s", e)
 
         # 3. Portable fallback key file
         portable_key_file = Path.home() / ".antigravity-agent" / "master_key.hex"
@@ -241,16 +234,18 @@ class ProtobufHelper:
     def create_oauth_info(
         cls,
         access_token: str,
-        refresh_token: str,
+        refresh_token: Optional[str],
         expiry_timestamp: int,
         is_gcp_tos: bool = False,
         id_token: Optional[str] = None,
         email: Optional[str] = None,
     ) -> bytes:
         """Create OAuthTokenInfo protobuf payload."""
+        if not access_token or not isinstance(access_token, str):
+            raise ValueError("OAuth access_token must be a non-empty string")
         b_access = cls.encode_string(1, access_token)
         b_bearer = cls.encode_string(2, "Bearer")
-        b_refresh = cls.encode_string(3, refresh_token)
+        b_refresh = cls.encode_string(3, refresh_token) if refresh_token else b""
         d = cls.encode_varint_field(1, expiry_timestamp) + cls.encode_varint_field(2, 0)
         b_expiry = cls.encode_len_delim(4, d)
         b_id = cls.encode_string(5, id_token) if id_token else b""
@@ -422,12 +417,14 @@ class AntigravityAccountManager:
                 # Decrypt quota
                 quota_raw = item.get("quota_json")
                 quotas = {}
-                min_quota = 100
+                min_quota = 0
+                has_quota_data = False
                 reset_time = None
                 if quota_raw:
                     try:
                         quota_dict = self.crypto.decrypt_payload(quota_raw) or {}
                         # Extract popular models
+                        found_pct = None
                         for m_key, m_val in quota_dict.items():
                             if isinstance(m_val, dict) and "percentage" in m_val:
                                 pct = int(m_val["percentage"])
@@ -436,10 +433,12 @@ class AntigravityAccountManager:
                                     "reset_time": m_val.get("resetTime"),
                                     "name": m_val.get("display_name", m_key),
                                 }
-                                if pct < min_quota:
-                                    min_quota = pct
+                                found_pct = pct if found_pct is None else min(found_pct, pct)
                                 if not reset_time and m_val.get("resetTime"):
                                     reset_time = m_val.get("resetTime")
+                        if found_pct is not None:
+                            min_quota = found_pct
+                            has_quota_data = True
                     except Exception as e:
                         LOG.debug("Could not decrypt quota for %s: %s", item.get("email"), e)
 
@@ -453,14 +452,16 @@ class AntigravityAccountManager:
                     except Exception:
                         pass
 
+                raw_email = item.get("email") or ""
                 accounts.append({
                     "id": item["id"],
-                    "email": item["email"],
-                    "name": item.get("name") or item["email"].split("@")[0],
+                    "email": raw_email,
+                    "name": item.get("name") or raw_email.split("@")[0],
                     "is_active": is_active,
                     "status": item.get("status", "active"),
                     "last_used": item.get("last_used") or 0,
                     "min_quota": min_quota,
+                    "has_quota_data": has_quota_data,
                     "reset_time": reset_time,
                     "models_quota": quotas,
                     "has_valid_token": has_valid_token,
@@ -504,7 +505,7 @@ class AntigravityAccountManager:
             elif "gemini-3.7-flash-high" in quotas:
                 score += quotas["gemini-3.7-flash-high"]["percentage"]
             else:
-                score += acc.get("min_quota", 50)
+                score += acc.get("min_quota", 0) if acc.get("has_quota_data", True) else -100.0
 
             # Prefer switching away from current active if looking for best fallback
             if acc["is_active"]:
@@ -517,7 +518,21 @@ class AntigravityAccountManager:
             return score
 
         # Candidates must have remaining quota to be eligible fallback
-        viable = [acc for acc in candidates if acc.get("min_quota", 0) > 0]
+        def is_viable(acc: Dict[str, Any]) -> bool:
+            if not acc.get("has_quota_data", True):
+                return False
+            quotas = acc.get("models_quota", {})
+            if preferred_model and preferred_model in quotas:
+                return quotas[preferred_model].get("percentage", 0) > 0
+            if "gemini-3.1-pro-high" in quotas and quotas["gemini-3.1-pro-high"].get("percentage", 0) > 0:
+                return True
+            if "gemini-3.7-flash-high" in quotas and quotas["gemini-3.7-flash-high"].get("percentage", 0) > 0:
+                return True
+            if any(m.get("percentage", 0) > 0 for m in quotas.values()):
+                return True
+            return acc.get("min_quota", 0) > 0
+
+        viable = [acc for acc in candidates if is_viable(acc)]
         if not viable:
             return None
         viable.sort(key=score_account, reverse=True)
@@ -564,12 +579,14 @@ class AntigravityAccountManager:
                 res_data = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             LOG.error("Failed to refresh token for %s: %s", account_row.get("email"), e)
-            if access_token:
-                LOG.warning("Reusing existing access token despite refresh error")
+            if access_token and now < expiry:
+                LOG.warning("Reusing valid existing access token despite refresh error")
                 return token_obj
             raise
 
         new_access_token = res_data.get("access_token")
+        if not new_access_token or not isinstance(new_access_token, str):
+            raise ValueError(f"Google OAuth refresh response missing access_token for {account_row.get('email')}")
         expires_in = int(res_data.get("expires_in", 3600))
         token_obj["access_token"] = new_access_token
         token_obj["expiry_timestamp"] = now + expires_in
@@ -594,13 +611,15 @@ class AntigravityAccountManager:
 
     # --- Process Management ---
 
+    IDE_PROCESS_NAMES = ("antigravity.exe", "antigravity", "antigravity ide.exe", "antigravity ide")
+
     @staticmethod
     def is_ide_running() -> bool:
-        """Checks if Antigravity.exe is running."""
+        """Checks if Antigravity.exe / Antigravity IDE.exe is running."""
         for p in psutil.process_iter(["name"]):
             try:
                 name = (p.info["name"] or "").lower()
-                if name in ("antigravity.exe", "antigravity"):
+                if name in AntigravityAccountManager.IDE_PROCESS_NAMES:
                     return True
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -608,12 +627,12 @@ class AntigravityAccountManager:
 
     @staticmethod
     def kill_ide(timeout_sec: float = 8.0) -> None:
-        """Gracefully terminates Antigravity.exe processes."""
+        """Gracefully terminates Antigravity.exe / Antigravity IDE.exe processes."""
         targets = []
         for p in psutil.process_iter(["pid", "name"]):
             try:
                 name = (p.info["name"] or "").lower()
-                if name in ("antigravity.exe", "antigravity"):
+                if name in AntigravityAccountManager.IDE_PROCESS_NAMES:
                     targets.append(p)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -642,23 +661,44 @@ class AntigravityAccountManager:
 
     @staticmethod
     def launch_ide() -> bool:
-        """Launches Antigravity.exe non-blocking."""
+        """Launches Antigravity.exe non-blocking or raises RuntimeError on failure."""
         if sys.platform != "win32":
             LOG.info("launch_ide called on non-win32 platform; skipping GUI launch.")
             return True
 
-        local_app = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "antigravity" / "Antigravity.exe"
-        if local_app.exists():
-            subprocess.Popen([str(local_app)], close_fds=True, creationflags=subprocess.DETACHED_PROCESS)
-            return True
+        candidates = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "antigravity" / "Antigravity.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Antigravity IDE" / "Antigravity IDE.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Antigravity IDE" / "Antigravity.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) / "Antigravity" / "Antigravity.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) / "Antigravity IDE" / "Antigravity IDE.exe",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                try:
+                    subprocess.Popen([str(candidate)], close_fds=True, creationflags=subprocess.DETACHED_PROCESS)
+                    return True
+                except Exception as e:
+                    LOG.error("Failed to launch Antigravity at %s: %s", candidate, e)
+                    raise RuntimeError(f"Failed to launch Antigravity IDE at {candidate}: {e}") from e
 
         # Fallback to PATH
+        for exe_name in ("Antigravity.exe", "Antigravity IDE.exe"):
+            resolved = shutil.which(exe_name)
+            if resolved:
+                try:
+                    subprocess.Popen([resolved], close_fds=True, creationflags=subprocess.DETACHED_PROCESS)
+                    return True
+                except Exception as e:
+                    LOG.error("Failed to launch Antigravity at %s: %s", resolved, e)
+                    raise RuntimeError(f"Failed to launch Antigravity IDE: {e}") from e
+
         try:
             subprocess.Popen(["Antigravity.exe"], close_fds=True, creationflags=subprocess.DETACHED_PROCESS)
             return True
         except Exception as e:
             LOG.error("Failed to launch Antigravity: %s", e)
-            return False
+            raise RuntimeError(f"Failed to launch Antigravity IDE: {e}") from e
 
     # --- Switch Execution ---
 
@@ -692,6 +732,8 @@ class AntigravityAccountManager:
         refresh_token = token_obj.get("refresh_token")
         expiry = token_obj.get("expiry_timestamp") or int(time.time()) + 3600
         id_token = token_obj.get("id_token")
+        if not access_token or not isinstance(access_token, str):
+            raise ValueError(f"Refreshed OAuth payload missing valid access_token for {account_row.get('email')}")
 
         # 2. Check if IDE was running
         was_running = self.is_ide_running()
@@ -700,6 +742,8 @@ class AntigravityAccountManager:
 
         # 3. Locate IDE state files
         vscdb_path, storage_path = self.get_ide_state_paths()
+        if vscdb_path and not vscdb_path.exists():
+            raise FileNotFoundError(f"Antigravity IDE state database (state.vscdb) not found at {vscdb_path}")
 
         # 4. Apply device profile (fingerprint) to storage.json
         dev_profile = {}
@@ -728,7 +772,9 @@ class AntigravityAccountManager:
             if dev_profile.get("sqmId"):
                 storage_data["telemetry.sqmId"] = dev_profile["sqmId"]
 
-            storage_path.write_text(json.dumps(storage_data, indent=2), encoding="utf-8")
+            tmp_storage = storage_path.with_name(f".{storage_path.name}.tmp")
+            tmp_storage.write_text(json.dumps(storage_data, indent=2), encoding="utf-8")
+            tmp_storage.replace(storage_path)
             LOG.info("Updated device fingerprint in %s", storage_path)
 
         # 5. Inject tokens and auth into state.vscdb
@@ -834,16 +880,24 @@ class AntigravityAccountManager:
 
         # 7. Relaunch IDE only if requested and it was already running
         restarted = False
+        launch_error = None
         if restart_ide and was_running:
-            restarted = self.launch_ide()
+            try:
+                restarted = bool(self.launch_ide())
+            except Exception as e:
+                launch_error = str(e)
+                LOG.error("Account switched, but failed to relaunch Antigravity IDE: %s", e)
 
-        return {
+        result = {
             "success": True,
             "account_id": account_id,
             "email": email,
             "name": account_row.get("name") or email.split("@")[0],
             "restarted_ide": restarted,
         }
+        if launch_error:
+            result["launch_error"] = launch_error
+        return result
 
     # --- Portability & Export/Import ---
 

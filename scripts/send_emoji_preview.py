@@ -38,11 +38,19 @@ FALLBACK_CHARS = {
 
 def send_preview():
     env_file = Path(__file__).resolve().parent.parent / ".env"
-    env = {}
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        if "=" in line and not line.startswith("#"):
+    env = dict(os.environ)
+    if env_file.exists():
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
             k, v = line.split("=", 1)
-            env[k.strip()] = v.strip()
+            val = v.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            env[k.strip()] = val
 
     token = env.get("TELEGRAM_BOT_TOKEN")
     user_id = env.get("TELEGRAM_ALLOWED_USER_ID") or env.get("TELEGRAM_USER_ID")

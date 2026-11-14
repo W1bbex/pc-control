@@ -3,7 +3,6 @@
 
 import json
 import logging
-import os
 from pathlib import Path
 
 LOG = logging.getLogger("pc-control-bot.ui_icons")
@@ -79,7 +78,6 @@ CANONICAL_ICONS = {
 }
 
 def _load_canonical_icons():
-    from pathlib import Path
     icons = dict(CANONICAL_ICONS)
     for candidate in [
         Path(__file__).resolve().parent / "resources" / "icons.json",
@@ -92,8 +90,8 @@ def _load_canonical_icons():
                     if isinstance(data, dict):
                         icons.update(data)
                         return icons
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.warning("Failed to load custom icons from %s: %s", candidate, e)
     return icons
 
 ICONS = _load_canonical_icons()

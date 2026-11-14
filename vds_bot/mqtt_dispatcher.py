@@ -19,8 +19,10 @@ except Exception:
     MOSCOW = timezone(timedelta(hours=3))
 
 try:
+    from .power_scheduler import get_app_state_lock, is_pc_online_for_auto_led, sync_auto_led
     from .telegram_ui import ICONS
 except ImportError:
+    from power_scheduler import get_app_state_lock, is_pc_online_for_auto_led, sync_auto_led
     from telegram_ui import ICONS
 
 LOG = logging.getLogger("pc-control-bot.mqtt_dispatcher")
@@ -60,70 +62,36 @@ class MqttDispatcherMixin:
             sys_status = data.get("system_status") or self.mqtt.system_status
             desk_status = data.get("desktop_status") or self.mqtt.desktop_status
             esp_status = data.get("esp_status") or getattr(self.mqtt, "esp_status", "unknown")
-            pc_online = (
-                sys_status == "online"
-                or desk_status == "online"
-                or session in ("unlocked", "locked", "login_screen")
-            )
-            pc_offline = not pc_online
+            pc_online, _ = is_pc_online_for_auto_led(self, sys_status, desk_status, session)
 
-            prev_esp_status = getattr(self, "last_esp_status", None)
-            self.last_esp_status = esp_status
+            with get_app_state_lock(self):
+                prev_esp_status = getattr(self, "last_esp_status", None)
+                self.last_esp_status = esp_status
+
             esp_just_reconnected = (prev_esp_status is not None and prev_esp_status != "online" and esp_status == "online")
+            if esp_just_reconnected:
+                LOG.info("Auto-LED: ESP reconnected (status=%s, prev=%s, pc_online=%s)", esp_status, prev_esp_status, pc_online)
 
-            with getattr(self, "state_lock", threading.RLock()):
-                if esp_just_reconnected:
-                    LOG.info("Auto-LED: ESP reconnected (status=%s, prev=%s, pc_online=%s)", esp_status, prev_esp_status, pc_online)
-                    if pc_online:
-                        if hasattr(self.mqtt, "publish_esp_action"):
-                            if getattr(self, "user_led_state", "on") != "off":
-                                color = getattr(self, "user_led_color", None)
-                                if color:
-                                    self.mqtt.publish_esp_action("LED_COLOR", value=color)
-                                else:
-                                    self.mqtt.publish_esp_action("LED_ON")
-                                self.last_auto_led_state = "on"
-                                LOG.info("Auto-LED: ESP reconnected while PC is online -> resynced LED to cooler")
-                            else:
-                                if self.mqtt.publish_esp_action("LED_OFF"):
-                                    self.last_auto_led_state = "off"
-                                    LOG.info("Auto-LED: ESP reconnected while PC online, but user_led_state=off -> LED_OFF sent to cooler")
-                    else:
-                        if hasattr(self.mqtt, "publish_esp_action"):
-                            if self.mqtt.publish_esp_action("LED_OFF"):
-                                self.last_auto_led_state = "off"
-                                LOG.info("Auto-LED: ESP reconnected while PC is offline -> resynced LED_OFF to cooler")
-                else:
-                    if pc_offline and getattr(self, "last_auto_led_state", None) != "off":
-                        if hasattr(self.mqtt, "publish_esp_action"):
-                            if self.mqtt.publish_esp_action("LED_OFF"):
-                                self.last_auto_led_state = "off"
-                                LOG.info("Auto-LED: PC went offline/asleep (sys=%s, desk=%s, sess=%s) -> LED_OFF sent to cooler", sys_status, desk_status, session)
-                    elif pc_online and getattr(self, "user_led_state", "on") != "off" and getattr(self, "last_auto_led_state", None) != "on":
-                        if hasattr(self.mqtt, "publish_esp_action"):
-                            color = getattr(self, "user_led_color", None)
-                            if color:
-                                self.mqtt.publish_esp_action("LED_COLOR", value=color)
-                            else:
-                                self.mqtt.publish_esp_action("LED_ON")
-                            self.last_auto_led_state = "on"
-                            LOG.info("Auto-LED: PC came online/awake (sys=%s, desk=%s, sess=%s) -> LED sent to cooler", sys_status, desk_status, session)
-                    elif pc_online and getattr(self, "user_led_state", "on") == "off" and getattr(self, "last_auto_led_state", None) != "off":
-                        if hasattr(self.mqtt, "publish_esp_action"):
-                            if self.mqtt.publish_esp_action("LED_OFF"):
-                                self.last_auto_led_state = "off"
-                                LOG.info("Auto-LED: PC came online/awake, but user_led_state=off -> enforced LED_OFF")
+            sync_auto_led(
+                self,
+                pc_online,
+                esp_just_reconnected=esp_just_reconnected,
+                source="Auto-LED",
+                detail=f"sys={sys_status}, desk={desk_status}, sess={session}",
+            )
 
         elif event_type == "graceful_shutdown":
             LOG.info("Graceful shutdown event received from Windows: %s", data)
             self._clear_pending_shutdown()
             if hasattr(self.power_flow, "reset_flow"):
                 self.power_flow.reset_flow()
-            with getattr(self, "state_lock", threading.RLock()):
-                if hasattr(self.mqtt, "publish_esp_action"):
-                    if self.mqtt.publish_esp_action("LED_OFF"):
-                        self.last_auto_led_state = "off"
-                        LOG.info("Auto-LED: Graceful shutdown -> LED_OFF sent to cooler")
+            sync_auto_led(
+                self,
+                False,
+                force_off=True,
+                source="Auto-LED",
+                detail="graceful_shutdown",
+            )
 
         elif event_type == "physical_input":
             self.physical_btn.handle_event(data, target_user)
@@ -192,7 +160,8 @@ class MqttDispatcherMixin:
             if pending:
                 self.ui.send_message(pending["chat_id"], "❌ Desktop-агент не прислал скриншот за 35 секунд.")
             getattr(self, "pending_telemetry_cmd_ids", {}).pop(cmd_id, None)
-            if cmd_id == getattr(self, "pending_shutdown_cmd_id", None):
+            pending_shutdown = getattr(self, "pending_shutdown_cmd_id", None)
+            if cmd_id and pending_shutdown and cmd_id == pending_shutdown:
                 self.ui.send_message(
                     target_user,
                     "<b>❌ Выключение не подтверждено.</b>\n\nСистемный агент не ответил. ПК мог остаться включённым.",
@@ -224,7 +193,8 @@ class MqttDispatcherMixin:
 
             cmd_id = data.get("id")
             result = data.get("result")
-            ack_data = data.get("data") or {}
+            raw_ack_data = data.get("data")
+            ack_data = raw_ack_data if isinstance(raw_ack_data, dict) else {}
 
             if ack_data.get("codex_diagnostic") is True:
                 variant = html.escape(str(ack_data.get("variant", "?")))
@@ -250,7 +220,8 @@ class MqttDispatcherMixin:
                 pending_cmd = self.pending_console_cmds.pop(cmd_id)
                 self._handle_console_ack(pending_cmd, data)
 
-            if cmd_id == getattr(self, "pending_shutdown_cmd_id", None):
+            pending_shutdown = getattr(self, "pending_shutdown_cmd_id", None)
+            if cmd_id and pending_shutdown and cmd_id == pending_shutdown:
                 if result == "executed":
                     self.shutdown_acknowledged = True
                     self.save_state()
@@ -261,7 +232,7 @@ class MqttDispatcherMixin:
                 elif result not in {"progress"}:
                     self.ui.send_message(
                         target_user,
-                        f"<b>❌ Выключение отклонено.</b>\n\nОтвет системного агента: <code>{result}</code>",
+                        f"<b>❌ Выключение отклонено.</b>\n\nОтвет системного агента: <code>{html.escape(str(result))}</code>",
                         reply_markup=self._power_menu_markup(),
                     )
                     self._clear_pending_shutdown()
@@ -304,33 +275,36 @@ class MqttDispatcherMixin:
                             step_id = "game_warcraft3"
 
                     if step_id:
+                        def _wake_vpn_waiters():
+                            for attr in ("vpn_ready_event", "happ_ready_event"):
+                                ev = getattr(self, attr, None)
+                                if ev:
+                                    ev.set()
+
                         if state_val in {"verified", "already_running_verified", "ready", "vpn_connected"}:
                             self.app_statuses[step_id] = "✅"
                             if step_id in {"happ_vpn", "incy_vpn"}:
-                                vpn_ev = getattr(self, "vpn_ready_event", None)
-                                if vpn_ev:
-                                    vpn_ev.set()
-                                happ_ev = getattr(self, "happ_ready_event", None)
-                                if happ_ev:
-                                    happ_ev.set()
+                                _wake_vpn_waiters()
                         elif state_val == "connecting":
                             self.app_statuses[step_id] = "⏳ Подключение VPN..."
                         elif state_val == "starting":
                             self.app_statuses[step_id] = "⏳ Запуск..."
                         elif state_val == "failed":
                             self.app_statuses[step_id] = "❌"
+                            if step_id in {"happ_vpn", "incy_vpn"}:
+                                _wake_vpn_waiters()
 
                         self._update_workspace_card_ui()
 
                 elif result == "executed":
                     LOG.info("Workspace setup launch_app executed ACK received.")
                     self.workspace_execution_result = "executed"
-                    self.workspace_execution_data = ack_data if isinstance(ack_data, dict) else {}
+                    self.workspace_execution_data = ack_data
                     self.workspace_executed_event.set()
 
-                elif result in ("failed", "cancelled"):
+                elif result != "progress":
                     LOG.warning("Workspace setup %s ACK received: %s", result, ack_data)
-                    self.workspace_execution_result = result
+                    self.workspace_execution_result = result or "failed"
                     self.workspace_executed_event.set()
 
             # Minimize ACK tracking
@@ -375,7 +349,7 @@ class MqttDispatcherMixin:
                         )
                     else:
                         err = (ack_data or {}).get("error", "Не удалось загрузить аккаунты")
-                        self.ui.send_message(req_chat_id, f"❌ Ошибка получения профилей Antigravity: {err}")
+                        self.ui.send_message(req_chat_id, f"❌ Ошибка получения профилей Antigravity: {html.escape(str(err))}")
 
                 elif action_kind == "switch":
                     if result == "executed" and isinstance(ack_data, dict):
@@ -395,7 +369,7 @@ class MqttDispatcherMixin:
                             pass
                     else:
                         err = (ack_data or {}).get("error", "Сбой при переключении")
-                        self.ui.send_message(req_chat_id, f"❌ Ошибка смены профиля Antigravity: {err}")
+                        self.ui.send_message(req_chat_id, f"❌ Ошибка смены профиля Antigravity: {html.escape(str(err))}")
 
                 elif action_kind == "restart":
                     if result == "executed":
@@ -421,7 +395,7 @@ class MqttDispatcherMixin:
                         self.ui.send_message(req_chat_id, msg)
                     else:
                         err = (ack_data or {}).get("error", "Не удалось восстановить доступ к Google через VPN")
-                        self.ui.send_message(req_chat_id, f"❌ Ошибка лечения Antigravity: {err}")
+                        self.ui.send_message(req_chat_id, f"❌ Ошибка лечения Antigravity: {html.escape(str(err))}")
 
         elif event_type == "media_status":
             self.latest_media_state = data
@@ -515,6 +489,7 @@ class MqttDispatcherMixin:
             return
         self.pending_activity_chat_id = None
         self.pending_activity_msg_id = None
+        self.pending_activity_requested_at = None
 
         req = data.get("req", {})
         result = data.get("result", [])

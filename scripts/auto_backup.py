@@ -42,7 +42,7 @@ STATE_FILE = BACKUPS_DIR / ".backup_state.json"
 LOGS_DIR = BASE_DIR / "logs"
 LOG_FILE = LOGS_DIR / "auto_backup.log"
 
-VDS_HOST = "vds"
+VDS_HOST = os.getenv("VDS_HOST", "vds")
 REMOTE_VDS_DIR = "/opt/pc-control-bot"
 
 # Extensions considered "source code"
@@ -70,6 +70,7 @@ EXCLUDE_FILES = {
 }
 
 VDS_MANIFEST_FILES = [
+    "action_helpers.py",
     "bot.py",
     "console_service.py",
     "health_engine.py",
@@ -188,15 +189,19 @@ def collect_vds_code_files(logger: logging.Logger) -> dict[str, bytes]:
             timeout=20,
             **kwargs,
         )
-        if proc.returncode in (0, 2) and proc.stdout:
+        if proc.returncode == 0 and proc.stdout:
             with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:gz") as tar:
                 for member in tar.getmembers():
                     if member.isfile():
                         f = tar.extractfile(member)
-                        if f:
-                            clean_name = member.name.lstrip("./")
-                            vds_files[clean_name] = f.read()
-                            logger.debug("Fetched remote %s (%d bytes)", clean_name, len(vds_files[clean_name]))
+                        if f is not None:
+                            with f:
+                                clean_name = member.name.lstrip("./")
+                                vds_files[clean_name] = f.read()
+                                logger.debug("Fetched remote %s (%d bytes)", clean_name, len(vds_files[clean_name]))
+        elif proc.returncode != 0:
+            err_text = proc.stderr.decode("utf-8", errors="replace").strip() if isinstance(proc.stderr, bytes) else (proc.stderr or "")
+            logger.warning("Single-batch fetch exited with code %s: %s", proc.returncode, err_text)
     except Exception as e:
         logger.warning("Single-batch fetch failed: %s. Falling back to per-file fetch...", e)
 
@@ -303,23 +308,27 @@ def create_backup_archive(
     temp_path = archive_path.with_suffix(".tmp.zip")
 
     logger.info("Creating backup archive: %s", archive_path.name)
-    with zipfile.ZipFile(temp_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        # 1. Local files
-        for fp in local_files:
-            rel = str(fp.relative_to(base_path)).replace("\\", "/")
-            arc_name = f"local/{rel}"
-            zf.write(fp, arcname=arc_name)
+    try:
+        with zipfile.ZipFile(temp_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            # 1. Local files
+            for fp in local_files:
+                rel = str(fp.relative_to(base_path)).replace("\\", "/")
+                arc_name = f"local/{rel}"
+                zf.write(fp, arcname=arc_name)
 
-        # 2. VDS live production files
-        for fn, content in vds_files.items():
-            arc_name = f"vds_server_live/{fn}"
-            zf.writestr(arc_name, content)
+            # 2. VDS live production files
+            for fn, content in vds_files.items():
+                arc_name = f"vds_server_live/{fn}"
+                zf.writestr(arc_name, content)
 
-        # 3. Manifest
-        manifest_str = json.dumps(manifest, indent=2, ensure_ascii=False)
-        zf.writestr("backup_manifest.json", manifest_str)
+            # 3. Manifest
+            manifest_str = json.dumps(manifest, indent=2, ensure_ascii=False)
+            zf.writestr("backup_manifest.json", manifest_str)
 
-    temp_path.replace(archive_path)
+        temp_path.replace(archive_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
     logger.info("Backup archive finalized! File size: %.2f KB", archive_path.stat().st_size / 1024)
 
 
@@ -385,9 +394,14 @@ def run_backup(force: bool = False, dry_run: bool = False, skip_vds: bool = Fals
 
     create_backup_archive(archive_path, local_files, vds_files, current_manifest, BASE_DIR, logger)
 
-    # 6. Update state file
-    STATE_FILE.write_text(json.dumps(current_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info("Updated backup state in %s", STATE_FILE.name)
+    # 6. Update state file (skip if VDS fetch failed unexpectedly, and write atomically)
+    if skip_vds or vds_files:
+        tmp_state = STATE_FILE.with_suffix(".tmp.json")
+        tmp_state.write_text(json.dumps(current_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_state.replace(STATE_FILE)
+        logger.info("Updated backup state in %s", STATE_FILE.name)
+    else:
+        logger.warning("Skipped overwriting %s because VDS fetch returned 0 files.", STATE_FILE.name)
 
     # 7. Rotate old backups
     rotate_backups(BACKUPS_DIR, logger, keep=MAX_BACKUP_RETENTION)

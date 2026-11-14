@@ -31,6 +31,7 @@ LOCAL_DIR = Path(__file__).resolve().parent.parent / "vds_bot"
 REMOTE_BASE = "/opt/pc-control-bot"
 
 MANIFEST_FILES = [
+    "action_helpers.py",
     "bot.py",
     "console_service.py",
     "health_engine.py",
@@ -79,11 +80,10 @@ def compute_manifest():
 def get_bind_ip():
     try:
         import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("192.0.2.1", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        probe_ip = os.getenv("VDS_BIND_PROBE_IP") or os.getenv("VDS_HOST_IP") or "1.1.1.1"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((probe_ip, 80))
+            return s.getsockname()[0]
     except Exception:
         return None
 
@@ -110,7 +110,10 @@ def run_ssh(cmd, check=True, input_bytes=None):
 
     if res.returncode != 0:
         bind_ip = get_bind_ip()
-        if bind_ip and not bind_ip.startswith("172.18."):
+        exclude_prefixes = tuple(
+            p.strip() for p in os.getenv("VDS_BIND_SUBNET_EXCLUDE", "172.18.").split(",") if p.strip()
+        )
+        if bind_ip and (not exclude_prefixes or not bind_ip.startswith(exclude_prefixes)):
             retry_args = [
                 "ssh",
                 "-o", "BatchMode=yes",
@@ -132,6 +135,14 @@ def run_ssh(cmd, check=True, input_bytes=None):
             retry_res.stderr = retry_res.stderr.decode("utf-8", errors="replace") if isinstance(retry_res.stderr, bytes) else (retry_res.stderr or "")
             if retry_res.returncode == 0:
                 return retry_res
+            combined_err = "\n".join(
+                part for part in (
+                    f"[primary exit={res.returncode}] {res.stderr.strip()}" if res.stderr.strip() else f"[primary exit={res.returncode}]",
+                    f"[retry -b {bind_ip} exit={retry_res.returncode}] {retry_res.stderr.strip()}" if retry_res.stderr.strip() else f"[retry -b {bind_ip} exit={retry_res.returncode}]",
+                )
+            )
+            retry_res.stderr = combined_err
+            res = retry_res
 
     if check and res.returncode != 0:
         raise RuntimeError(
@@ -175,18 +186,23 @@ def stage_release():
 
 def verify_remote_hashes(remote_release_dir, expected_manifest):
     print(f"[*] Verifying SHA-256 hashes on remote staging: {remote_release_dir}")
+    expected_files_json = json.dumps(expected_manifest.get("files", {}), sort_keys=True)
     script = f"""
 import hashlib, json, pathlib, sys
-p = pathlib.Path('{remote_release_dir}')
+p = pathlib.Path({remote_release_dir!r})
 manifest = json.loads((p / 'release_manifest.json').read_text(encoding='utf-8'))
+expected_files = json.loads({expected_files_json!r})
 errors = []
-for fn, meta in manifest['files'].items():
+if sorted(manifest.get('files', {{}}).keys()) != sorted(expected_files.keys()):
+    errors.append('Manifest file list mismatch against local expected_manifest')
+for fn, meta in expected_files.items():
     fp = p / fn
     if not fp.exists():
         errors.append(f'Missing {{fn}}')
         continue
     h = hashlib.sha256(fp.read_bytes()).hexdigest()
-    if h != meta.get('sha256'):
+    remote_meta = manifest.get('files', {{}}).get(fn, {{}})
+    if h != meta.get('sha256') or h != remote_meta.get('sha256'):
         errors.append(f'Hash mismatch for {{fn}}')
 if errors:
     print('ERRORS: ' + '; '.join(errors))
@@ -211,7 +227,7 @@ def run_preflight(remote_release_dir):
     import_cmd = (
         f"PYTHONPATH={remote_release_dir} {REMOTE_BASE}/venv/bin/python -c \""
         f"import sys; "
-        f"import bot; import health_engine; import history; import monitoring; "
+        f"import action_helpers; import bot; import health_engine; import history; import monitoring; "
         f"import mqtt_gateway; import physical_button; import power_flow; import telegram_ui; "
         f"from routers import antigravity_router, command_router, console_router, monitoring_router, "
         f"physical_router, player_router, power_router, workspace_router; "
@@ -235,14 +251,19 @@ def rollback_to_previous():
     print(f"[*] Rolling back to previous release: {prev_release} ({prev_dir})")
 
     quoted_prev = shlex.quote(prev_release)
+    stage_rb = f"{REMOTE_BASE}/.stage_rollback_{int(time.time())}"
     restore_cmd = (
+        f"rm -rf {stage_rb} && mkdir -p {stage_rb} && "
         f"for f in {' '.join(MANIFEST_FILES)}; do "
         f"  if [ -f {prev_dir}/$f ]; then "
-        f"    mkdir -p $(dirname {REMOTE_BASE}/$f) && "
-        f"    cp {prev_dir}/$f {REMOTE_BASE}/$f; "
+        f"    mkdir -p $(dirname {stage_rb}/$f) $(dirname {REMOTE_BASE}/$f) && "
+        f"    cp {prev_dir}/$f {stage_rb}/$f && "
+        f"    mv -fT {stage_rb}/$f {REMOTE_BASE}/$f; "
         f"  fi; "
         f"done && "
-        f"echo {quoted_prev} > {REMOTE_BASE}/current_release && "
+        f"rm -rf {stage_rb} && "
+        f"printf '%s\\n' {quoted_prev} > {REMOTE_BASE}/.current_release.tmp && "
+        f"mv -f {REMOTE_BASE}/.current_release.tmp {REMOTE_BASE}/current_release && "
         f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
         f"chmod 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
         f"if [ -d {REMOTE_BASE}/resources ]; then find {REMOTE_BASE}/resources -type d -exec chmod 0755 {{}} + && find {REMOTE_BASE}/resources -type f -exec chmod 0644 {{}} +; fi && "
@@ -263,33 +284,53 @@ def rollback_to_previous():
 
 def deploy_and_verify(release_tag, remote_release_dir):
     print(f"[*] Deploying release {release_tag} to production...")
-    
-    # Read current release tag to store as previous
+
+    # Read current release tag in memory first; write previous_release only after atomic swap succeeds.
     current_tag_res = run_ssh(f"cat {REMOTE_BASE}/current_release 2>/dev/null || echo ''", check=False)
     prev_tag = current_tag_res.stdout.strip()
-    if prev_tag:
-        run_ssh(f"echo {shlex.quote(prev_tag)} > {REMOTE_BASE}/previous_release")
 
-    # Atomic copy and permission setup
     quoted_tag = shlex.quote(release_tag)
+    stage_dir = f"{REMOTE_BASE}/.stage_{release_tag}"
+    record_prev_cmd = (
+        f"printf '%s\\n' {shlex.quote(prev_tag)} > {REMOTE_BASE}/.previous_release.tmp && "
+        f"mv -f {REMOTE_BASE}/.previous_release.tmp {REMOTE_BASE}/previous_release && "
+        if prev_tag
+        else ""
+    )
     deploy_cmd = (
+        f"set -e && "
+        f"rm -rf {shlex.quote(stage_dir)} && mkdir -p {shlex.quote(stage_dir)} && "
+        f"for f in {' '.join(MANIFEST_FILES)}; do "
+        f"  mkdir -p $(dirname {shlex.quote(stage_dir)}/$f) && "
+        f"  cp {shlex.quote(remote_release_dir)}/$f {shlex.quote(stage_dir)}/$f; "
+        f"done && "
         f"for f in {' '.join(MANIFEST_FILES)}; do "
         f"  mkdir -p $(dirname {REMOTE_BASE}/$f) && "
-        f"  cp {remote_release_dir}/$f {REMOTE_BASE}/$f; "
+        f"  mv -fT {shlex.quote(stage_dir)}/$f {REMOTE_BASE}/$f; "
         f"done && "
-        f"echo {quoted_tag} > {REMOTE_BASE}/current_release && "
+        f"rm -rf {shlex.quote(stage_dir)} && "
+        f"{record_prev_cmd}"
+        f"printf '%s\\n' {quoted_tag} > {REMOTE_BASE}/.current_release.tmp && "
+        f"mv -f {REMOTE_BASE}/.current_release.tmp {REMOTE_BASE}/current_release && "
         f"chown -R root:pccontrol {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt {REMOTE_BASE}/resources {REMOTE_BASE}/routers 2>/dev/null || true && "
         f"chmod 0644 {REMOTE_BASE}/*.py {REMOTE_BASE}/requirements.txt 2>/dev/null || true && "
         f"if [ -d {REMOTE_BASE}/resources ]; then find {REMOTE_BASE}/resources -type d -exec chmod 0755 {{}} + && find {REMOTE_BASE}/resources -type f -exec chmod 0644 {{}} +; fi && "
         f"if [ -d {REMOTE_BASE}/routers ]; then chmod 0755 {REMOTE_BASE}/routers && find {REMOTE_BASE}/routers -maxdepth 1 -name '*.py' -exec chmod 0644 {{}} +; fi && "
+        f"echo DEPLOY_START_TS=$(date +%s) && "
         f"systemctl restart pc-control-bot.service"
     )
-    run_ssh(deploy_cmd)
-    print("  -> Production files updated & service restart signal sent")
+    deploy_res = run_ssh(deploy_cmd)
+    since_ts = ""
+    for line in deploy_res.stdout.splitlines():
+        if line.startswith("DEPLOY_START_TS="):
+            since_ts = line.split("=", 1)[1].strip()
+            break
+    print("  -> Production files updated atomically & service restart signal sent")
 
     # Post-deployment health verification over 15 seconds
     print("[*] Monitoring service post-deployment health (15s multi-check)...")
     recent_logs = ""
+    since_arg = f"--since @{since_ts}" if since_ts.isdigit() else "-n 50"
     for check_sec in (3, 6, 6):
         time.sleep(check_sec)
         status_res = run_ssh("systemctl is-active pc-control-bot.service", check=False)
@@ -301,11 +342,7 @@ def deploy_and_verify(release_tag, remote_release_dir):
             rollback_to_previous()
             raise RuntimeError(f"Deployment failed post-check: service is {is_active}")
 
-        # Query MainPID to isolate logs to the current service process
-        pid_res = run_ssh("systemctl show pc-control-bot.service -p MainPID --value", check=False)
-        current_pid = pid_res.stdout.strip()
-        log_filter = f"_PID={current_pid}" if current_pid.isdigit() and int(current_pid) > 0 else ""
-        logs_res = run_ssh(f"journalctl -u pc-control-bot.service {log_filter} -n 35 --no-pager", check=False)
+        logs_res = run_ssh(f"journalctl -u pc-control-bot.service {since_arg} -n 50 --no-pager", check=False)
         recent_logs = logs_res.stdout
 
         if "Traceback (most recent call last):" in recent_logs:
@@ -352,12 +389,21 @@ def diff_remote():
 
 def pull_remote():
     print("[*] Pulling latest code from VDS production into local vds_bot/...")
+    failed = []
     for filename in MANIFEST_FILES:
-        res = run_ssh(f"cat {REMOTE_BASE}/{filename} 2>/dev/null", check=False)
-        if res.returncode == 0 and res.stdout:
+        res = run_ssh(f"cat {shlex.quote(f'{REMOTE_BASE}/{filename}')}", check=False)
+        if res.returncode == 0 and res.stdout is not None:
             local_path = LOCAL_DIR / filename
-            local_path.write_text(res.stdout, encoding="utf-8")
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = local_path.with_name(f".{local_path.name}.tmp")
+            tmp_path.write_text(res.stdout, encoding="utf-8")
+            tmp_path.replace(local_path)
             print(f"  -> Updated local {filename}")
+        else:
+            failed.append(filename)
+            print(f"  [!] Failed to fetch remote {filename} (exit={res.returncode})")
+    if failed:
+        raise RuntimeError(f"Pull incomplete; failed files: {', '.join(failed)}")
     print("[✓] Local vds_bot/ successfully updated from VDS.")
 
 

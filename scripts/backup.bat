@@ -16,4 +16,4 @@ set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo Нажмите любую клавишу для выхода...
 pause >nul
-exit /b %ERRORLEVEL%
+exit /b %EXIT_CODE%

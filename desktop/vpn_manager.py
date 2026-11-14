@@ -9,11 +9,14 @@ from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
 
 import psutil
+
+from core.process_utils import shell_execute_runas
 
 LOG = logging.getLogger("pc-control-agent")
 
@@ -34,6 +37,71 @@ if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "user32"):
 
 class VpnManagerMixin:
     """Provides methods to check and connect Happ and INCY VPN services."""
+
+    def _get_incy_lock(self):
+        lock = getattr(self, "_incy_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._incy_lock = lock
+        return lock
+
+    @staticmethod
+    def _stop_incy_processes():
+        incy_procs = [
+            p for p in psutil.process_iter(["name", "pid"])
+            if (p.info["name"] or "").lower() == "incy.exe"
+        ]
+        for p in incy_procs:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        if incy_procs:
+            try:
+                psutil.wait_procs(incy_procs, timeout=3.0)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _load_incy_preferences(pref_path: Path) -> dict:
+        if not pref_path.exists():
+            return {}
+        try:
+            with open(pref_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            raise ValueError(f"Corrupted INCY preferences at {pref_path}: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid INCY preferences structure at {pref_path}")
+        return data
+
+    @staticmethod
+    def _write_incy_preferences_atomic(pref_path: Path, prefs: dict):
+        pref_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = pref_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, pref_path)
+
+    def _finalize_incy_connection(self, verify_google: bool, already_connected: bool = False) -> dict:
+        if verify_google and not self.probe_google_https(timeout=3.0):
+            LOG.warning("INCY connected, but Google HTTPS probe failed! Auto-switching server...")
+            heal_res = self.switch_next_incy_server()
+            if heal_res.get("success") and self.probe_google_https(timeout=3.5):
+                return {"verified": True, "server": heal_res.get("server")}
+            return {
+                "verified": False,
+                "reason": "google_https_probe_failed",
+                "error": heal_res.get("error") or "Google HTTPS probe failed after server switch",
+            }
+        result = {"verified": True}
+        if already_connected:
+            result["already_connected"] = True
+        return result
 
     @staticmethod
     def _run_network_probe(timeout=2.0):
@@ -176,52 +244,47 @@ class VpnManagerMixin:
         Ensures autoConnect is set in preferences.json, launches incy.exe if not running,
         and polls up to timeout for network readiness and Google HTTPS accessibility.
         """
-        LOG.info("Verifying INCY VPN connection")
-        if self.check_incy_vpn_active():
-            LOG.info("INCY VPN is already active and verified")
-            if verify_google and not self.probe_google_https(timeout=3.0):
-                LOG.warning("INCY VPN is active, but Google HTTPS probe failed! Auto-switching server...")
-                heal_res = self.switch_next_incy_server()
-                if heal_res.get("success") and self.probe_google_https(timeout=3.5):
-                    return {"verified": True, "server": heal_res.get("server")}
-            return {"verified": True, "already_connected": True}
+        with self._get_incy_lock():
+            LOG.info("Verifying INCY VPN connection")
+            if self.check_incy_vpn_active():
+                LOG.info("INCY VPN is already active and verified")
+                return self._finalize_incy_connection(verify_google, already_connected=True)
 
-        try:
-            pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
-            if pref_path.exists():
-                with open(pref_path, "r", encoding="utf-8") as f:
-                    prefs = json.load(f)
-                if not prefs.get("autoConnect"):
-                    prefs["autoConnect"] = True
-                    with open(pref_path, "w", encoding="utf-8") as f:
-                        json.dump(prefs, f, indent=2)
-                    LOG.info("Enabled autoConnect in INCY preferences.json")
-        except Exception as e:
-            LOG.warning("Could not update INCY preferences: %s", e)
+            try:
+                pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
+                if pref_path.exists():
+                    prefs = self._load_incy_preferences(pref_path)
+                    if not prefs.get("autoConnect"):
+                        prefs["autoConnect"] = True
+                        self._write_incy_preferences_atomic(pref_path, prefs)
+                        LOG.info("Enabled autoConnect in INCY preferences.json")
+            except Exception as e:
+                LOG.warning("Could not update INCY preferences: %s", e)
 
-        is_running = any(
-            (p.info["name"] or "").lower() == "incy.exe"
-            for p in psutil.process_iter(["name"])
-        )
-        if not is_running:
-            incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
-            resolved_exe = os.path.expandvars(str(incy_cmd))
-            if Path(resolved_exe).exists():
-                LOG.info("Launching INCY: %s", resolved_exe)
-                try:
-                    subprocess.Popen(
-                        [resolved_exe],
-                        cwd=str(Path(resolved_exe).parent),
-                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                    )
-                except OSError as e:
-                    if getattr(e, "winerror", None) == 740:
-                        LOG.warning("WinError 740 for %s, elevating via ShellExecuteW 'runas'", resolved_exe)
-                        ctypes.windll.shell32.ShellExecuteW(
-                            None, "runas", str(resolved_exe), "", str(Path(resolved_exe).parent), 1
+            is_running = any(
+                (p.info["name"] or "").lower() == "incy.exe"
+                for p in psutil.process_iter(["name"])
+            )
+            if not is_running:
+                incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
+                resolved_exe = os.path.expandvars(str(incy_cmd))
+                if Path(resolved_exe).exists():
+                    LOG.info("Launching INCY: %s", resolved_exe)
+                    try:
+                        subprocess.Popen(
+                            [resolved_exe],
+                            cwd=str(Path(resolved_exe).parent),
+                            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
                         )
-                    else:
-                        raise
+                    except OSError as e:
+                        if getattr(e, "winerror", None) == 740:
+                            LOG.warning("WinError 740 for %s, elevating via ShellExecuteW 'runas'", resolved_exe)
+                            ret = shell_execute_runas(str(resolved_exe), "", Path(resolved_exe).parent)
+                            if ret <= 32:
+                                LOG.warning("ShellExecuteW 'runas' for %s failed or cancelled (code=%s)", resolved_exe, ret)
+                                return {"verified": False, "reason": "uac_denied_or_failed", "code": ret}
+                        else:
+                            raise
 
         if timeout is None:
             timeout = max(45, int(self.config.get("vpn_ready_delay_seconds", self.config.get("happ_ready_delay_seconds", 45))))
@@ -231,22 +294,12 @@ class VpnManagerMixin:
                 return {"cancelled": True}
             if self.check_incy_vpn_active():
                 LOG.info("INCY VPN connection successfully verified via network probe")
-                if verify_google and not self.probe_google_https(timeout=3.0):
-                    LOG.warning("INCY connected, but Google HTTPS probe failed! Auto-switching server...")
-                    heal_res = self.switch_next_incy_server()
-                    if heal_res.get("success") and self.probe_google_https(timeout=3.5):
-                        return {"verified": True, "server": heal_res.get("server")}
-                return {"verified": True}
+                return self._finalize_incy_connection(verify_google)
             time.sleep(0.5)
 
         if self.check_incy_vpn_active():
             LOG.info("INCY VPN connection verified at deadline")
-            if verify_google and not self.probe_google_https(timeout=3.0):
-                LOG.warning("INCY connected, but Google HTTPS probe failed! Auto-switching server...")
-                heal_res = self.switch_next_incy_server()
-                if heal_res.get("success") and self.probe_google_https(timeout=3.5):
-                    return {"verified": True, "server": heal_res.get("server")}
-            return {"verified": True}
+            return self._finalize_incy_connection(verify_google)
 
         LOG.warning("INCY VPN verification timed out after %ds", timeout)
         return {"verified": False, "reason": "vpn_verification_timeout"}
@@ -290,87 +343,89 @@ class VpnManagerMixin:
     def switch_next_incy_server(self, target_server_id=None):
         """
         Switches INCY VPN to the specified server or the next best healthy server from incy.db.
-        Updates preferences.json, restarts incy.exe, and awaits tunnel readiness.
+        Stops incy.exe before updating preferences.json atomically, relaunches, and awaits tunnel readiness.
         """
-        servers = self.get_incy_servers()
-        if not servers:
-            return {"success": False, "error": "No available servers in INCY database"}
+        with self._get_incy_lock():
+            servers = self.get_incy_servers()
+            if not servers:
+                return {"success": False, "error": "No available servers in INCY database"}
 
-        pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
-        current_id = None
-        prefs = {}
-        if pref_path.exists():
+            # Stop running incy.exe BEFORE mutating preferences.json so clean exit cannot overwrite changes
+            self._stop_incy_processes()
+
+            pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
             try:
-                with open(pref_path, "r", encoding="utf-8") as f:
-                    prefs = json.load(f)
-                current_id = prefs.get("selectedServerId")
+                prefs = self._load_incy_preferences(pref_path)
             except Exception as e:
-                LOG.warning("Could not read INCY preferences: %s", e)
+                LOG.warning("Refusing to overwrite unreadable INCY preferences: %s", e)
+                return {"success": False, "error": str(e)}
+            current_id = prefs.get("selectedServerId")
 
-        target = None
-        if target_server_id:
-            for s in servers:
-                if s["id"] == target_server_id:
-                    target = s
-                    break
+            target = None
+            if target_server_id:
+                for s in servers:
+                    if str(s["id"]) == str(target_server_id):
+                        target = s
+                        break
 
-        if not target:
-            current_idx = -1
-            for idx, s in enumerate(servers):
-                if s["id"] == current_id:
-                    current_idx = idx
-                    break
-            next_idx = (current_idx + 1) % len(servers)
-            target = servers[next_idx]
+            if not target:
+                current_idx = -1
+                for idx, s in enumerate(servers):
+                    if str(s["id"]) == str(current_id):
+                        current_idx = idx
+                        break
+                next_idx = (current_idx + 1) % len(servers)
+                target = servers[next_idx]
 
-        LOG.info("Switching INCY VPN server to: %s (%s, %dms)", target["name"], target["id"], target["latency"])
+            LOG.info("Switching INCY VPN server to: %s (%s, %dms)", target["name"], target["id"], target["latency"])
 
-        prefs["selectedServerId"] = target["id"]
-        prefs["lastConnectedServerId"] = target["id"]
-        prefs["autoConnect"] = True
-        try:
-            pref_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(pref_path, "w", encoding="utf-8") as f:
-                json.dump(prefs, f, indent=2)
-        except Exception as e:
-            LOG.warning("Failed to write INCY preferences: %s", e)
-            return {"success": False, "error": f"Failed to write preferences: {e}"}
-
-        # Terminate running incy.exe
-        incy_procs = [
-            p for p in psutil.process_iter(["name", "pid"])
-            if (p.info["name"] or "").lower() == "incy.exe"
-        ]
-        for p in incy_procs:
+            prefs["selectedServerId"] = target["id"]
+            prefs["lastConnectedServerId"] = target["id"]
+            prefs["autoConnect"] = True
             try:
-                p.terminate()
-            except Exception:
-                pass
-        if incy_procs:
-            try:
-                psutil.wait_procs(incy_procs, timeout=3.0)
-            except Exception:
-                pass
+                self._write_incy_preferences_atomic(pref_path, prefs)
+            except Exception as e:
+                LOG.warning("Failed to write INCY preferences: %s", e)
+                return {"success": False, "error": f"Failed to write preferences: {e}"}
 
-        # Launch incy.exe
-        incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
-        resolved_exe = os.path.expandvars(str(incy_cmd))
-        if Path(resolved_exe).exists():
-            try:
-                subprocess.Popen(
-                    [resolved_exe],
-                    cwd=str(Path(resolved_exe).parent),
-                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                )
-            except OSError as e:
-                if getattr(e, "winerror", None) == 740:
-                    ctypes.windll.shell32.ShellExecuteW(
-                        None, "runas", str(resolved_exe), "", str(Path(resolved_exe).parent), 1
+            # Launch incy.exe
+            incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
+            resolved_exe = os.path.expandvars(str(incy_cmd))
+            if Path(resolved_exe).exists():
+                try:
+                    subprocess.Popen(
+                        [resolved_exe],
+                        cwd=str(Path(resolved_exe).parent),
+                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
                     )
-                else:
-                    raise
-        else:
-            LOG.warning("INCY executable not found at %s", resolved_exe)
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 740:
+                        ret = shell_execute_runas(str(resolved_exe), "", Path(resolved_exe).parent)
+                        if ret <= 32:
+                            LOG.warning("ShellExecuteW 'runas' for %s failed or cancelled (code=%s)", resolved_exe, ret)
+                            return {
+                                "success": False,
+                                "error": f"Elevation failed or was cancelled (code {ret})",
+                                "server": target["name"],
+                                "server_id": target["id"],
+                            }
+                    else:
+                        raise
+            else:
+                if self.check_incy_vpn_active():
+                    return {
+                        "success": True,
+                        "server": target["name"],
+                        "server_id": target["id"],
+                        "latency": target.get("latency", 0),
+                    }
+                LOG.warning("INCY executable not found at %s", resolved_exe)
+                return {
+                    "success": False,
+                    "error": f"INCY executable not found at {resolved_exe}",
+                    "server": target["name"],
+                    "server_id": target["id"],
+                }
 
         deadline = time.monotonic() + 25.0
         while time.monotonic() < deadline:
@@ -441,23 +496,41 @@ class VpnManagerMixin:
 
         # 3. Relaunch Antigravity IDE
         restarted = False
+        launch_error = None
         try:
             from core.antigravity_switcher import AntigravityAccountManager
-            restarted = AntigravityAccountManager.launch_ide()
+            restarted = bool(AntigravityAccountManager.launch_ide())
         except Exception as e:
+            launch_error = str(e)
             LOG.error("Failed to launch Antigravity via switcher: %s", e)
+
+        if not restarted:
             ag_cmd = self.config.get("apps", {}).get("Antigravity", r"%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe")
             ag_exe = os.path.expandvars(str(ag_cmd))
             if Path(ag_exe).exists():
-                subprocess.Popen([ag_exe], cwd=str(Path(ag_exe).parent), creationflags=subprocess.DETACHED_PROCESS)
-                restarted = True
+                try:
+                    subprocess.Popen([ag_exe], cwd=str(Path(ag_exe).parent), creationflags=subprocess.DETACHED_PROCESS)
+                    restarted = True
+                except Exception as e:
+                    launch_error = str(e)
+                    LOG.error("Failed to launch Antigravity executable %s: %s", ag_exe, e)
+
+        if not restarted:
+            return {
+                "success": False,
+                "server": working_server.get("server"),
+                "latency": working_server.get("latency", 0),
+                "google_https_ok": True,
+                "restarted_ide": False,
+                "error": launch_error or "Не удалось запустить Antigravity IDE",
+            }
 
         return {
             "success": True,
             "server": working_server.get("server"),
             "latency": working_server.get("latency", 0),
             "google_https_ok": True,
-            "restarted_ide": restarted,
+            "restarted_ide": True,
         }
 
     def connect_happ_vpn(self, cancel_event=None, timeout=None):
@@ -473,6 +546,8 @@ class VpnManagerMixin:
 
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentThreadId.argtypes = []
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
         user32.GetThreadDesktop.restype = wintypes.HANDLE
         user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -481,6 +556,18 @@ class VpnManagerMixin:
         user32.SetThreadDesktop.restype = wintypes.BOOL
         user32.CloseDesktop.argtypes = [wintypes.HANDLE]
         user32.CloseDesktop.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
 
         hdesk = None
         hdesk_orig = None
@@ -493,11 +580,15 @@ class VpnManagerMixin:
             pass
 
         try:
-            deadline = time.monotonic() + 15.0
+            started_at = time.monotonic()
+            window_wait = min(15.0, float(timeout)) if timeout is not None else 15.0
+            deadline = started_at + window_wait
             clicked = False
             window_title = None
 
             EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+            user32.EnumWindows.restype = wintypes.BOOL
 
             while time.monotonic() < deadline:
                 if cancel_event and cancel_event.is_set():
@@ -509,6 +600,8 @@ class VpnManagerMixin:
                 happ_windows = []
 
                 def _enum_cb(hwnd, _):
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
                     length = user32.GetWindowTextLengthW(hwnd)
                     if length > 0:
                         buff = ctypes.create_unicode_buffer(length + 1)
@@ -581,7 +674,11 @@ class VpnManagerMixin:
                 LOG.warning("HAPP window was not ready after 15s")
                 return {"verified": False, "reason": "window_not_found"}
 
-            verify_timeout = max(35, int(self.config.get("happ_ready_delay_seconds", self.config.get("vpn_ready_delay_seconds", 35))))
+            if timeout is not None:
+                remaining = max(0.0, float(timeout) - (time.monotonic() - started_at))
+                verify_timeout = remaining
+            else:
+                verify_timeout = max(35, int(self.config.get("happ_ready_delay_seconds", self.config.get("vpn_ready_delay_seconds", 35))))
             verify_deadline = time.monotonic() + verify_timeout
             while time.monotonic() < verify_deadline:
                 if cancel_event and cancel_event.is_set():

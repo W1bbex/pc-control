@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """Antigravity Router: manages remote account switching and quota inspection."""
 
+import hashlib
 import logging
 import time
 from typing import Optional
 
 LOG = logging.getLogger("pc-control-bot.routers.antigravity")
+
+
+def _resolve_account_id(app, account_id: str) -> str:
+    if not account_id.startswith("#"):
+        return account_id
+    target_hash = account_id[1:]
+    data = getattr(app, "latest_antigravity_data", None) or {}
+    for acc in data.get("accounts", []):
+        raw_id = str(acc.get("id", ""))
+        if hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:16] == target_hash:
+            return raw_id
+    return account_id
 
 
 def route_antigravity_command(app, chat_id: int, text: str) -> bool:
@@ -86,16 +99,30 @@ def open_antigravity_menu(app, chat_id: int, message_id: Optional[int] = None) -
         app.ui.send_message(
             chat_id,
             "⚠️ <b>ПК сейчас не в сети</b>\nУправление профилями Antigravity доступно при включенном ПК.",
+            reply_markup={"inline_keyboard": [app.ui.back_button("menu")]},
             message_id=message_id,
         )
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_list", {})
-    if cmd_id:
-        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "list")
-        if not hasattr(app, "pending_cmd_timestamps"):
-            app.pending_cmd_timestamps = {}
-        app.pending_cmd_timestamps[cmd_id] = time.time()
+    if not cmd_id:
+        app.ui.send_message(
+            chat_id,
+            "❌ <b>Не удалось запросить список аккаунтов:</b> MQTT недоступен.",
+            reply_markup={"inline_keyboard": [app.ui.back_button("menu")]},
+            message_id=message_id,
+        )
+        return
+    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "list")
+    if not hasattr(app, "pending_cmd_timestamps"):
+        app.pending_cmd_timestamps = {}
+    app.pending_cmd_timestamps[cmd_id] = time.time()
+
+
+def _back_markup(app, target: str) -> dict:
+    if hasattr(app.ui, "back_button"):
+        return {"inline_keyboard": [app.ui.back_button(target)]}
+    return {"inline_keyboard": [[{"text": "Назад", "callback_data": target}]]}
 
 
 def switch_antigravity_account(app, chat_id: int, account_id: str, message_id: Optional[int] = None) -> None:
@@ -103,16 +130,21 @@ def switch_antigravity_account(app, chat_id: int, account_id: str, message_id: O
     if not hasattr(app, "pending_antigravity_cmd_ids"):
         app.pending_antigravity_cmd_ids = {}
 
+    account_id = _resolve_account_id(app, account_id)
+    back_markup = _back_markup(app, "antigravity_menu" if message_id else "menu")
+
     if getattr(app.mqtt, "desktop_status", None) != "online":
-        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети. Невозможно сменить профиль.", message_id=message_id)
+        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети. Невозможно сменить профиль.", reply_markup=back_markup, message_id=message_id)
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_switch", {"account_id": account_id, "restart": True})
-    if cmd_id:
-        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "switch")
-        if not hasattr(app, "pending_cmd_timestamps"):
-            app.pending_cmd_timestamps = {}
-        app.pending_cmd_timestamps[cmd_id] = time.time()
+    if not cmd_id:
+        app.ui.send_message(chat_id, "❌ Не удалось отправить команду переключения: MQTT недоступен.", reply_markup=back_markup, message_id=message_id)
+        return
+    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "switch")
+    if not hasattr(app, "pending_cmd_timestamps"):
+        app.pending_cmd_timestamps = {}
+    app.pending_cmd_timestamps[cmd_id] = time.time()
 
 
 def restart_antigravity_ide(app, chat_id: int, message_id: Optional[int] = None) -> None:
@@ -120,16 +152,20 @@ def restart_antigravity_ide(app, chat_id: int, message_id: Optional[int] = None)
     if not hasattr(app, "pending_antigravity_cmd_ids"):
         app.pending_antigravity_cmd_ids = {}
 
+    back_markup = _back_markup(app, "antigravity_menu" if message_id else "menu")
+
     if getattr(app.mqtt, "desktop_status", None) != "online":
-        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети.", message_id=message_id)
+        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети.", reply_markup=back_markup, message_id=message_id)
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_restart", {})
-    if cmd_id:
-        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "restart")
-        if not hasattr(app, "pending_cmd_timestamps"):
-            app.pending_cmd_timestamps = {}
-        app.pending_cmd_timestamps[cmd_id] = time.time()
+    if not cmd_id:
+        app.ui.send_message(chat_id, "❌ Не удалось отправить команду перезапуска IDE: MQTT недоступен.", reply_markup=back_markup, message_id=message_id)
+        return
+    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "restart")
+    if not hasattr(app, "pending_cmd_timestamps"):
+        app.pending_cmd_timestamps = {}
+    app.pending_cmd_timestamps[cmd_id] = time.time()
 
 
 def export_antigravity_accounts(app, chat_id: int) -> None:
@@ -138,15 +174,17 @@ def export_antigravity_accounts(app, chat_id: int) -> None:
         app.pending_antigravity_cmd_ids = {}
 
     if getattr(app.mqtt, "desktop_status", None) != "online":
-        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети.")
+        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети.", reply_markup={"inline_keyboard": [app.ui.back_button("menu")]})
         return
 
     cmd_id = app.mqtt.publish_desktop_action("antigravity_export", {})
-    if cmd_id:
-        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, None, "export")
-        if not hasattr(app, "pending_cmd_timestamps"):
-            app.pending_cmd_timestamps = {}
-        app.pending_cmd_timestamps[cmd_id] = time.time()
+    if not cmd_id:
+        app.ui.send_message(chat_id, "❌ Не удалось отправить команду экспорта: MQTT недоступен.", reply_markup={"inline_keyboard": [app.ui.back_button("menu")]})
+        return
+    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, None, "export")
+    if not hasattr(app, "pending_cmd_timestamps"):
+        app.pending_cmd_timestamps = {}
+    app.pending_cmd_timestamps[cmd_id] = time.time()
 
 
 def heal_antigravity(app, chat_id: int, message_id: Optional[int] = None) -> None:
@@ -154,21 +192,25 @@ def heal_antigravity(app, chat_id: int, message_id: Optional[int] = None) -> Non
     if not hasattr(app, "pending_antigravity_cmd_ids"):
         app.pending_antigravity_cmd_ids = {}
 
+    back_markup = {"inline_keyboard": [app.ui.back_button("antigravity_menu" if message_id else "menu")]}
+
     if getattr(app.mqtt, "desktop_status", None) != "online":
-        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети. Лечение недоступно при выключенном ПК.", message_id=message_id)
+        app.ui.send_message(chat_id, "❌ Desktop-агент не в сети. Лечение недоступно при выключенном ПК.", reply_markup=back_markup, message_id=message_id)
         return
 
     cmd_id = app.mqtt.publish_desktop_action("heal_antigravity", {"attempts": 3})
-    if cmd_id:
-        app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "heal")
-        if not hasattr(app, "pending_cmd_timestamps"):
-            app.pending_cmd_timestamps = {}
-        app.pending_cmd_timestamps[cmd_id] = time.time()
-        app.ui.send_message(
-            chat_id,
-            "🔄 <b>Запущено авто-лечение Antigravity & VPN:</b>\n"
-            "├ Завершаю зависшие процессы IDE...\n"
-            "├ Переключаю сервер INCY VPN на рабочую страну...\n"
-            "├ Проверяю HTTPS-связь с серверами Google...\n"
-            "└ Перезапускаю Antigravity IDE."
-        )
+    if not cmd_id:
+        app.ui.send_message(chat_id, "❌ Не удалось запустить лечение: MQTT недоступен.", reply_markup=back_markup, message_id=message_id)
+        return
+    app.pending_antigravity_cmd_ids[cmd_id] = (chat_id, message_id, "heal")
+    if not hasattr(app, "pending_cmd_timestamps"):
+        app.pending_cmd_timestamps = {}
+    app.pending_cmd_timestamps[cmd_id] = time.time()
+    app.ui.send_message(
+        chat_id,
+        "🔄 <b>Запущено авто-лечение Antigravity & VPN:</b>\n"
+        "├ Завершаю зависшие процессы IDE...\n"
+        "├ Переключаю сервер INCY VPN на рабочую страну...\n"
+        "├ Проверяю HTTPS-связь с серверами Google...\n"
+        "└ Перезапускаю Antigravity IDE.",
+    )

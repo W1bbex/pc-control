@@ -39,6 +39,7 @@ Wi-Fi, ошибки TLS, память и причину сброса. Истор
 ## Сборка и проверка
 
 Из корня репозитория: `arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 hardware/esp8266/pc_remote_mqtt`.
-Проверки шлюза: `.venv/Scripts/python.exe -u -m pytest tests/test_esp_diagnostics.py vds_bot/test_health_engine.py -q`.
+Проверки шлюза: `.venv/Scripts/python.exe -u -m pytest tests/test_esp_diagnostics.py tests/test_esp_state_machine.py tests/test_pc_state_machine.py -q`.
+Локальная проверка брокера вручную: `.venv/Scripts/python.exe -u scripts/manual_mqtt_smoke.py`.
 Перед записью сохранять полный образ flash; не использовать `erase-all`, чтобы
 сохранить EEPROM. После прошивки проверить версию и загрузочные события на VDS.

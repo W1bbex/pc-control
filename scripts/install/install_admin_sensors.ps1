@@ -4,7 +4,11 @@ $installDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $hardwareDir = Join-Path $installDir "hardware"
 $collector = if (Test-Path "$hardwareDir\sensors\AdminSensorCollector.exe") { "$hardwareDir\sensors\AdminSensorCollector.exe" } else { "$hardwareDir\AdminSensorCollector.exe" }
 $snapshot = Join-Path $installDir "data\admin-sensors.json"
-$taskName = "PC Control Hardware Sensors"
+$snapshotDir = Split-Path -Parent $snapshot
+if (-not (Test-Path -LiteralPath $snapshotDir)) {
+    New-Item -ItemType Directory -Force -Path $snapshotDir | Out-Null
+}
+$taskName = "PC Control Hardware Sensors (User)"
 $identity = "$env:USERDOMAIN\$env:USERNAME"
 
 $action = New-ScheduledTaskAction `

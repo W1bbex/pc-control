@@ -61,7 +61,7 @@ static const uint32_t PHYSICAL_CONFIG_MAGIC = 0x50435043;
 
 static const bool RELAY_DEMO_MODE = false;
 
-static const char MQTT_HOST[] = "mqtt.example.com";
+// MQTT_HOST is defined in secrets.h
 static const uint16_t MQTT_PORT = 8883;
 
 static const char TOPIC_COMMAND[] = "pc/main/command";
@@ -109,7 +109,38 @@ PubSubClient mqtt(secureClient);
 
 String mqttClientId;
 String espBootId;
-String lastCommandId;
+static const uint8_t COMMAND_HISTORY_SIZE = 4;
+String recentCommandIds[COMMAND_HISTORY_SIZE];
+uint8_t recentCommandCursor = 0;
+
+bool isDuplicateCommandId(const String& id) {
+  if (!id.length()) return false;
+  for (uint8_t i = 0; i < COMMAND_HISTORY_SIZE; i++) {
+    if (recentCommandIds[i] == id) return true;
+  }
+  return false;
+}
+
+void rememberCommandId(const String& id) {
+  if (!id.length()) return;
+  recentCommandIds[recentCommandCursor] = id;
+  recentCommandCursor = (recentCommandCursor + 1) % COMMAND_HISTORY_SIZE;
+}
+
+bool parseRgbComponent(const String& part, uint8_t& out) {
+  String s = part;
+  s.trim();
+  if (!s.length() || s.length() > 3) return false;
+  int parsed = 0;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c < '0' || c > '9') return false;
+    parsed = parsed * 10 + (c - '0');
+  }
+  if (parsed < 0 || parsed > 255) return false;
+  out = (uint8_t)parsed;
+  return true;
+}
 unsigned long lastHeartbeatMs = 0;
 static const unsigned long HEARTBEAT_INTERVAL_MS = 60000;
 unsigned long lastMqttAttemptMs = 0;
@@ -149,6 +180,7 @@ unsigned long buttonPressedAtMs = 0;
 bool buttonIsPressed = false;
 
 unsigned long relayOnUntilMs = 0;
+bool relayActive = false;
 
 struct PhysicalConfig {
   uint32_t magic;
@@ -303,26 +335,30 @@ void failPhysicalAttempt() {
   if (physicalConfig.failedAttempts >= MAX_FAILED_ATTEMPTS) {
     physicalConfig.failedAttempts = MAX_FAILED_ATTEMPTS;
     physicalConfig.locked = 1;
-    publishPhysicalEvent("locked");
     savePhysicalConfig();
+    publishPhysicalEvent("locked");
   } else {
+    savePhysicalConfig();
     publishPhysicalEvent("failed");
   }
 }
 
 void relayOff() {
   digitalWrite(RELAY_PIN, RELAY_OFF);
+  relayActive = false;
   relayOnUntilMs = 0;
 }
 
 void pressRelay() {
   digitalWrite(RELAY_PIN, RELAY_ON);
   relayOnUntilMs = millis() + RELAY_PRESS_MS;
+  relayActive = true;
 }
 
 void forcePowerOff() {
   digitalWrite(RELAY_PIN, RELAY_ON);
   relayOnUntilMs = millis() + RELAY_FORCE_OFF_MS;
+  relayActive = true;
   setArgbOff();
 }
 
@@ -432,8 +468,10 @@ void updatePhysicalAttempt() {
   
   if (physicalSuccessPending && nowMs - lastPhysicalEventMs >= SUCCESS_QUIET_MS) {
     resetPhysicalAttempt();
-    physicalConfig.failedAttempts = 0;
-    savePhysicalConfig();
+    if (physicalConfig.failedAttempts != 0) {
+      physicalConfig.failedAttempts = 0;
+      savePhysicalConfig();
+    }
     publishPhysicalEvent("success");
     pressRelay();
   } else if (attemptLength > 0 && !physicalSuccessPending && nowMs - lastPhysicalEventMs >= ATTEMPT_QUIET_MS) {
@@ -467,6 +505,8 @@ void processInterruptQueue() {
     isrQueueTail = 0;
     buttonIsPressed = false;
     interrupts();
+    buttonStableState = digitalRead(PHYSICAL_BUTTON_PIN);
+    buttonLastChangeMs = millis();
     resetPhysicalAttempt();
     publishPhysicalEvent("queue_overflow");
   }
@@ -578,7 +618,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     return;
   }
 
-  if (id == lastCommandId) {
+  if (isDuplicateCommandId(id)) {
     publishAck(id, "duplicate_ignored");
     return;
   }
@@ -589,30 +629,30 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     memset(&physicalConfig.password, 0, sizeof(physicalConfig.password));
     for (uint8_t i = 0; i < value.length(); ++i) physicalConfig.password[i] = value[i];
     physicalConfig.passwordLength = value.length(); physicalConfig.failedAttempts = 0; physicalConfig.locked = 0;
-    savePhysicalConfig(); lastCommandId = id; publishAck(id, "executed"); return;
+    savePhysicalConfig(); rememberCommandId(id); publishAck(id, "executed"); return;
   }
   if (action == "DELETE_PHYSICAL_PASSWORD") {
     memset(&physicalConfig.password, 0, sizeof(physicalConfig.password)); physicalConfig.passwordLength = 0; physicalConfig.failedAttempts = 0; physicalConfig.locked = 0;
-    resetPhysicalAttempt(); savePhysicalConfig(); lastCommandId = id; publishAck(id, "executed"); return;
+    resetPhysicalAttempt(); savePhysicalConfig(); rememberCommandId(id); publishAck(id, "executed"); return;
   }
   if (action == "UNLOCK_PHYSICAL_INPUT") {
-    physicalConfig.failedAttempts = 0; physicalConfig.locked = 0; resetPhysicalAttempt(); savePhysicalConfig(); lastCommandId = id; publishAck(id, "executed"); return;
+    physicalConfig.failedAttempts = 0; physicalConfig.locked = 0; resetPhysicalAttempt(); savePhysicalConfig(); rememberCommandId(id); publishAck(id, "executed"); return;
   }
   if (action == "START_PHYSICAL_RECORDING") {
-    physicalRecording = true; recordedPasswordLength = 0; recordingLastEventMs = 0; recordingStartedMs = millis(); resetPhysicalAttempt();
-    lastCommandId = id; publishAck(id, "executed"); return;
+    physicalRecording = true; physicalTestMode = false; recordedPasswordLength = 0; recordingLastEventMs = 0; recordingStartedMs = millis(); resetPhysicalAttempt();
+    rememberCommandId(id); publishAck(id, "executed"); return;
   }
   if (action == "START_PHYSICAL_TEST") {
     physicalTestMode = true; physicalTestStartedMs = millis(); resetPhysicalAttempt();
-    lastCommandId = id; publishAck(id, "executed"); return;
+    rememberCommandId(id); publishAck(id, "executed"); return;
   }
   if (action == "STOP_PHYSICAL_TEST") {
     physicalTestMode = false; resetPhysicalAttempt();
-    lastCommandId = id; publishAck(id, "executed"); return;
+    rememberCommandId(id); publishAck(id, "executed"); return;
   }
 
   if (action == "PING") {
-    lastCommandId = id;
+    rememberCommandId(id);
     publishAck(id, "pong");
     return;
   }
@@ -621,7 +661,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     ledConfig.enabled = 1;
     saveLedConfig();
     setArgbWhite();
-    lastCommandId = id;
+    rememberCommandId(id);
     publishAck(id, "executed");
     return;
   }
@@ -630,7 +670,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     ledConfig.enabled = 0;
     saveLedConfig();
     setArgbOff();
-    lastCommandId = id;
+    rememberCommandId(id);
     publishAck(id, "executed");
     return;
   }
@@ -642,7 +682,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
       ledConfig.brightness = argbBrightness;
       saveLedConfig();
       if (argbEnabled) setArgbWhite();
-      lastCommandId = id;
+      rememberCommandId(id);
       publishAck(id, "executed");
       return;
     } else {
@@ -654,10 +694,16 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
   if (action == "LED_COLOR") {
     int firstComma = value.indexOf(',');
     int secondComma = value.indexOf(',', firstComma + 1);
-    if (firstComma > 0 && secondComma > firstComma) {
-      uint8_t r = (uint8_t)value.substring(0, firstComma).toInt();
-      uint8_t g = (uint8_t)value.substring(firstComma + 1, secondComma).toInt();
-      uint8_t b = (uint8_t)value.substring(secondComma + 1).toInt();
+    int extraComma = secondComma >= 0 ? value.indexOf(',', secondComma + 1) : -1;
+    uint8_t r = 0, g = 0, b = 0;
+    if (
+      firstComma > 0 &&
+      secondComma > firstComma &&
+      extraComma < 0 &&
+      parseRgbComponent(value.substring(0, firstComma), r) &&
+      parseRgbComponent(value.substring(firstComma + 1, secondComma), g) &&
+      parseRgbComponent(value.substring(secondComma + 1), b)
+    ) {
       argbR = r;
       argbG = g;
       argbB = b;
@@ -668,7 +714,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
       saveLedConfig();
       applyArgbColor(r, g, b);
       argbEnabled = true;
-      lastCommandId = id;
+      rememberCommandId(id);
       publishAck(id, "executed");
       return;
     } else {
@@ -687,7 +733,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
       publishAck(id, "cooldown");
       return;
     }
-    lastCommandId = id;
+    rememberCommandId(id);
     lastBeatMs = nowMs;
     beatHasPlayed = true;
     Serial.println("RELAY: demo beat");
@@ -707,7 +753,7 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
     return;
   }
 
-  lastCommandId = id;
+  rememberCommandId(id);
   lastRelayPressMs = nowMs;
   relayHasPressed = true;
 
@@ -750,6 +796,12 @@ void connectMqtt() {
   }
   lastMqttAttemptMs = nowMs;
 
+  if (time(nullptr) < 1700000000) {
+    Serial.println("Clock not synchronized yet. Delaying TLS MQTT connect.");
+    recordNetworkFailure("ntp_pending", mqtt.state());
+    return;
+  }
+
   secureClient.stop();
   secureClient.setTimeout(3000);
 
@@ -764,7 +816,8 @@ void connectMqtt() {
     recordNetworkFailure("dns_failed", mqtt.state());
     return;
   }
-  mqtt.setServer(brokerIp, MQTT_PORT);
+  // Keep hostname (not IPAddress) so BearSSL sends SNI and validates SAN certificate hostnames.
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
   static uint32_t lastConnectStartMs = 0;
   if (!lastConnectStartMs || millis() - lastConnectStartMs >= 60000) {
     lastConnectStartMs = millis();
@@ -835,7 +888,7 @@ void setup() {
   connectWiFi();
   syncClock();
 
-  secureClient.setInsecure(); // Fully encrypted TLS 1.2 on port 8883, zero blocking on NTP
+  secureClient.setTrustAnchors(&trustAnchor);
   secureClient.setBufferSizes(1024, 512);
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -854,9 +907,8 @@ void setup() {
 void loop() {
   const unsigned long nowMs = millis();
 
-  if (relayOnUntilMs != 0 && (long)(nowMs - relayOnUntilMs) >= 0) {
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    relayOnUntilMs = 0;
+  if (relayActive && (long)(nowMs - relayOnUntilMs) >= 0) {
+    relayOff();
   }
 
   processInterruptQueue();
@@ -876,7 +928,7 @@ void loop() {
     }
   } else {
     if (!mqtt.connected()) {
-      if (relayOnUntilMs == 0) connectMqtt();
+      if (!relayActive) connectMqtt();
     } else {
       if (!mqtt.loop()) recordNetworkFailure("mqtt_loop_failed", mqtt.state());
 
@@ -886,6 +938,6 @@ void loop() {
       }
     }
   }
-  serviceNetworkRecovery(WiFi.status() == WL_CONNECTED && mqtt.connected(), relayOnUntilMs != 0);
-  if (relayOnUntilMs == 0) networkDiagnostics.replay(mqtt);
+  serviceNetworkRecovery(WiFi.status() == WL_CONNECTED && mqtt.connected(), relayActive);
+  if (!relayActive) networkDiagnostics.replay(mqtt);
 }

@@ -20,6 +20,24 @@ import time
 import psutil
 
 
+def _init_private_user32():
+    """Return a module-private user32 binding so argtypes mutations never collide globally."""
+    if os.name != "nt" or not hasattr(ctypes, "WinDLL"):
+        return None
+    dll = ctypes.WinDLL("user32", use_last_error=True)
+    dll.GetForegroundWindow.restype = wintypes.HWND
+    dll.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    dll.GetWindowThreadProcessId.restype = wintypes.DWORD
+    dll.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    dll.GetWindowTextLengthW.restype = ctypes.c_int
+    dll.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    dll.GetWindowTextW.restype = ctypes.c_int
+    return dll
+
+
+_USER32 = _init_private_user32()
+
+
 SCHEMA_VERSION = 1
 
 
@@ -160,21 +178,17 @@ class ActivityTracker:
 
         info = LastInputInfo()
         info.cbSize = ctypes.sizeof(info)
-        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        user32 = _USER32
+        if user32 is None or not user32.GetLastInputInfo(ctypes.byref(info)):
             return None
         # LASTINPUTINFO uses the low 32 bits of the system tick counter.
         elapsed = (ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
         return max(0, round(elapsed / 1000, 1))
 
     def _foreground(self, processes):
-        user32 = ctypes.windll.user32
-        user32.GetForegroundWindow.restype = wintypes.HWND
-        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        user32.GetWindowTextLengthW.restype = ctypes.c_int
-        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        user32.GetWindowTextW.restype = ctypes.c_int
+        user32 = _USER32
+        if user32 is None:
+            return {"hwnd": 0, "pid": 0, "process": None, "title": None}
 
         hwnd = user32.GetForegroundWindow()
         if not hwnd:

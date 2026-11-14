@@ -16,7 +16,7 @@ from pathlib import Path
 
 import certifi
 import paho.mqtt.client as mqtt
-from core.mqtt_fallback import MqttClientWithIpFallback
+from core.mqtt_fallback import MqttClientWithIpFallback, patch_paho_sockpair
 import psutil
 
 # Re-export all symbols from system package for 100% backward compatibility
@@ -51,36 +51,7 @@ from system.process_manager import ProcessManagerMixin
 from system.action_dispatcher import ActionDispatcherMixin
 
 
-def patch_paho_sockpair():
-    """Protect paho-mqtt against Windows socketpair crashes (WinError 10054 / 1236) on sleep/reset."""
-    orig_loop = mqtt.Client._loop
-
-    def safe_loop(self, timeout=1.0):
-        try:
-            return orig_loop(self, timeout)
-        except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
-            LOG.warning("MQTT _loop caught Windows socket error: %s (triggering reconnect)", e)
-            try:
-                self.disconnect()
-            except Exception:
-                pass
-            return mqtt.MQTT_ERR_CONN_LOST
-
-    mqtt.Client._loop = safe_loop
-
-    orig_packet_queue = mqtt.Client._packet_queue
-
-    def safe_packet_queue(self, command, packet, mid=0, qos=0, info=None):
-        try:
-            return orig_packet_queue(self, command, packet, mid, qos, info)
-        except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
-            LOG.warning("MQTT _packet_queue caught Windows socketpair error: %s", e)
-            return mqtt.MQTT_ERR_NO_CONN
-
-    mqtt.Client._packet_queue = safe_packet_queue
-
-
-patch_paho_sockpair()
+patch_paho_sockpair(LOG)
 
 
 class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMixin):
@@ -89,12 +60,35 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             LOG.error("Required configuration file not found: %s", CONFIG_PATH)
             sys.exit(1)
         self.config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        mqtt_host = os.getenv("MQTT_HOST")
+        if mqtt_host:
+            self.config.setdefault("mqtt", {})["host"] = mqtt_host
+        mqtt_fallback_ip = os.getenv("MQTT_FALLBACK_IP")
+        if mqtt_fallback_ip:
+            self.config.setdefault("mqtt", {})["fallback_ip"] = mqtt_fallback_ip
+        mqtt_user = os.getenv("MQTT_USERNAME")
+        if mqtt_user:
+            self.config.setdefault("mqtt", {})["username"] = mqtt_user
         mqtt_pw = os.getenv("MQTT_PASSWORD")
         if mqtt_pw:
             self.config.setdefault("mqtt", {})["password"] = mqtt_pw
         win_pw = os.getenv("WINDOWS_PASSWORD")
         if win_pw:
             self.config.setdefault("unlock", {})["password"] = win_pw
+
+        mqtt_cfg = self.config.get("mqtt")
+        if not isinstance(mqtt_cfg, dict) or not str(mqtt_cfg.get("host") or "").strip():
+            LOG.error("Missing required 'mqtt.host' configuration")
+            sys.exit(1)
+        try:
+            mqtt_port = int(mqtt_cfg.get("port"))
+            if not (1 <= mqtt_port <= 65535):
+                raise ValueError("port out of range")
+            mqtt_cfg["port"] = mqtt_port
+        except (TypeError, ValueError):
+            LOG.error("Invalid or missing 'mqtt.port' configuration: %r", mqtt_cfg.get("port"))
+            sys.exit(1)
+
         self.stop_event = threading.Event()
         self.command_queue = queue.Queue()
         self.mqtt_online = False
@@ -132,10 +126,10 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             protocol=mqtt.MQTTv311,
             **fallback_options,
         )
-        self.mqtt.username_pw_set(
-            self.config["mqtt"]["username"],
-            self.config["mqtt"]["password"],
-        )
+        mqtt_user = self.config.get("mqtt", {}).get("username")
+        mqtt_pw = self.config.get("mqtt", {}).get("password")
+        if mqtt_user:
+            self.mqtt.username_pw_set(mqtt_user, mqtt_pw)
         self.mqtt.tls_set(
             ca_certs=certifi.where(),
             tls_version=ssl.PROTOCOL_TLS_CLIENT,
@@ -161,6 +155,7 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
         if thread_alive:
             return
 
+        self.mqtt_online = False
         now = time.time()
         last_attempt = getattr(self, "_last_reconnect_attempt", 0.0)
         if now - last_attempt < 10.0:
@@ -170,10 +165,11 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
         LOG.warning("System MQTT loop thread died! Resurrecting MQTT client...")
         try:
             self.setup_mqtt_client()
-            if self.connect_with_retry(max_attempts=2, timeout_per_attempt=20):
+            if self.connect_with_retry(max_attempts=1, timeout_per_attempt=5):
                 self.mqtt.loop_start()
                 LOG.info("System MQTT loop restarted successfully")
         except Exception:
+            self.mqtt_online = False
             LOG.exception("Failed to re-establish System MQTT connection in watchdog")
 
     def load_state(self):
@@ -295,12 +291,15 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
         }
         if data is not None:
             payload["data"] = data
-        self.mqtt.publish(
-            TOPIC_ACK,
-            json.dumps(payload, ensure_ascii=False),
-            qos=1,
-            retain=False,
-        )
+        try:
+            self.mqtt.publish(
+                TOPIC_ACK,
+                json.dumps(payload, ensure_ascii=False),
+                qos=1,
+                retain=False,
+            )
+        except Exception as e:
+            LOG.warning("Failed to publish ACK for %s: %s", command_id, e)
 
     def process_command(self, command):
         if not isinstance(command, dict):
@@ -341,13 +340,17 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
     def connect_with_retry(self, max_attempts=None, timeout_per_attempt=20):
         retry_delay = 1
         attempts = 0
+        connect_timeout = max(1.0, min(float(timeout_per_attempt), 5.0))
+        keepalive_s = max(20, int(timeout_per_attempt))
         while not self.stop_event.is_set():
             attempts += 1
             try:
+                if hasattr(self.mqtt, "_connect_timeout"):
+                    self.mqtt._connect_timeout = connect_timeout
                 self.mqtt.connect(
                     self.config["mqtt"]["host"],
                     int(self.config["mqtt"]["port"]),
-                    keepalive=timeout_per_attempt,
+                    keepalive=keepalive_s,
                 )
                 return True
             except Exception:
@@ -358,50 +361,58 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
                 retry_delay = min(5, retry_delay * 2)
         return False
 
+    def _handle_shutdown_window_message(self, hwnd, msg, wparam, lparam, default_handler=None):
+        import win32con
+
+        if msg == win32con.WM_QUERYENDSESSION:
+            LOG.info("Windows queried session end (WM_QUERYENDSESSION, lparam=0x%x). Acknowledging readiness.", lparam)
+            return 1
+
+        if msg == win32con.WM_ENDSESSION:
+            if not wparam:
+                LOG.info("Windows shutdown cancelled (WM_ENDSESSION with wparam=0, lparam=0x%x)", lparam)
+                return 0
+            LOG.info("Windows shutdown confirmed in SystemAgent via WM_ENDSESSION (wparam=%s, lparam=0x%x)", wparam, lparam)
+            self._shutdown_detected = True
+            self._turn_off_led_esp()
+            try:
+                status_payload = {
+                    "state": "offline",
+                    "event": "graceful_shutdown",
+                    "reason": "windows_shutdown",
+                    "agent": "system",
+                    "session": "unknown",
+                    "ts": time.time(),
+                    "boot_id": getattr(self, "boot_id", AGENT_BOOT_ID),
+                }
+                pub_info = self.mqtt.publish(
+                    TOPIC_STATUS,
+                    json.dumps(status_payload, ensure_ascii=False),
+                    qos=1,
+                    retain=True,
+                )
+                try:
+                    pub_info.wait_for_publish(timeout=1.5)
+                except Exception:
+                    pass
+                time.sleep(0.3)
+            except Exception:
+                pass
+            self.stop_event.set()
+            return 0
+        if default_handler is not None:
+            return default_handler(hwnd, msg, wparam, lparam)
+        return 0
+
     def _start_shutdown_watcher(self):
         def _watcher():
             try:
                 import win32gui
-                import win32con
 
                 def wndproc(hwnd, msg, wparam, lparam):
-                    if msg == win32con.WM_QUERYENDSESSION:
-                        LOG.info("Windows queried session end (WM_QUERYENDSESSION, lparam=0x%x). Acknowledging readiness.", lparam)
-                        return 1
-
-                    if msg == win32con.WM_ENDSESSION:
-                        if not wparam:
-                            LOG.info("Windows shutdown cancelled (WM_ENDSESSION with wparam=0, lparam=0x%x)", lparam)
-                            return 0
-                        LOG.info("Windows shutdown confirmed in SystemAgent via WM_ENDSESSION (wparam=%s, lparam=0x%x)", wparam, lparam)
-                        self._shutdown_detected = True
-                        self._turn_off_led_esp()
-                        try:
-                            status_payload = {
-                                "state": "offline",
-                                "event": "graceful_shutdown",
-                                "reason": "windows_shutdown",
-                                "agent": "system",
-                                "session": "unknown",
-                                "ts": time.time(),
-                                "boot_id": getattr(self, "boot_id", AGENT_BOOT_ID),
-                            }
-                            pub_info = self.mqtt.publish(
-                                TOPIC_STATUS,
-                                json.dumps(status_payload, ensure_ascii=False),
-                                qos=1,
-                                retain=True,
-                            )
-                            try:
-                                pub_info.wait_for_publish(timeout=1.5)
-                            except Exception:
-                                pass
-                            time.sleep(0.3)
-                        except Exception:
-                            pass
-                        self.stop_event.set()
-                        return 0
-                    return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+                    return self._handle_shutdown_window_message(
+                        hwnd, msg, wparam, lparam, default_handler=win32gui.DefWindowProc
+                    )
 
                 wc = win32gui.WNDCLASS()
                 wc.lpfnWndProc = wndproc

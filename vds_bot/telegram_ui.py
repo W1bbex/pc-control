@@ -2,12 +2,11 @@
 
 """Telegram Bot API HTTP client with thread-pooled non-blocking network calls."""
 
-import html
 import json
 import logging
 import re
 import threading
-import time
+import weakref
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -49,11 +48,88 @@ class TelegramBotApi(UiTemplatesMixin):
     def __init__(self, token):
         self.token = token
         self.api_url = f"https://api.telegram.org/bot{token}"
-        self.session = requests.Session()
+        self._local = threading.local()
+        self._session_override = None
+        self._sessions = []
+        self._thread_sessions = []
+        self._sessions_lock = threading.Lock()
+
+    @staticmethod
+    def _build_session():
+        sess = requests.Session()
         adapter = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=3)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
-        self._lock = threading.Lock()
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        return sess
+
+    @staticmethod
+    def _close_session_quietly(sess):
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+    def _prune_dead_sessions_locked(self):
+        alive = []
+        for thread_ref, sess in getattr(self, "_thread_sessions", []):
+            thread = thread_ref() if callable(thread_ref) else None
+            if thread is None or (hasattr(thread, "is_alive") and not thread.is_alive()):
+                self._close_session_quietly(sess)
+            else:
+                alive.append((thread_ref, sess))
+        self._thread_sessions = alive
+        self._sessions = [sess for _, sess in alive]
+
+    @property
+    def session(self):
+        override = getattr(self, "_session_override", None)
+        if override is not None:
+            return override
+        local = getattr(self, "_local", None)
+        if local is None:
+            local = threading.local()
+            self._local = local
+        sess = getattr(local, "session", None)
+        if sess is None:
+            sess = self._build_session()
+            local.session = sess
+            cur_thread = threading.current_thread()
+            try:
+                weakref.finalize(cur_thread, self._close_session_quietly, sess)
+            except TypeError:
+                pass
+            lock = getattr(self, "_sessions_lock", None)
+            if lock is not None:
+                with lock:
+                    if not hasattr(self, "_thread_sessions"):
+                        self._thread_sessions = []
+                    self._prune_dead_sessions_locked()
+                    self._thread_sessions.append((weakref.ref(cur_thread), sess))
+                    self._sessions = [s for _, s in self._thread_sessions]
+        return sess
+
+    @session.setter
+    def session(self, value):
+        self._session_override = value
+
+    def close_sessions(self):
+        lock = getattr(self, "_sessions_lock", None)
+        if lock is not None:
+            with lock:
+                sessions = list(getattr(self, "_sessions", ()))
+                for _, sess in getattr(self, "_thread_sessions", ()):
+                    if sess not in sessions:
+                        sessions.append(sess)
+                self._sessions.clear()
+                if hasattr(self, "_thread_sessions"):
+                    self._thread_sessions.clear()
+        else:
+            sessions = []
+        for sess in sessions:
+            self._close_session_quietly(sess)
+        local = getattr(self, "_local", None)
+        if local is not None and hasattr(local, "session"):
+            delattr(local, "session")
 
     def sanitize_error(self, err):
         s = str(err)
@@ -74,6 +150,8 @@ class TelegramBotApi(UiTemplatesMixin):
                     for btn in row:
                         if isinstance(btn, dict):
                             btn_copy = {k: v for k, v in btn.items() if v is not None}
+                            if "style" in btn_copy and btn_copy["style"] not in {"primary", "success", "danger"}:
+                                btn_copy.pop("style", None)
                             has_custom_icon = False
                             if "icon_custom_emoji_id" in btn_copy:
                                 val = btn_copy["icon_custom_emoji_id"]
@@ -133,9 +211,7 @@ class TelegramBotApi(UiTemplatesMixin):
             }
             if business_connection_id:
                 payload["business_connection_id"] = business_connection_id
-            if reply_markup is None:
-                payload["reply_markup"] = {"inline_keyboard": []}
-            else:
+            if reply_markup is not None:
                 payload["reply_markup"] = reply_markup
 
             data = self.call_raw("editMessageText", payload, timeout=12)
@@ -175,6 +251,34 @@ class TelegramBotApi(UiTemplatesMixin):
             payload["business_connection_id"] = business_connection_id
         return self.call("deleteMessage", payload, timeout=10)
 
+    def _post_multipart(self, method, data, files=None, timeout=15, message_id=None, warn_on_error=False):
+        url = f"{self.api_url}/{method}"
+        try:
+            res = self.session.post(url, data=data, files=files, timeout=timeout)
+            try:
+                resp_data = res.json()
+            except Exception:
+                resp_data = {"ok": False, "description": f"HTTP {res.status_code}"}
+        except Exception as e:
+            msg = self.sanitize_error(e)
+            log_fn = LOG.warning if warn_on_error else LOG.error
+            log_fn("%s failed: %s", method, msg)
+            return None
+
+        if isinstance(resp_data, dict) and resp_data.get("ok"):
+            return resp_data.get("result")
+
+        desc = str(resp_data.get("description") or "") if isinstance(resp_data, dict) else str(resp_data)
+        if message_id is not None and "message is not modified" in desc.lower():
+            return {"message_id": message_id, "not_modified": True}
+
+        safe_resp = dict(resp_data) if isinstance(resp_data, dict) else {"raw": self.sanitize_error(resp_data)}
+        if "description" in safe_resp:
+            safe_resp["description"] = self.sanitize_error(safe_resp["description"])
+        log_fn = LOG.warning if warn_on_error else LOG.error
+        log_fn("%s API error: %s", method, safe_resp)
+        return None
+
     def send_photo(
         self,
         chat_id,
@@ -184,7 +288,6 @@ class TelegramBotApi(UiTemplatesMixin):
         business_connection_id=None,
         filename="cover.jpg",
     ):
-        url = f"{self.api_url}/sendPhoto"
         data = {
             "chat_id": chat_id,
             "parse_mode": "HTML",
@@ -199,23 +302,10 @@ class TelegramBotApi(UiTemplatesMixin):
 
         if isinstance(photo, str):
             data["photo"] = photo
-            try:
-                res = self.session.post(url, data=data, timeout=15)
-                res.raise_for_status()
-                return res.json().get("result")
-            except Exception as e:
-                LOG.error("send_photo URL failed: %s", self.sanitize_error(e))
-                return None
-        else:
-            content_type = "image/jpeg" if filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
-            files = {"photo": (filename, photo, content_type)}
-            try:
-                res = self.session.post(url, data=data, files=files, timeout=25)
-                res.raise_for_status()
-                return res.json().get("result")
-            except Exception as e:
-                LOG.error("send_photo bytes failed: %s", self.sanitize_error(e))
-                return None
+            return self._post_multipart("sendPhoto", data, timeout=15)
+        content_type = "image/jpeg" if filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        files = {"photo": (filename, photo, content_type)}
+        return self._post_multipart("sendPhoto", data, files=files, timeout=25)
 
     def send_document(
         self,
@@ -226,7 +316,6 @@ class TelegramBotApi(UiTemplatesMixin):
         reply_markup=None,
         business_connection_id=None,
     ):
-        url = f"{self.api_url}/sendDocument"
         data = {
             "chat_id": chat_id,
             "parse_mode": "HTML",
@@ -241,13 +330,7 @@ class TelegramBotApi(UiTemplatesMixin):
 
         doc_bytes = document.encode("utf-8") if isinstance(document, str) else document
         files = {"document": (filename, doc_bytes, "text/plain; charset=utf-8")}
-        try:
-            res = self.session.post(url, data=data, files=files, timeout=30)
-            res.raise_for_status()
-            return res.json().get("result")
-        except Exception as e:
-            LOG.error("send_document failed: %s", self.sanitize_error(e))
-            return None
+        return self._post_multipart("sendDocument", data, files=files, timeout=30)
 
     def edit_message_caption(
         self,
@@ -274,7 +357,10 @@ class TelegramBotApi(UiTemplatesMixin):
         desc = (data.get("description") or "").lower()
         if "message is not modified" in desc:
             return {"message_id": message_id, "not_modified": True}
-        LOG.warning("editMessageCaption failed: %s", data)
+        safe_data = dict(data)
+        if "description" in safe_data:
+            safe_data["description"] = self.sanitize_error(safe_data["description"])
+        LOG.warning("editMessageCaption failed: %s", safe_data)
         return None
 
     def edit_message_media(
@@ -287,7 +373,6 @@ class TelegramBotApi(UiTemplatesMixin):
         business_connection_id=None,
         filename="cover.jpg",
     ):
-        url = f"{self.api_url}/editMessageMedia"
         media_dict = {
             "type": "photo",
             "parse_mode": "HTML",
@@ -308,25 +393,12 @@ class TelegramBotApi(UiTemplatesMixin):
         if isinstance(photo, str):
             media_dict["media"] = photo
             data["media"] = json.dumps(media_dict)
-            try:
-                res = self.session.post(url, data=data, timeout=15)
-                res.raise_for_status()
-                return res.json().get("result")
-            except Exception as e:
-                LOG.warning("editMessageMedia URL failed: %s", self.sanitize_error(e))
-                return None
-        else:
-            media_dict["media"] = "attach://photo"
-            data["media"] = json.dumps(media_dict)
-            content_type = "image/jpeg" if filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
-            files = {"photo": (filename, photo, content_type)}
-            try:
-                res = self.session.post(url, data=data, files=files, timeout=25)
-                res.raise_for_status()
-                return res.json().get("result")
-            except Exception as e:
-                LOG.warning("editMessageMedia bytes failed: %s", self.sanitize_error(e))
-                return None
+            return self._post_multipart("editMessageMedia", data, timeout=15, message_id=message_id, warn_on_error=True)
+        media_dict["media"] = "attach://photo"
+        data["media"] = json.dumps(media_dict)
+        content_type = "image/jpeg" if filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        files = {"photo": (filename, photo, content_type)}
+        return self._post_multipart("editMessageMedia", data, files=files, timeout=25, message_id=message_id, warn_on_error=True)
 
     def answer_callback(self, callback_id, text=None, alert=False):
         if not callback_id:

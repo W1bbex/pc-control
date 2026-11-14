@@ -5,6 +5,9 @@
 secrets.h
 hardware/esp8266/pc_remote_mqtt/secrets.h
 
+# Firmware build artifacts
+hardware/esp8266/pc_remote_mqtt/build/
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
@@ -21,13 +24,18 @@ data/*
 # Runtime and local state
 logs/
 *.log
-backups/*.zip
-backups/.backup_state.json
-backups/*.tmp.zip
+backups/
 state.json
+flow_state.json
+bot.lock
 boot-state.json
+stealth_exit_reason.json
 app_icon_cache.json
 media_cover_cache.json
+*.db
+*.sqlite
+*.sqlite*
+telemetry_history.db*
 activity.db*
 activity_history.db
 *.tmp
@@ -42,6 +50,9 @@ env/
 scratch/
 AUDIT_REPORT*.md
 CRITIQUE_REPORT*.md
+ARCHITECTURE.md
+PROJECT.md
+.reviews/
 .repowise/
 web_review/
 extracted_unlock.png

@@ -12,6 +12,12 @@ import time
 
 import psutil
 
+from core.process_utils import (
+    kill_process_by_name,
+    kill_process_by_pid as kill_process_pid,
+    restart_windows_service,
+    shell_execute_runas,
+)
 from desktop.constants import PROTECTED_PROCESSES
 from desktop.codex_launch import diagnose_codex_launch
 
@@ -20,6 +26,15 @@ LOG = logging.getLogger("pc-control-agent")
 
 class LauncherMixin:
     """Provides application launch, workspace orchestration, keystroke simulation and process management."""
+
+    def _get_workspace_lock(self):
+        lock = getattr(self, "workspace_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self.workspace_lock = lock
+        if getattr(self, "workspace_cancellations", None) is None:
+            self.workspace_cancellations = {}
+        return lock
 
     @staticmethod
     def send_key_esc(count=1, delay=0.3):
@@ -62,8 +77,27 @@ class LauncherMixin:
         user32 = None
         try:
             import psutil
+            from ctypes import wintypes
             user32 = ctypes.windll.user32
             kernel32 = getattr(ctypes.windll, "kernel32", None)
+            if kernel32 and hasattr(kernel32, "GetCurrentThreadId"):
+                kernel32.GetCurrentThreadId.argtypes = []
+                kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+            user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+            user32.GetThreadDesktop.restype = wintypes.HANDLE
+            user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            user32.OpenDesktopW.restype = wintypes.HANDLE
+            user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+            user32.SetThreadDesktop.restype = wintypes.BOOL
+            user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+            user32.CloseDesktop.restype = wintypes.BOOL
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype = wintypes.BOOL
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype = ctypes.c_int
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
             if kernel32 and hasattr(user32, "GetThreadDesktop"):
                 try:
                     orig_desk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
@@ -83,7 +117,6 @@ class LauncherMixin:
                 return False
 
             has_window = False
-            from ctypes import wintypes
 
             def enum_cb(hwnd, lparam):
                 nonlocal has_window
@@ -98,6 +131,8 @@ class LauncherMixin:
                 return True
 
             EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+            user32.EnumWindows.restype = wintypes.BOOL
             user32.EnumWindows(EnumWindowsProc(enum_cb), 0)
             return has_window
         except Exception as err:
@@ -133,9 +168,9 @@ class LauncherMixin:
         selected_vpn = str(vpn or direct_vpn or self.config.get("default_vpn", "incy")).lower().strip()
 
         cancel_event = None
-        if scenario and workspace_id:
+        if workspace_id:
             cancel_event = threading.Event()
-            with self.workspace_lock:
+            with self._get_workspace_lock():
                 self.workspace_cancellations[workspace_id] = cancel_event
 
         normalized_steps = []
@@ -252,8 +287,10 @@ class LauncherMixin:
                     or any(k in str(executable).lower() for k in ("happ.exe", "incy.exe"))
                 )
 
-                # Opening Happ without connecting must not invoke VPN automation.
+                # Opening Happ or INCY without connecting must not invoke VPN automation.
                 if app_key == "Happ" and not connect_vpn:
+                    is_vpn = False
+                if app_key == "INCY" and not connect_vpn:
                     is_vpn = False
 
                 if is_vpn:
@@ -275,7 +312,7 @@ class LauncherMixin:
                         is_incy = True
                 else:
                     is_happ = connect_vpn and ((ver_type == "happ_vpn") or ("happ.exe" in str(executable).lower()))
-                    is_incy = (ver_type == "incy_vpn") or ("incy.exe" in str(executable).lower())
+                    is_incy = connect_vpn and ((ver_type == "incy_vpn") or ("incy.exe" in str(executable).lower()))
 
                 if "*" in str(executable) or "?" in str(executable):
                     matched = glob.glob(str(executable))
@@ -374,10 +411,8 @@ class LauncherMixin:
                 except OSError as e:
                     if getattr(e, "winerror", None) == 740:
                         LOG.warning("WinError 740 for %s, elevating via ShellExecuteW 'runas'", executable)
-                        params_str = " ".join(str(p) for p in cmd[1:]) if len(cmd) > 1 else ""
-                        ret = ctypes.windll.shell32.ShellExecuteW(
-                            None, "runas", str(executable), params_str, str(Path(executable).parent), 1
-                        )
+                        params_str = subprocess.list2cmdline([str(p) for p in cmd[1:]]) if len(cmd) > 1 else ""
+                        ret = shell_execute_runas(str(executable), params_str, Path(executable).parent)
                         if ret <= 32:
                             raise RuntimeError(f"ShellExecuteW 'runas' failed with code {ret} for {executable}")
                         process = None
@@ -444,11 +479,19 @@ class LauncherMixin:
                     ver_timeout = float(verification.get("timeout", 1.0)) if isinstance(verification, dict) else 1.0
                     ver_deadline = time.time() + max(0.5, ver_timeout)
                     process_verified = False
+                    is_bootstrap_loader = (
+                        bool(targets)
+                        and Path(executable).name.lower() not in target_names
+                    )
                     while True:
-                        process_verified = (process is not None and process.poll() is None) or any(
+                        target_running = any(
                             (p.info["name"] or "").lower() in target_names
                             for p in psutil.process_iter(["name"])
                         )
+                        if is_bootstrap_loader:
+                            process_verified = target_running
+                        else:
+                            process_verified = target_running or (process is not None and process.poll() is None)
                         if process_verified or time.time() >= ver_deadline:
                             break
                         if cancel_event and cancel_event.is_set():
@@ -496,11 +539,11 @@ class LauncherMixin:
             }
         finally:
             if cancel_event and workspace_id:
-                with self.workspace_lock:
+                with self._get_workspace_lock():
                     self.workspace_cancellations.pop(workspace_id, None)
 
     def cancel_workspace(self, workspace_id):
-        with self.workspace_lock:
+        with self._get_workspace_lock():
             cancel_event = self.workspace_cancellations.get(workspace_id)
         if not cancel_event:
             return {"workspace_id": workspace_id, "state": "not_running"}
@@ -509,49 +552,15 @@ class LauncherMixin:
 
     @staticmethod
     def kill_process(process_name):
-        if not process_name:
-            raise ValueError("Process name is required")
-        normalized = str(process_name).lower().strip()
-        if normalized in PROTECTED_PROCESSES:
-            raise PermissionError("Protected Windows process")
-        killed = []
-        for process in psutil.process_iter(["pid", "name"]):
-            try:
-                if (process.info["name"] or "").lower() == normalized:
-                    process.terminate()
-                    killed.append(process.info["pid"])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        return {"name": process_name, "terminated_pids": killed}
+        return kill_process_by_name(
+            process_name,
+            PROTECTED_PROCESSES,
+            allow_desktop_agent_alias=False,
+        )
 
     @staticmethod
     def kill_process_by_pid(pid):
-        process = psutil.Process(int(pid))
-        name = (process.name() or "").lower()
-        if process.pid == os.getpid() or name in PROTECTED_PROCESSES:
-            raise PermissionError("Protected Windows process")
-        original_name = process.name()
-        process.terminate()
-        return {"name": original_name, "terminated_pid": int(pid)}
+        return kill_process_pid(pid, PROTECTED_PROCESSES)
 
     def restart_service(self, service_key):
-        service_name = self.config.get("services", {}).get(service_key)
-        if not service_name:
-            raise ValueError("Service is not configured")
-        subprocess.run(
-            ["sc.exe", "stop", service_name],
-            capture_output=True,
-            timeout=20,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        time.sleep(2)
-        completed = subprocess.run(
-            ["sc.exe", "start", service_name],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stdout or completed.stderr)
-        return {"service": service_key}
+        return restart_windows_service(service_key, self.config.get("services"))

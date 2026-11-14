@@ -217,7 +217,7 @@ def test_bot_callback_flow_game_vpn_sets_power_flow():
         }
         app.handle_callback(call)
 
-        mock_set.assert_called_once_with(game="gtasa", vpn="happ", chat_id=ALLOWED_USER_ID)
+        mock_set.assert_called_once_with(game="gtasa", vpn="happ", chat_id=ALLOWED_USER_ID, message_id=999)
 
 
 def test_bot_callback_press_esc():

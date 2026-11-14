@@ -1,11 +1,16 @@
-"""Small regression checks for the dashboard telemetry contract."""
+"""Tests for monitoring dashboard formatting, menu navigation view state, and auto-refresh behavior."""
 
 import json
 import time
+from unittest.mock import MagicMock
 
-from health_engine import HealthEngine
-from monitoring import MonitoringManager
-from mqtt_gateway import MqttGateway, TOPIC_TELEMETRY
+import vds_bot.monitoring as monitoring_mod
+import vds_bot.telegram_ui as telegram_ui_mod
+from vds_bot.bot import PcControlBotApp, resolve_menu_view
+from vds_bot.health_engine import HealthEngine
+from vds_bot.monitoring import MonitoringManager
+from vds_bot.mqtt_gateway import MqttGateway, TOPIC_TELEMETRY
+from vds_bot.telegram_ui import TelegramBotApi
 
 
 class FakeMqtt:
@@ -30,7 +35,7 @@ class FakeHistory:
         self.payload = payload
 
 
-def test_dashboard_uses_real_nested_agent_schema():
+def test_dashboard_uses_nested_agent_telemetry_schema():
     manager = MonitoringManager.__new__(MonitoringManager)
     manager.mqtt = FakeMqtt()
     manager.history = FakeHistory()
@@ -98,8 +103,7 @@ def test_dashboard_renders_media_playback_when_active():
     manager.latest_desktop_at = 0.0
     manager.process_telemetry({"active_application": "Visual Studio Code"})
     text = manager.dashboard_text()
-    import monitoring
-    assert f"├ Открыт: <tg-emoji emoji-id=\"{monitoring.EMOJI_DEFAULT_APP}\">🪟</tg-emoji> Visual Studio Code" in text
+    assert f'├ Открыт: <tg-emoji emoji-id="{monitoring_mod.EMOJI_DEFAULT_APP}">🪟</tg-emoji> Visual Studio Code' in text
 
 
 def test_dashboard_omits_media_when_inactive():
@@ -115,12 +119,10 @@ def test_dashboard_omits_media_when_inactive():
     manager.process_telemetry({"active_application": "Visual Studio Code"})
     text = manager.dashboard_text()
     assert "Музыка:" not in text
-    import monitoring
-    assert f"└ Открыт: <tg-emoji emoji-id=\"{monitoring.EMOJI_DEFAULT_APP}\">🪟</tg-emoji> Visual Studio Code" in text
+    assert f'└ Открыт: <tg-emoji emoji-id="{monitoring_mod.EMOJI_DEFAULT_APP}">🪟</tg-emoji> Visual Studio Code' in text
 
 
 def test_main_menu_markup_excludes_player_and_activity():
-    from telegram_ui import TelegramBotApi
     ui = TelegramBotApi("dummy_token")
     markup = ui.main_menu_markup()
     callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
@@ -129,39 +131,33 @@ def test_main_menu_markup_excludes_player_and_activity():
 
 
 def test_main_menu_markup_structure_and_custom_emojis():
-    import telegram_ui
-    ui = telegram_ui.TelegramBotApi("dummy_token")
+    ui = TelegramBotApi("dummy_token")
     markup = ui.main_menu_markup()
     rows = markup["inline_keyboard"]
     assert len(rows) == 4
 
-    # Row 1: Питание
     assert rows[0][0]["text"] == "Питание"
     assert rows[0][0]["callback_data"] == "power_menu"
-    assert rows[0][0]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_POWER
+    assert rows[0][0]["icon_custom_emoji_id"] == telegram_ui_mod.EMOJI_BTN_POWER
 
-    # Row 2: Скриншот, Программы
     assert rows[1][0]["text"] == "Скриншот"
     assert rows[1][0]["callback_data"] == "screenshot"
-    assert rows[1][0]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_SCREENSHOT
+    assert rows[1][0]["icon_custom_emoji_id"] == telegram_ui_mod.EMOJI_BTN_SCREENSHOT
     assert rows[1][1]["text"] == "Программы"
     assert rows[1][1]["callback_data"] == "apps_menu"
-    assert rows[1][1]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_APPS
+    assert rows[1][1]["icon_custom_emoji_id"] == telegram_ui_mod.EMOJI_BTN_APPS
 
-    # Row 3: Звук, Настройки
     assert rows[2][0]["text"] == "Звук"
     assert rows[2][0]["callback_data"] == "sound_menu"
-    assert rows[2][0]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_SOUND
+    assert rows[2][0]["icon_custom_emoji_id"] == telegram_ui_mod.EMOJI_BTN_SOUND
     assert rows[2][1]["text"] == "Настройки"
     assert rows[2][1]["callback_data"] == "settings_menu"
-    assert rows[2][1]["icon_custom_emoji_id"] == telegram_ui.EMOJI_BTN_SETTINGS
+    assert rows[2][1]["icon_custom_emoji_id"] == telegram_ui_mod.EMOJI_BTN_SETTINGS
 
-    # Row 4: Adaptive power/lock button
     assert rows[3][0]["callback_data"] in ("shutdown_pc", "unlock_windows_manual", "power_on")
 
 
-def test_settings_menu_markup():
-    from telegram_ui import TelegramBotApi
+def test_settings_menu_markup_contains_submenus():
     ui = TelegramBotApi("dummy_token")
     markup = ui.settings_menu_markup()
     callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
@@ -172,15 +168,10 @@ def test_settings_menu_markup():
 
 
 def test_is_user_in_telegram_on_pc():
-    from unittest.mock import MagicMock
-    from bot import PcControlBotApp
-    import time
-
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.mqtt = MagicMock()
     app.monitoring = MagicMock()
 
-    # Case 1: Active in Telegram.exe, unlocked
     app.mqtt.system_session = "unlocked"
     app.monitoring.telemetry_age.return_value = 5.0
     app.monitoring.latest_telemetry = {
@@ -189,30 +180,24 @@ def test_is_user_in_telegram_on_pc():
     }
     assert app._is_user_in_telegram_on_pc() is True
 
-    # Case 2: In Telegram.exe, unlocked
     app.monitoring.latest_telemetry["active_application"] = "telegram.exe"
     assert app._is_user_in_telegram_on_pc() is True
 
-    # Case 3: In Chrome (not in Telegram)
     app.monitoring.latest_telemetry["active_application"] = "chrome.exe"
     assert app._is_user_in_telegram_on_pc() is False
 
-    # Case 4: In AyuGram, but PC is locked
     app.monitoring.latest_telemetry["active_application"] = "Telegram.exe"
     app.mqtt.system_session = "locked"
     assert app._is_user_in_telegram_on_pc() is False
 
-    # Case 5: In AyuGram, unlocked, but idle for 10 minutes (away)
     app.mqtt.system_session = "unlocked"
     app.monitoring.latest_telemetry["idle_seconds"] = 600
     assert app._is_user_in_telegram_on_pc() is False
 
-    # Case 6: Telemetry stale (>30s)
     app.monitoring.latest_telemetry["idle_seconds"] = 10
     app.monitoring.telemetry_age.return_value = 45.0
     assert app._is_user_in_telegram_on_pc() is False
 
-    # Case 7: system_session unknown, but desktop_status online and fresh
     app.mqtt.system_session = "unknown"
     app.mqtt.desktop_status = "online"
     app.monitoring.telemetry_age.return_value = 5.0
@@ -220,10 +205,6 @@ def test_is_user_in_telegram_on_pc():
 
 
 def test_dashboard_auto_refresh_every_10s():
-    from unittest.mock import MagicMock
-    from bot import PcControlBotApp
-    import time
-
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.mqtt = MagicMock()
     app.monitoring = MagicMock()
@@ -235,32 +216,27 @@ def test_dashboard_auto_refresh_every_10s():
     app.current_menu_view = "main"
     app.last_dashboard_auto_refresh = 100.0
 
-    # Mock user active in Telegram
     app._is_user_in_telegram_on_pc = MagicMock(return_value=True)
     app.monitoring.dashboard_text.return_value = "Dashboard Updated"
 
-    # Tick at 105s (<10s elapsed) -> should not refresh
     app._check_dashboard_auto_refresh(105.0)
     assert app.ui.send_message.call_count == 0
 
-    # Tick at 110.1s (>=10s elapsed) -> should refresh
     app._check_dashboard_auto_refresh(110.1)
     assert app.ui.send_message.call_count == 1
     assert app.last_dashboard_auto_refresh == 110.1
 
-    # If user leaves Telegram (_is_user_in_telegram_on_pc is False) -> should not refresh
     app._is_user_in_telegram_on_pc.return_value = False
     app._check_dashboard_auto_refresh(125.0)
-    assert app.ui.send_message.call_count == 1  # Still 1, no new call!
+    assert app.ui.send_message.call_count == 1
 
-    # If user navigates to settings_menu submenu -> should not refresh
     app._is_user_in_telegram_on_pc.return_value = True
     app.current_menu_view = "settings_menu"
     app._check_dashboard_auto_refresh(135.0)
-    assert app.ui.send_message.call_count == 1  # Still 1, no new call!
+    assert app.ui.send_message.call_count == 1
 
 
-def test_system_telemetry_does_not_wipe_desktop_session_fields():
+def test_system_telemetry_preserves_desktop_session_fields():
     manager = MonitoringManager.__new__(MonitoringManager)
     manager.mqtt = FakeMqtt()
     manager.history = FakeHistory()
@@ -269,7 +245,6 @@ def test_system_telemetry_does_not_wipe_desktop_session_fields():
     manager.latest_received_at = 0.0
     manager.latest_desktop_at = 0.0
 
-    # 1. Desktop telemetry arrives
     desktop_data = {
         "agent_mode": "desktop",
         "session_seconds": 3600,
@@ -283,7 +258,6 @@ def test_system_telemetry_does_not_wipe_desktop_session_fields():
     assert manager.latest_telemetry["active_application"] == "Happ.exe"
     assert manager.latest_telemetry["user_active"] is True
 
-    # 2. System telemetry arrives 2 seconds later (Session 0 service, no GUI info)
     system_data = {
         "agent_mode": "system",
         "cpu": {"load_percent": 15, "temp_c": 48},
@@ -291,12 +265,10 @@ def test_system_telemetry_does_not_wipe_desktop_session_fields():
     }
     manager.process_telemetry(system_data)
 
-    # Must preserve desktop session & GUI fields!
     assert manager.latest_telemetry["session_seconds"] == 3600
     assert manager.latest_telemetry["active_application"] == "Happ.exe"
     assert manager.latest_telemetry["active_application_emoji_id"] == "5251339414830880848"
     assert manager.latest_telemetry["user_active"] is True
-    # Hardware updated
     assert manager.latest_telemetry["cpu"]["load_percent"] == 15
     assert manager.latest_telemetry["uptime_seconds"] == 7200
 
@@ -320,9 +292,7 @@ def test_dashboard_formats_telegram_chat_title():
     assert "Telegram — PC Control" in text
 
 
-def test_dashboard_auto_refresh_every_5s_when_in_pc_control():
-    from unittest.mock import MagicMock
-    from bot import PcControlBotApp
+def test_dashboard_auto_refresh_every_5s_in_pc_control_chat():
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.mqtt = MagicMock()
     app.monitoring = MagicMock()
@@ -338,17 +308,15 @@ def test_dashboard_auto_refresh_every_5s_when_in_pc_control():
     app.monitoring.latest_telemetry = {"in_pc_control_chat": True}
     app.monitoring.dashboard_text.return_value = "Dashboard Fast"
 
-    # Tick at 104s (<5s elapsed) -> should not refresh
     app._check_dashboard_auto_refresh(104.0)
     assert app.ui.send_message.call_count == 0
 
-    # Tick at 105.1s (>=5s elapsed) -> should refresh!
     app._check_dashboard_auto_refresh(105.1)
     assert app.ui.send_message.call_count == 1
     assert app.last_dashboard_auto_refresh == 105.1
 
 
-def test_session_lines_states():
+def test_session_lines_cover_active_idle_locked_and_offline_states():
     manager = MonitoringManager.__new__(MonitoringManager)
     fake_mqtt = FakeMqtt()
     manager.mqtt = fake_mqtt
@@ -356,32 +324,27 @@ def test_session_lines_states():
     manager.alerts = {}
     manager.latest_received_at = time.time()
 
-    # Case 1: system_session unlocked, user active
     fake_mqtt.system_session = "unlocked"
     icon, dur = manager._session_lines({"user_active": True, "session_seconds": 3600})
     assert "🟢" in icon
     assert dur == "1 ч"
 
-    # Case 2: system_session unknown, but desktop_status is online and fresh
     fake_mqtt.system_session = "unknown"
     fake_mqtt.desktop_status = "online"
     icon, dur = manager._session_lines({"user_active": True, "session_seconds": 120})
     assert "🟢" in icon
     assert dur == "2 мин"
 
-    # Case 3: system_session unknown, desktop_status online, user idle
     icon, dur = manager._session_lines({"user_active": False, "session_seconds": 60})
     assert "🟡" in icon
     assert dur == "1 мин"
 
-    # Case 4: system_session locked
     fake_mqtt.system_session = "locked"
     icon, dur = manager._session_lines({"user_active": True, "session_seconds": 120})
     assert "🔴" in icon
     assert "5345825096160291312" in icon
     assert dur == "н/д"
 
-    # Case 5: system_session unknown and desktop offline
     fake_mqtt.system_session = "unknown"
     fake_mqtt.desktop_status = "offline"
     manager.latest_received_at = 0.0
@@ -391,8 +354,7 @@ def test_session_lines_states():
     assert dur == "н/д"
 
 
-def test_sound_menu_markup_has_valid_custom_emojis():
-    from telegram_ui import TelegramBotApi
+def test_sound_menu_markup_has_numeric_custom_emoji_ids():
     ui = TelegramBotApi("dummy_token")
     markup = ui.sound_menu_markup()
     buttons = [btn for row in markup["inline_keyboard"] for btn in row]
@@ -403,8 +365,7 @@ def test_sound_menu_markup_has_valid_custom_emojis():
             assert str(val).isdigit(), f"Button {btn.get('text')} has non-numeric icon_custom_emoji_id: {val}"
 
 
-def test_sanitize_reply_markup_strips_null_or_invalid_emojis():
-    from telegram_ui import TelegramBotApi
+def test_sanitize_reply_markup_strips_null_and_invalid_emoji_ids():
     bad_markup = {
         "inline_keyboard": [
             [{"text": "Bad Null", "icon_custom_emoji_id": None, "callback_data": "test:1"}],
@@ -431,7 +392,6 @@ def test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux():
     manager.latest_telemetry = None
     manager.latest_received_at = 0.0
 
-    # 1. Windows telemetry
     manager.process_telemetry({
         "timestamp": int(time.time()),
         "os": "windows",
@@ -444,9 +404,8 @@ def test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux():
     assert "5332280534540264957" in win_tag
     assert "🪟" in win_tag
     win_dashboard = manager.dashboard_text()
-    assert f'{win_tag} <b>PC Control</b>' in win_dashboard
+    assert f"{win_tag} <b>PC Control</b>" in win_dashboard
 
-    # 2. Linux telemetry
     manager.process_telemetry({
         "timestamp": int(time.time()),
         "os": "linux",
@@ -458,19 +417,17 @@ def test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux():
     assert "5332695978136874502" in linux_tag
     assert "🐧" in linux_tag
     linux_dashboard = manager.dashboard_text()
-    assert f'{linux_tag} <b>PC Control</b>' in linux_dashboard
+    assert f"{linux_tag} <b>PC Control</b>" in linux_dashboard
 
-    # 3. Unreachable state displays correct OS tag and label
     manager.mqtt.health.update("windows_system", "offline")
     manager.mqtt.health.update("windows_desktop", "offline")
     manager.mqtt.health.update("telemetry", "stale")
     unreachable_text = manager.dashboard_text()
-    assert f'{linux_tag} <b>PC Control</b> — ' in unreachable_text
+    assert f"{linux_tag} <b>PC Control</b> — " in unreachable_text
     assert "Linux: " in unreachable_text
 
 
-def test_dashboard_renders_yellow_pulse_when_esp_offline():
-    import monitoring
+def test_dashboard_renders_warning_pulse_when_esp_offline():
     manager = MonitoringManager.__new__(MonitoringManager)
     fake_mqtt = FakeMqtt()
     fake_mqtt.health.update("mqtt_broker", "online")
@@ -499,18 +456,12 @@ def test_dashboard_renders_yellow_pulse_when_esp_offline():
     })
 
     dashboard = manager.dashboard_text()
-    assert monitoring.EMOJI_STATUS_WARNING in dashboard
+    assert monitoring_mod.EMOJI_STATUS_WARNING in dashboard
     assert "В сети (ESP недоступна)" in dashboard
     assert "Модуль ESP8266 недоступен" in dashboard
 
 
 def test_resolve_menu_view_mapping():
-    try:
-        from vds_bot.bot import resolve_menu_view
-    except ImportError:
-        from bot import resolve_menu_view
-
-    # Submenus
     assert resolve_menu_view("apps_menu") == "apps_menu"
     assert resolve_menu_view("power_menu") == "power_menu"
     assert resolve_menu_view("shutdown_menu") == "shutdown_menu"
@@ -537,12 +488,10 @@ def test_resolve_menu_view_mapping():
     assert resolve_menu_view("flow_unlock_and_workspace") == "workspace_menu"
     assert resolve_menu_view("workspace_vpn:incy") == "workspace_menu"
 
-    # Main menu resets
     assert resolve_menu_view("menu") == "main"
     assert resolve_menu_view("main") == "main"
     assert resolve_menu_view("flow_unlock_no") == "main"
 
-    # Non-navigation action callbacks must NOT change menu view
     assert resolve_menu_view("kill_process:5432") is None
     assert resolve_menu_view("app:Telegram") is None
     assert resolve_menu_view("press_esc") is None
@@ -550,14 +499,10 @@ def test_resolve_menu_view_mapping():
     assert resolve_menu_view("sleep_confirm") is None
 
 
-def test_apps_menu_navigation_prevents_dashboard_auto_refresh():
-    """Regression test: opening apps_menu must prevent dashboard auto-refresh from kicking user out."""
-    from unittest.mock import MagicMock
-    try:
-        from vds_bot.bot import PcControlBotApp
-    except ImportError:
-        from bot import PcControlBotApp
+def test_apps_menu_navigation_prevents_dashboard_auto_refresh(monkeypatch):
+    import vds_bot.bot as bot_mod
 
+    monkeypatch.setattr(bot_mod, "ALLOWED_USER_ID", 12345)
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.allowed_user_id = 12345
     app.ui = MagicMock()
@@ -572,7 +517,6 @@ def test_apps_menu_navigation_prevents_dashboard_auto_refresh():
     app._is_user_in_telegram_on_pc = MagicMock(return_value=True)
     app.monitoring.latest_telemetry = {"in_pc_control_chat": True}
 
-    # 1. User clicks "apps_menu"
     call = {
         "id": "cb-apps-1",
         "from": {"id": 12345},
@@ -580,18 +524,12 @@ def test_apps_menu_navigation_prevents_dashboard_auto_refresh():
         "data": "apps_menu",
     }
     app.handle_callback(call)
-
-    # current_menu_view must be "apps_menu", not "main"
     assert app.current_menu_view == "apps_menu"
 
-    # 2. Telemetry arrives or scheduler ticks at 115.0s (>5s / >10s elapsed)
     app.ui.send_message.reset_mock()
     app._check_dashboard_auto_refresh(115.0)
-
-    # Must NOT call send_message to overwrite dashboard!
     assert app.ui.send_message.call_count == 0
 
-    # 3. User clicks an action in apps_menu (e.g. launch app)
     call_launch = {
         "id": "cb-apps-2",
         "from": {"id": 12345},
@@ -600,15 +538,11 @@ def test_apps_menu_navigation_prevents_dashboard_auto_refresh():
     }
     app.mqtt.desktop_status = "online"
     app.handle_callback(call_launch)
-
-    # View must STILL remain "apps_menu"
     assert app.current_menu_view == "apps_menu"
 
-    # 4. Another auto-refresh tick
     app._check_dashboard_auto_refresh(130.0)
     assert app.ui.send_message.call_count == 0
 
-    # 5. User clicks "Назад" ("menu")
     call_back = {
         "id": "cb-apps-3",
         "from": {"id": 12345},
@@ -619,22 +553,32 @@ def test_apps_menu_navigation_prevents_dashboard_auto_refresh():
     assert app.current_menu_view == "main"
 
 
+def test_antigravity_card_markup_handles_null_email_and_valid_styles():
+    ui = TelegramBotApi("dummy_token")
+    markup = ui.antigravity_card_markup({
+        "accounts": [
+            {"id": "a1", "email": None, "name": None, "is_active": True, "min_quota": 90},
+            {"id": "a2", "email": "user@example.com", "name": "", "is_active": False, "min_quota": 40},
+        ]
+    })
+    allowed_styles = {"primary", "success", "danger"}
+    for row in markup["inline_keyboard"]:
+        for btn in row:
+            if "style" in btn:
+                assert btn["style"] in allowed_styles
 
-if __name__ == "__main__":
-    test_dashboard_uses_real_nested_agent_schema()
-    test_dashboard_renders_adaptive_os_emoji_for_windows_and_linux()
-    test_dashboard_renders_media_playback_when_active()
-    test_dashboard_omits_media_when_inactive()
-    test_dashboard_formats_telegram_chat_title()
-    test_system_telemetry_does_not_wipe_desktop_session_fields()
-    test_main_menu_markup_excludes_player_and_activity()
-    test_main_menu_markup_structure_and_custom_emojis()
-    test_settings_menu_markup()
-    test_sound_menu_markup_has_valid_custom_emojis()
-    test_sanitize_reply_markup_strips_null_or_invalid_emojis()
-    test_is_user_in_telegram_on_pc()
-    test_dashboard_auto_refresh_every_10s()
-    test_dashboard_auto_refresh_every_5s_when_in_pc_control()
-    test_dashboard_renders_yellow_pulse_when_esp_offline()
-    print("All UI and monitoring tests passed")
+    sanitized = TelegramBotApi._sanitize_reply_markup({
+        "inline_keyboard": [[{"text": "Bad", "style": "secondary", "callback_data": "x"}]]
+    })
+    assert "style" not in sanitized["inline_keyboard"][0][0]
 
+
+def test_sound_menu_text_formats_dict_volume_and_mute():
+    ui = TelegramBotApi("dummy_token")
+    text_unmuted = ui.sound_menu_text(volume={"percent": 65, "muted": False})
+    assert "65%" in text_unmuted
+    assert "{'percent'" not in text_unmuted
+
+    text_muted = ui.sound_menu_text(volume={"percent": 30, "muted": True})
+    assert "30%" in text_muted
+    assert "без звука" in text_muted

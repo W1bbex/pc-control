@@ -1,54 +1,34 @@
 """Shared constants and environment configuration for desktop agent modules."""
 
 import json
-import os
 import sys
 import time
 import uuid
 from pathlib import Path
-import psutil
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CORE_DIR = BASE_DIR / "core"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-AGENT_VERSION = "2.0"
+from core.runtime_config import (  # noqa: E402
+    AGENT_VERSION,
+    CONFIG_PATH,
+    DATA_DIR,
+    LOG_DIR,
+    PROTECTED_PROCESSES,
+    REAL_BOOT_TIME,
+    get_real_boot_time,
+    load_env_file as _load_env_file,
+    resolve_state_path,
+)
+
 AGENT_BOOT_ID = f"desktop-{uuid.uuid4().hex[:12]}"
 
-DATA_DIR = BASE_DIR / "data"
-CONFIG_PATH = BASE_DIR / "config.json"
-_data_state = DATA_DIR / "state.json"
-_root_state = BASE_DIR / "state.json"
-STATE_PATH = _data_state if _data_state.exists() or not _root_state.exists() else _root_state
-LOG_DIR = BASE_DIR / "logs"
-
+STATE_PATH = resolve_state_path("state.json", require_data_dir=False)
 AGENT_START_TIME = time.time()
-
-
-def _load_env_file(path: Path):
-    if not path.exists():
-        return
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(path)
-    except Exception:
-        pass
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = k.strip()
-            v = v.strip().strip("'\"")
-            if k and k not in os.environ:
-                os.environ[k] = v
-    except Exception:
-        pass
-
-
-_load_env_file(BASE_DIR / ".env")
 
 
 def _load_canonical_icons():
@@ -64,51 +44,6 @@ def _load_canonical_icons():
 
 ICONS = _load_canonical_icons()
 
-
-def get_real_boot_time():
-    """Returns actual boot timestamp using Windows Kernel-Boot event log or psutil fallback."""
-    try:
-        import win32evtlog
-        import xml.etree.ElementTree as ET
-        from datetime import datetime
-
-        query_str = '*[System[Provider[@Name="Microsoft-Windows-Kernel-Boot"] and (EventID=27 or EventID=20)]]'
-        query = win32evtlog.EvtQuery(
-            "System",
-            win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryReverseDirection,
-            query_str,
-        )
-        try:
-            events = win32evtlog.EvtNext(query, 1)
-            if events:
-                try:
-                    xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
-                    root = ET.fromstring(xml_data)
-                    for elem in root.iter():
-                        if elem.tag.endswith("TimeCreated") and "SystemTime" in elem.attrib:
-                            st = elem.attrib["SystemTime"]
-                            dt = datetime.fromisoformat(st.replace("Z", "+00:00"))
-                            return dt.timestamp()
-                finally:
-                    try:
-                        win32evtlog.EvtClose(events[0])
-                    except Exception:
-                        pass
-        finally:
-            try:
-                win32evtlog.EvtClose(query)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        return psutil.boot_time()
-    except Exception:
-        return time.time()
-
-
-REAL_BOOT_TIME = get_real_boot_time()
-
 TOPIC_COMMAND = "pc/main/windows/command"
 TOPIC_ACK = "pc/main/windows/ack"
 TOPIC_STATUS = "pc/main/windows/status"
@@ -119,17 +54,3 @@ TOPIC_MEDIA_COMMAND = "pc/main/windows/media/command"
 TOPIC_ACTIVITY_QUERY = "pc/main/windows/activity/query"
 TOPIC_ACTIVITY_RESPONSE = "pc/main/windows/activity/response"
 
-PROTECTED_PROCESSES = {
-    "csrss.exe",
-    "dwm.exe",
-    "lsass.exe",
-    "services.exe",
-    "smss.exe",
-    "system",
-    "wininit.exe",
-    "winlogon.exe",
-    "python.exe",
-    "pythonw.exe",
-    "svchost.exe",
-    "spoolsv.exe",
-}

@@ -20,6 +20,7 @@ import requests
 import winrt.windows.media.control as wmc
 
 LOG = logging.getLogger("media_manager")
+_MEDIA_LOCK_INIT_GUARD = threading.Lock()
 
 _parent = Path(__file__).resolve().parent
 BASE_DIR = _parent.parent if _parent.name == "core" else _parent
@@ -66,7 +67,7 @@ def _load_canonical_icons():
 
 _CANONICAL_ICONS = _load_canonical_icons()
 
-# Pre-uploaded vector UI icons & tags in pc_icons_pack
+# Pre-uploaded vector UI icons & tags
 UI_ICONS = {
     "btn_play": _CANONICAL_ICONS.get("play", "5330015871299527534"),
     "btn_pause": _CANONICAL_ICONS.get("pause", "5330570905628222348"),
@@ -104,6 +105,7 @@ class MediaManager:
         self.on_status_change = on_status_change
         self.last_state: Dict[str, Any] = {}
         self._lock = threading.Lock()
+        self._session_lock = threading.Lock()
         self._loop = None
         self._thread = None
         self._stop_event = threading.Event()
@@ -118,7 +120,49 @@ class MediaManager:
 
         # HTTP session for connection pooling (avoids repeated TLS handshakes)
         self._http_session = requests.Session()
-        # Bind to physical LAN interface for Yandex Music to bypass VPN TUN if VPN is active
+        self._mount_phys_adapter(self._http_session)
+
+        # Local playback clock anchor
+        self._anchor_time = time.time()
+        self._anchor_pos = 0.0
+        self._last_title = ""
+        self._last_playing = False
+        self._resolve_cache = {}
+        self._session_manager = None
+
+        # Pre-warm likes in background so first track change is fast
+        threading.Thread(
+            target=self._sync_likes_if_needed,
+            kwargs={"force": True},
+            name="media-likes-prewarm",
+            daemon=True,
+        ).start()
+
+    def _get_lock(self):
+        lock = getattr(self, "_lock", None)
+        if lock is not None:
+            return lock
+        with _MEDIA_LOCK_INIT_GUARD:
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self._lock = lock
+            return lock
+
+    def _get_session_lock(self):
+        lock = getattr(self, "_session_lock", None)
+        if lock is not None:
+            return lock
+        with _MEDIA_LOCK_INIT_GUARD:
+            lock = getattr(self, "_session_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self._session_lock = lock
+            return lock
+
+    @staticmethod
+    def _mount_phys_adapter(session: requests.Session) -> None:
+        """Bind physical LAN interface for Yandex Music so requests bypass active VPN TUN."""
         try:
             import socket
             from requests.adapters import HTTPAdapter
@@ -127,8 +171,9 @@ class MediaManager:
                 def __init__(self, source_address, **kwargs):
                     self.source_address = source_address
                     super().__init__(**kwargs)
+
                 def init_poolmanager(self, *args, **kwargs):
-                    kwargs['source_address'] = self.source_address
+                    kwargs["source_address"] = self.source_address
                     super().init_poolmanager(*args, **kwargs)
 
             def _get_best_phys_ip():
@@ -150,43 +195,35 @@ class MediaManager:
             phys_ip = _get_best_phys_ip()
             if phys_ip:
                 adapter = _SourceAddressAdapter((phys_ip, 0))
-                self._http_session.mount("https://api.music.yandex.net/", adapter)
-                self._http_session.mount("http://api.music.yandex.net/", adapter)
+                session.mount("https://api.music.yandex.net/", adapter)
+                session.mount("http://api.music.yandex.net/", adapter)
         except Exception as e:
             LOG.debug("Could not mount physical source address adapter: %s", e)
 
-        # Local playback clock anchor
-        self._anchor_time = time.time()
-        self._anchor_pos = 0.0
-        self._last_title = ""
-        self._last_playing = False
-        self._resolve_cache = {}
-        self._session_manager = None
-
-        # Pre-warm likes in background so first track change is fast
-        threading.Thread(
-            target=self._sync_likes_if_needed,
-            kwargs={"force": True},
-            name="media-likes-prewarm",
-            daemon=True,
-        ).start()
-
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
-        func = getattr(self._http_session, method.lower(), self._http_session.request)
+        session_lock = self._get_session_lock()
+        with session_lock:
+            session = self._http_session
+        func = getattr(session, method.lower(), session.request)
         try:
             return func(url, **kwargs)
         except OSError as e:
             LOG.warning(
-                "Yandex Music request failed with OSError (%s: %s). Recreating clean session without bound IP...",
+                "Yandex Music request failed with OSError (%s: %s). Recreating session with refreshed LAN binding...",
                 type(e).__name__,
                 e,
             )
-            try:
-                self._http_session.close()
-            except Exception:
-                pass
-            self._http_session = requests.Session()
-            func = getattr(self._http_session, method.lower(), self._http_session.request)
+            with session_lock:
+                if self._http_session is session:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                    recreated = requests.Session()
+                    self._mount_phys_adapter(recreated)
+                    self._http_session = recreated
+                new_session = self._http_session
+            func = getattr(new_session, method.lower(), new_session.request)
             return func(url, **kwargs)
 
     async def _get_manager(self):
@@ -203,8 +240,14 @@ class MediaManager:
         }
 
     def _sync_likes_if_needed(self, force: bool = False):
+        if not getattr(self, "yandex_token", None) or not getattr(self, "yandex_uid", None):
+            return
         now = time.time()
-        if not force and now - self._last_liked_fetch < 60.0 and self.liked_track_ids:
+        lock = self._get_lock()
+        with lock:
+            last_fetch = getattr(self, "_last_liked_fetch", 0.0)
+            has_cached = bool(getattr(self, "liked_track_ids", ()))
+        if not force and now - last_fetch < 60.0 and has_cached:
             return
         try:
             resp = self._request_with_retry(
@@ -213,15 +256,25 @@ class MediaManager:
                 headers=self._get_yandex_headers(),
                 timeout=5,
             )
+            status = getattr(resp, "status_code", None)
+            if isinstance(status, int) and status >= 400:
+                LOG.warning("Yandex Music likes sync returned HTTP %s", status)
+                return
             r = resp.json()
             data = r.get("result", r) if isinstance(r, dict) else {}
             tracks = data.get("library", {}).get("tracks", []) if isinstance(data, dict) else []
             if tracks:
-                self.liked_track_ids = {str(x.get("id")) for x in tracks if x.get("id")}
-                self._last_liked_fetch = now
-                LOG.info("Synced %d liked tracks from Yandex Music", len(self.liked_track_ids))
-            elif self.liked_track_ids:
-                LOG.warning("Yandex Music likes sync returned empty or error (%s), keeping %d cached tracks", r.get("name") if isinstance(r, dict) else "", len(self.liked_track_ids))
+                new_liked = {str(x.get("id")) for x in tracks if x.get("id")}
+                with lock:
+                    self.liked_track_ids = new_liked
+                    self._last_liked_fetch = now
+                    liked_count = len(new_liked)
+                LOG.info("Synced %d liked tracks from Yandex Music", liked_count)
+            else:
+                with lock:
+                    liked_count = len(getattr(self, "liked_track_ids", ()))
+                if liked_count:
+                    LOG.warning("Yandex Music likes sync returned empty or error (%s), keeping %d cached tracks", r.get("name") if isinstance(r, dict) else "", liked_count)
         except Exception as e:
             LOG.warning("Failed syncing Yandex Music likes: %s", e)
 
@@ -232,7 +285,8 @@ class MediaManager:
             return title, artist, None, False, None
 
         cache_key = (title, artist, round(duration, 0))
-        with self._lock:
+        lock = self._get_lock()
+        with lock:
             if hasattr(self, "_resolve_cache") and cache_key in self._resolve_cache:
                 cached = self._resolve_cache[cache_key]
                 tid = cached[2]
@@ -262,6 +316,10 @@ class MediaManager:
                     headers=self._get_yandex_headers(),
                     timeout=3,
                 )
+                status = getattr(resp, "status_code", None)
+                if isinstance(status, int) and status >= 400:
+                    LOG.warning("Yandex search query '%s' returned HTTP %s", q, status)
+                    continue
                 r = resp.json()
                 res = r.get("result", r) if isinstance(r, dict) else {}
                 tracks_data = res.get("tracks", {})
@@ -271,6 +329,9 @@ class MediaManager:
                     break
             except Exception as e:
                 LOG.warning("Yandex search query '%s' failed: %s", q, e)
+
+        with lock:
+            liked_ids = set(getattr(self, "liked_track_ids", ()))
 
         best_track = None
         best_score = 9999.0
@@ -290,7 +351,7 @@ class MediaManager:
 
             t_id = str(t.get("id"))
             t_real_id = str(t.get("realId"))
-            t_liked = (t_id in self.liked_track_ids or t_real_id in self.liked_track_ids)
+            t_liked = (t_id in liked_ids or t_real_id in liked_ids)
 
             bonus = 0.0
             if t_matched:
@@ -338,19 +399,23 @@ class MediaManager:
             real_id = str(best_track.get("realId"))
 
             # Check if this ID, realId, or ANY matching version in search is in likes
-            is_liked = (tid in self.liked_track_ids) or (real_id in self.liked_track_ids)
+            is_liked = (tid in liked_ids) or (real_id in liked_ids)
             if not is_liked:
                 for cand in tracks:
-                    c_title = cand.get("title", "").lower()
-                    c_artists = [a.get("name", "").lower() for a in cand.get("artists", [])]
+                    c_title = (cand.get("title") or "").lower()
+                    c_artists = [
+                        (a.get("name") or "").lower()
+                        for a in (cand.get("artists") or [])
+                        if isinstance(a, dict)
+                    ]
                     c_t_matched = bool(clean_title and clean_title.lower() in c_title)
                     c_a_matched = bool(clean_artist and any(clean_artist.lower() in a for a in c_artists))
                     if c_t_matched and (not clean_artist or c_a_matched):
                         c_id = str(cand.get("id"))
                         c_real = str(cand.get("realId"))
-                        if c_id in self.liked_track_ids or c_real in self.liked_track_ids:
+                        if c_id in liked_ids or c_real in liked_ids:
                             is_liked = True
-                            tid = c_id if c_id in self.liked_track_ids else c_real
+                            tid = c_id if c_id in liked_ids else c_real
                             break
 
             cover_uri = best_track.get("coverUri")
@@ -360,73 +425,86 @@ class MediaManager:
                 title, artist, tid, real_title, real_artist, is_liked, best_diff, cover_url
             )
             res = (real_title, real_artist, tid, is_liked, cover_url)
-            with self._lock:
+            with lock:
                 if not hasattr(self, "_resolve_cache"):
                     self._resolve_cache = {}
                 self._resolve_cache[cache_key] = res
             return res
 
         res = (title, artist, None, False, None)
-        with self._lock:
+        with lock:
             if not hasattr(self, "_resolve_cache"):
                 self._resolve_cache = {}
             self._resolve_cache[cache_key] = res
         return res
 
     def _toggle_like(self) -> bool:
-        if not self.current_track_id and self._last_title:
-            res_info = self._resolve_track(
-                self._last_title, getattr(self, "_last_artist", ""), getattr(self, "_last_duration", 0.0)
-            )
-            self.current_track_id = res_info[2]
-            self.current_is_liked = res_info[3]
-            if len(res_info) > 4:
-                self.current_cover_url = res_info[4]
+        lock = self._get_lock()
+        with lock:
+            track_id = self.current_track_id
+            last_title = getattr(self, "_last_title", "")
+            last_artist = getattr(self, "_last_artist", "")
+            last_duration = getattr(self, "_last_duration", 0.0)
+            is_liked = self.current_is_liked
 
-        if not self.current_track_id:
-            LOG.warning("Cannot toggle like: track ID could not be resolved for '%s'", self._last_title)
-            return self.current_is_liked
+        if not track_id and last_title:
+            res_info = self._resolve_track(last_title, last_artist, last_duration)
+            with lock:
+                self.current_track_id = res_info[2]
+                self.current_is_liked = res_info[3]
+                if len(res_info) > 4:
+                    self.current_cover_url = res_info[4]
+                track_id = self.current_track_id
+                is_liked = self.current_is_liked
+
+        if not track_id:
+            LOG.warning("Cannot toggle like: track ID could not be resolved for '%s'", last_title)
+            return is_liked
 
         try:
             headers = self._get_yandex_headers()
-            if self.current_is_liked:
-                # Remove from likes
-                r = self._request_with_retry(
-                    "POST",
-                    f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks/remove",
-                    data={"track-ids": str(self.current_track_id)},
-                    headers=headers,
-                    timeout=5,
-                )
-                LOG.info("Removed track %s from likes, status: %s", self.current_track_id, r.status_code)
-                if r.status_code == 200:
-                    with self._lock:
-                        self.liked_track_ids.discard(str(self.current_track_id))
-                        self.current_is_liked = False
-            else:
-                # Add to likes
-                r = self._request_with_retry(
-                    "POST",
-                    f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks/add-multiple",
-                    data={"track-ids": str(self.current_track_id)},
-                    headers=headers,
-                    timeout=5,
-                )
-                LOG.info("Added track %s to likes, status: %s", self.current_track_id, r.status_code)
-                if r.status_code == 200:
-                    with self._lock:
-                        self.liked_track_ids.add(str(self.current_track_id))
-                        self.current_is_liked = True
+            target_url = (
+                f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks/remove"
+                if is_liked
+                else f"https://api.music.yandex.net/users/{self.yandex_uid}/likes/tracks/add-multiple"
+            )
+            r = self._request_with_retry(
+                "POST",
+                target_url,
+                data={"track-ids": str(track_id)},
+                headers=headers,
+                timeout=5,
+            )
+            status = getattr(r, "status_code", None)
+            action_word = "Removed track" if is_liked else "Added track"
+            LOG.info("%s %s %s likes, status: %s", action_word, track_id, "from" if is_liked else "to", status)
+            if status != 200:
+                if isinstance(status, int) and status >= 400:
+                    LOG.warning("Yandex Music toggle_like failed with HTTP %s for track %s", status, track_id)
+                return False
 
-            with self._lock:
-                if hasattr(self, "_resolve_cache") and self._last_title:
-                    cache_key = (self._last_title, getattr(self, "_last_artist", ""), round(getattr(self, "_last_duration", 0.0), 0))
+            new_liked_state = not is_liked
+            with lock:
+                if new_liked_state:
+                    self.liked_track_ids.add(str(track_id))
+                else:
+                    self.liked_track_ids.discard(str(track_id))
+                self.current_is_liked = new_liked_state
+
+                if hasattr(self, "_resolve_cache") and last_title:
+                    cache_key = (last_title, last_artist, round(last_duration, 0))
                     if cache_key in self._resolve_cache:
                         c = self._resolve_cache[cache_key]
-                        self._resolve_cache[cache_key] = (c[0], c[1], c[2], self.current_is_liked, c[4] if len(c) > 4 else None)
+                        self._resolve_cache[cache_key] = (
+                            c[0],
+                            c[1],
+                            c[2],
+                            new_liked_state,
+                            c[4] if len(c) > 4 else None,
+                        )
                 last_st = getattr(self, "last_state", None)
                 if last_st is not None:
-                    last_st["is_liked"] = self.current_is_liked
+                    last_st["is_liked"] = new_liked_state
                     state_copy = dict(last_st)
                 else:
                     state_copy = None
@@ -501,31 +579,33 @@ class MediaManager:
             now = time.time()
             track_changed = (title != self._last_title or artist != getattr(self, "_last_artist", ""))
             if track_changed:
-                self._last_title = title
-                self._last_artist = artist
-                self._last_duration = duration
-                self._anchor_time = now
-                self._anchor_pos = position
-                self._last_playing = is_playing
-                self._last_raw_position = position
                 resolved_title, resolved_artist, tid, is_liked, cover_url = await asyncio.to_thread(
                     self._resolve_track, title, artist, duration
                 )
-                self.current_track_id = tid
-                self.current_is_liked = is_liked
-                self.current_cover_url = cover_url
-                if resolved_title and ("\ufffd" not in resolved_title or "\ufffd" in title):
-                    title = resolved_title
-                if resolved_artist and ("\ufffd" not in resolved_artist or "\ufffd" in artist):
-                    artist = resolved_artist
-                self._resolved_title = title
-                self._resolved_artist = artist
+                with self._get_lock():
+                    self._last_title = title
+                    self._last_artist = artist
+                    self._last_duration = duration
+                    self._anchor_time = time.time()
+                    self._anchor_pos = position
+                    self._last_playing = is_playing
+                    self._last_raw_position = position
+                    self.current_track_id = tid
+                    self.current_is_liked = is_liked
+                    self.current_cover_url = cover_url
+                    if resolved_title and ("\ufffd" not in resolved_title or "\ufffd" in title):
+                        title = resolved_title
+                    if resolved_artist and ("\ufffd" not in resolved_artist or "\ufffd" in artist):
+                        artist = resolved_artist
+                    self._resolved_title = title
+                    self._resolved_artist = artist
                 now = time.time()
             else:
-                title = getattr(self, "_resolved_title", title)
-                artist = getattr(self, "_resolved_artist", artist)
-                if getattr(self, "current_track_id", None):
-                    self.current_is_liked = (str(self.current_track_id) in self.liked_track_ids)
+                with self._get_lock():
+                    title = getattr(self, "_resolved_title", title)
+                    artist = getattr(self, "_resolved_artist", artist)
+                    if getattr(self, "current_track_id", None):
+                        self.current_is_liked = (str(self.current_track_id) in self.liked_track_ids)
                 if is_playing != self._last_playing:
                     self._last_playing = is_playing
                     self._anchor_time = now
@@ -545,6 +625,10 @@ class MediaManager:
                 self._anchor_time = now
                 self._anchor_pos = position
 
+            with self._get_lock():
+                cover_snapshot = getattr(self, "current_cover_url", None)
+                liked_snapshot = bool(self.current_is_liked)
+
             state = {
                 "active": True,
                 "app": app_id,
@@ -555,10 +639,10 @@ class MediaManager:
                 "status": status_str,
                 "position": round(calculated_pos, 1),
                 "duration": duration,
-                "cover_url": getattr(self, "current_cover_url", None),
+                "cover_url": cover_snapshot,
                 "emoji_ids": emoji_ids,
                 "artist_avatar_id": artist_avatar_id,
-                "is_liked": self.current_is_liked,
+                "is_liked": liked_snapshot,
                 "ui_icons": UI_ICONS,
                 "updated_at": time.time(),
             }
@@ -663,7 +747,7 @@ class MediaManager:
         state = await self.get_current_state()
         changed = force
         now = time.time()
-        with self._lock:
+        with self._get_lock():
             if not changed:
                 if not self.last_state:
                     changed = True
@@ -700,7 +784,9 @@ class MediaManager:
                 LOG.exception("Error in media manager poll step: %s", e)
 
             # Sleep 3.5s if playing, 4.0s if active/paused, or 5.0s if idle (near 0% CPU for Explorer and Python)
-            sleep_ticks = 35 if (self.last_state and self.last_state.get("is_playing")) else (40 if (self.last_state and self.last_state.get("active")) else 50)
+            with self._get_lock():
+                last_st = dict(self.last_state) if self.last_state else {}
+            sleep_ticks = 35 if last_st.get("is_playing") else (40 if last_st.get("active") else 50)
             for _ in range(sleep_ticks):
                 if self._stop_event.is_set():
                     break
@@ -734,9 +820,10 @@ class MediaManager:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        if hasattr(self, "_http_session") and self._http_session:
-            try:
-                self._http_session.close()
-            except Exception:
-                pass
+        with self._get_session_lock():
+            if hasattr(self, "_http_session") and self._http_session:
+                try:
+                    self._http_session.close()
+                except Exception:
+                    pass
         LOG.info("MediaManager stopped.")

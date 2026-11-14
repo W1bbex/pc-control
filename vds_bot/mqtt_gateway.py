@@ -54,6 +54,7 @@ class MqttGateway:
         self.pending_commands = {}
         self.pending_lock = threading.Lock()
         self.last_media_state = {}
+        self._stop_event = threading.Event()
         self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
 
         self._event_queue = queue.Queue(maxsize=1000)
@@ -71,14 +72,33 @@ class MqttGateway:
         self.client.on_message = self._on_message
 
     def start(self):
+        self._stop_event.clear()
+        if not self.health_thread.is_alive() and self.health_thread.ident is not None:
+            self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
+        if not self._dispatch_thread.is_alive() and self._dispatch_thread.ident is not None:
+            self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True, name="mqtt-event-dispatcher")
         try:
             self.client.connect_async(self.host, self.port, keepalive=30)
             self.client.loop_start()
-            self.health_thread.start()
-            self._dispatch_thread.start()
+            if not self.health_thread.is_alive():
+                self.health_thread.start()
+            if not self._dispatch_thread.is_alive():
+                self._dispatch_thread.start()
             LOG.info("MQTT gateway thread started")
         except Exception:
             LOG.exception("MQTT gateway connect failed")
+
+    def stop(self, timeout=2.0):
+        self._stop_event.set()
+        try:
+            if hasattr(self, "client") and self.client is not None:
+                self.client.loop_stop()
+                self.client.disconnect()
+        except Exception as e:
+            LOG.warning("Error stopping MQTT client: %s", e)
+        for th in (getattr(self, "_dispatch_thread", None), getattr(self, "health_thread", None)):
+            if th is not None and th.is_alive() and th is not threading.current_thread():
+                th.join(timeout=timeout)
 
     @property
     def system_status(self):
@@ -195,7 +215,7 @@ class MqttGateway:
                     elif data.get("event") == "stealth_exit":
                         self._emit("stealth_exit", data)
                 self.health.update("windows_system", current, boot_id=boot_id, ts=ts, is_retained=message.retain)
-                self.health.update("windows_session", session, ts=ts, is_retained=message.retain)
+                self.health.update("windows_session", session, boot_id=boot_id, ts=ts, is_retained=message.retain)
                 self._emit_health_state()
             except Exception as e:
                 LOG.warning("Failed to update windows_system/session health: %s", e)
@@ -228,8 +248,8 @@ class MqttGateway:
             try:
                 event_data = json.loads(payload)
                 self._emit("physical_input", event_data)
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.warning("Failed parsing physical_input payload: %s", e)
             return
 
         if topic in {TOPIC_SYSTEM_ACK, TOPIC_DESKTOP_ACK, TOPIC_GENERAL_ACK}:
@@ -237,8 +257,8 @@ class MqttGateway:
                 ack_data = json.loads(payload)
                 self._handle_ack(ack_data)
                 self._emit("ack", ack_data)
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.warning("Failed handling ACK on %s: %s", topic, e)
             return
 
         if topic in {TOPIC_TELEMETRY, TOPIC_TELEMETRY_LEGACY, TOPIC_SYSTEM_TELEMETRY}:
@@ -252,8 +272,8 @@ class MqttGateway:
                 self.health.update("telemetry", "fresh", ts=ts, boot_id=boot_id, is_retained=message.retain)
                 self._emit_health_state()
                 self._emit("telemetry", telemetry_data)
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.warning("Failed parsing telemetry on %s: %s", topic, e)
             return
 
     def _handle_ack(self, ack_data):
@@ -270,18 +290,17 @@ class MqttGateway:
                     del self.pending_commands[cmd_id]
 
     def _health_loop(self):
-        while True:
-            time.sleep(5.0)
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(5.0):
+                break
             now = time.time()
-            if not self.mqtt_online:
-                continue
-            
-            # Check for stale components
-            changed = self.health.check_all_stale()
-            if changed:
-                self._emit_health_state()
+            if self.mqtt_online:
+                # Check for stale components
+                changed = self.health.check_all_stale()
+                if changed:
+                    self._emit_health_state()
 
-            # Check for timed out commands
+            # Check for timed out commands regardless of broker status so pending entries never leak
             expired = []
             with self.pending_lock:
                 for cmd_id, data in list(self.pending_commands.items()):
@@ -319,9 +338,12 @@ class MqttGateway:
                 LOG.exception("Error in event callback for %s", event_name)
 
     def _dispatch_loop(self):
-        while True:
+        while not self._stop_event.is_set() or not self._event_queue.empty():
             try:
-                event_name, data = self._event_queue.get()
+                try:
+                    event_name, data = self._event_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
                 try:
                     if self.on_event_callback:
                         self.on_event_callback(event_name, data)
@@ -393,6 +415,8 @@ class MqttGateway:
         Actions: "launch_app", "cancel_workspace", "screen_off", "lock", "sleep", "restart", "shutdown", "volume"
         Payload schema: {"id": "...", "action": "...", "expires": <unix_ts>, "args": {...}}
         """
+        if action.lower() == "screenshot" and timeout == 30:
+            timeout = 35
         action_id = f"desk-{int(time.time()*1000)}-{secrets.token_hex(3)}"
         expires = int(time.time()) + timeout
         payload_data = {

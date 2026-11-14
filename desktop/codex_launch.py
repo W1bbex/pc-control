@@ -33,8 +33,8 @@ def diagnose_codex_launch(variant, alias, has_visible_window, timeout=15, allow_
                 return {"codex_diagnostic": True, "variant": variant, "state": "window_visible", "pids": existing}
         if cancel_event is not None and cancel_event.is_set():
             return {"codex_diagnostic": True, "variant": variant, "state": "cancelled"}
-        alias = os.path.expandvars(alias)
-        if not os.path.isfile(alias):
+        alias = os.path.expandvars(alias) if alias else ""
+        if variant in {"1", "2"} and not os.path.isfile(alias):
             raise FileNotFoundError("Codex application alias is unavailable")
         explorer = os.path.join(os.environ.get("WINDIR", ""), "explorer.exe")
         commands = {
@@ -45,7 +45,7 @@ def diagnose_codex_launch(variant, alias, has_visible_window, timeout=15, allow_
         LOG.info("Starting Codex diagnostic variant %s", variant)
         process = subprocess.Popen(
             commands[variant],
-            cwd=os.path.dirname(alias) if variant == "1" else None,
+            cwd=(os.path.dirname(alias) or None) if variant == "1" else None,
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         deadline = time.monotonic() + timeout

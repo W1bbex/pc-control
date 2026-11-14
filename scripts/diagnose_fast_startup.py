@@ -49,7 +49,8 @@ def check_last_boot_event():
             if name:
                 data[name] = el.text
 
-        boot_code = int(data.get("BootType", -1)) if "BootType" in data else None
+        boot_raw = str(data.get("BootType", "")).strip()
+        boot_code = int(boot_raw, 0) if boot_raw else None
         return boot_code, data
     except Exception as e:
         return None, str(e)

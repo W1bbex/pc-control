@@ -241,52 +241,71 @@ class PhysicalButtonManager:
         keyboard.append([{"text": "✖ Отмена", "callback_data": "physical_button"}])
         return {"inline_keyboard": keyboard}
 
-    def start_save_password(self, seq, chat_id, on_save_state_cb=None):
+    def start_save_password(self, seq, chat_id):
         cmd_id = self.mqtt.publish_esp_action("SET_PHYSICAL_PASSWORD", value=seq)
-        self.pending_command_id = cmd_id
-        self.pending_password_value = seq
-        self.pending_action_kind = "save"
+        if not cmd_id:
+            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup())
+            return None
+        with self._lock:
+            self.pending_command_id = cmd_id
+            self.pending_password_value = seq
+            self.pending_action_kind = "save"
         self.ui.send_message(chat_id, "⏳ Сохраняю пароль в ESP...")
+        return cmd_id
 
-    def start_delete_password(self, chat_id):
+    def start_delete_password(self, chat_id, message_id=None):
         cmd_id = self.mqtt.publish_esp_action("DELETE_PHYSICAL_PASSWORD")
-        self.pending_command_id = cmd_id
-        self.pending_password_value = None
-        self.pending_action_kind = "delete"
-        self.ui.send_message(chat_id, "⏳ Удаляю пароль из ESP...")
+        if not cmd_id:
+            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup(), message_id=message_id)
+            return None
+        with self._lock:
+            self.pending_command_id = cmd_id
+            self.pending_password_value = None
+            self.pending_action_kind = "delete"
+        self.ui.send_message(chat_id, "⏳ Удаляю пароль из ESP...", message_id=message_id)
+        return cmd_id
 
     def start_unlock_input(self, chat_id):
         cmd_id = self.mqtt.publish_esp_action("UNLOCK_PHYSICAL_INPUT")
-        self.pending_command_id = cmd_id
-        self.pending_password_value = None
-        self.pending_action_kind = "unlock_input"
+        if not cmd_id:
+            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup())
+            return None
+        with self._lock:
+            self.pending_command_id = cmd_id
+            self.pending_password_value = None
+            self.pending_action_kind = "unlock_input"
         self.ui.send_message(chat_id, "⏳ Снимаю блокировку физической кнопки...")
+        return cmd_id
 
     def handle_ack(self, ack_data, chat_id, on_state_change_cb=None):
         cmd_id = ack_data.get("id")
         result = ack_data.get("result")
 
-        if self.pending_command_id and cmd_id == self.pending_command_id:
+        with self._lock:
+            if not (self.pending_command_id and cmd_id == self.pending_command_id):
+                return
             action_kind = getattr(self, "pending_action_kind", "save")
+            pending_val = self.pending_password_value
             self.pending_command_id = None
             if result == "executed":
                 if action_kind == "save":
-                    self.saved_password = self.pending_password_value
-                    if on_state_change_cb:
-                        on_state_change_cb()
-                    self.ui.send_message(chat_id, "✅ Пароль физической кнопки сохранён в ESP.", reply_markup=self.physical_control_markup())
+                    self.saved_password = pending_val
                 elif action_kind == "delete":
                     self.saved_password = None
-                    if on_state_change_cb:
-                        on_state_change_cb()
-                    self.ui.send_message(chat_id, "✅ Пароль физической кнопки удалён.", reply_markup=self.physical_control_markup())
                 elif action_kind == "unlock_input":
                     self.esp_locked = False
-                    if on_state_change_cb:
-                        on_state_change_cb()
-                    self.ui.send_message(chat_id, "✅ Физическая кнопка разблокирована.", reply_markup=self.physical_control_markup())
-            else:
-                self.ui.send_message(chat_id, f"❌ ESP не выполнила действие: {result}", reply_markup=self.physical_control_markup())
+
+        if result == "executed":
+            if on_state_change_cb:
+                on_state_change_cb()
+            msgs = {
+                "save": "✅ Пароль физической кнопки сохранён в ESP.",
+                "delete": "✅ Пароль физической кнопки удалён.",
+                "unlock_input": "✅ Физическая кнопка разблокирована.",
+            }
+            self.ui.send_message(chat_id, msgs.get(action_kind, "✅ Готово."), reply_markup=self.physical_control_markup())
+        else:
+            self.ui.send_message(chat_id, f"❌ ESP не выполнила действие: {result}", reply_markup=self.physical_control_markup())
 
     def _handle_unlock_gesture_triggered(self, chat_id):
         eligible, reason = self.is_morse_unlock_eligible()
@@ -340,10 +359,14 @@ class PhysicalButtonManager:
             kind = "CLICK" if event_data.get("kind") == "click" else "HOLD"
             duration = event_data.get("duration_ms", 0)
             symbol = "C" if kind == "CLICK" else "H"
-            self.last_press_info = f"{kind.title()} ({duration} ms)"
+            with self._lock:
+                self.last_press_info = f"{kind.title()} ({duration} ms)"
+                cur_mode = self.mode
+                has_input_msg = bool(self.input_message_id)
+                active_msg_id = self.active_message_id
 
             # 1. Diagnostics mode
-            if self.mode == "test" or self.input_message_id:
+            if cur_mode == "test" or has_input_msg:
                 with self._lock:
                     self.input_entries.append(f"{kind.title()} {duration} ms")
                     self.input_entries = self.input_entries[-12:]
@@ -359,7 +382,7 @@ class PhysicalButtonManager:
                 return
 
             # 2. Live password recording mode via physical button
-            if self.mode == "record_password" and self.active_message_id:
+            if cur_mode == "record_password" and active_msg_id:
                 with self._lock:
                     if len(self.password_draft) < 12:
                         self.password_draft.append(symbol)
@@ -373,7 +396,7 @@ class PhysicalButtonManager:
                 return
 
             # 3. Live unlock pattern recording mode via physical button
-            if self.mode == "record_unlock_pattern" and self.active_message_id:
+            if cur_mode == "record_unlock_pattern" and active_msg_id:
                 with self._lock:
                     if len(self.unlock_draft) < 8:
                         self.unlock_draft.append(symbol)
@@ -445,9 +468,10 @@ class PhysicalButtonManager:
                 self._handle_unlock_gesture_triggered(chat_id)
 
         elif event_type == "success":
-            self.esp_locked = False
-            self.last_physical_morse_success_at = now
-            self.physical_morse_unlock_eligible = True
+            with self._lock:
+                self.esp_locked = False
+                self.last_physical_morse_success_at = now
+                self.physical_morse_unlock_eligible = True
             if self.on_state_change_cb:
                 self.on_state_change_cb()
             msg = (
@@ -458,12 +482,15 @@ class PhysicalButtonManager:
 
         elif event_type == "recorded":
             seq = event_data.get("sequence", "")
-            if seq:
-                self.password_draft = list(seq)
-            target_seq = "".join(self.password_draft) or seq
-            labels = self.format_password_display(target_seq)
-            self.mode = None
-            self.last_press_info = None
+            with self._lock:
+                if seq:
+                    self.password_draft = list(seq)
+                target_seq = "".join(self.password_draft) or seq
+                labels = self.format_password_display(target_seq)
+                self.mode = None
+                self.last_press_info = None
+                msg_id = self.active_message_id or None
+                self.active_message_id = None
             text = (
                 f"<b>🎙 Пароль на кнопке зафиксирован ({len(target_seq)} шагов):</b>\n\n"
                 f"<blockquote><b>{labels}</b></blockquote>\n\n"
@@ -476,37 +503,55 @@ class PhysicalButtonManager:
                     self.ui.back_button("physical_button"),
                 ]
             }
-            msg_id = self.active_message_id or None
-            self.active_message_id = None
             self.ui.send_message(chat_id, text, reply_markup=markup, message_id=msg_id)
 
         elif event_type == "failed":
-            if self.mode in ("test", "record_password", "record_unlock_pattern") or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0):
+            with self._lock:
+                suppress = (
+                    self.mode in ("test", "record_password", "record_unlock_pattern")
+                    or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0)
+                )
+            if suppress:
                 LOG.info("Suppressing ESP failed event caused by active diagnostic/record mode or recent unlock gesture, resetting ESP lock")
                 self.mqtt.publish_esp_action("UNLOCK_PHYSICAL_INPUT")
                 return
 
-            attempts = event_data.get("failed_attempts", 1)
-            if attempts >= 3 or event_data.get("locked"):
-                self.esp_locked = True
-                if self.on_state_change_cb:
-                    self.on_state_change_cb()
-            LOG.warning("Physical button wrong password attempt: %s/3 (locked=%s)", attempts, self.esp_locked)
+            raw_attempts = event_data.get("failed_attempts", 1)
+            try:
+                attempts = 1 if raw_attempts is None else int(raw_attempts)
+            except (TypeError, ValueError):
+                attempts = 1
+            save_needed = False
+            with self._lock:
+                if attempts >= 3 or event_data.get("locked"):
+                    self.esp_locked = True
+                    save_needed = True
+                locked_snapshot = self.esp_locked
+            if save_needed and self.on_state_change_cb:
+                self.on_state_change_cb()
+            LOG.warning("Physical button wrong password attempt: %s/3 (locked=%s)", attempts, locked_snapshot)
             msg = f"❌ <b>Неверный пароль на физической кнопке</b> (попытка {attempts} из 3)."
             self.ui.send_message(chat_id, msg, reply_markup=self.physical_control_markup())
 
         elif event_type in {"locked", "record_too_short", "record_timeout"}:
             if event_type == "locked":
-                if self.mode in ("test", "record_password", "record_unlock_pattern") or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0):
+                with self._lock:
+                    suppress = (
+                        self.mode in ("test", "record_password", "record_unlock_pattern")
+                        or (now - getattr(self, "last_unlock_gesture_at", 0.0) <= 10.0)
+                    )
+                if suppress:
                     LOG.info("Suppressing ESP locked event caused by active diagnostic/record mode, resetting lock")
                     self.mqtt.publish_esp_action("UNLOCK_PHYSICAL_INPUT")
                     return
-                self.esp_locked = True
+                with self._lock:
+                    self.esp_locked = True
                 if self.on_state_change_cb:
                     self.on_state_change_cb()
             elif event_type in ("record_too_short", "record_timeout"):
-                self.mode = None
-                self.active_message_id = None
+                with self._lock:
+                    self.mode = None
+                    self.active_message_id = None
 
             messages = {
                 "locked": "🔒 <b>Физическая кнопка заблокирована</b> после 3 ошибок.",

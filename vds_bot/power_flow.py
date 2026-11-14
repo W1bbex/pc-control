@@ -58,6 +58,9 @@ class PowerFlowManager:
         self.win_online_at = None
         self.logon_ready_at = None
         self.unlocked_at = None
+        self.selecting_mode = False
+        self._starting_power_on = False
+        self._unlock_dispatch_in_flight = False
         self._lock = threading.Lock()
 
         self.load_state()
@@ -146,8 +149,14 @@ class PowerFlowManager:
                 except Exception:
                     pass
                 os.replace(temp, FLOW_STATE_PATH)
+                return True
             except Exception:
                 LOG.exception("Could not save flow_state.json")
+                try:
+                    temp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False
 
     def reset_flow(self):
         with self._lock:
@@ -180,12 +189,17 @@ class PowerFlowManager:
                 except Exception:
                     pass
 
-    def start_power_on(self, chat_id):
+    def start_power_on(self, chat_id, message_id=None):
         with self._lock:
-            if self.stage == PowerFlowStage.POWERING_ON:
+            if self.stage == PowerFlowStage.POWERING_ON or getattr(self, "_starting_power_on", False):
                 LOG.warning("start_power_on ignored: already in POWERING_ON stage")
                 return
+            self._starting_power_on = True
+            if message_id:
+                self.message_id = message_id
+            mid = self.message_id
 
+        try:
             # Hardware protection: NEVER pulse power button if PC is already on/booting
             pc_state = self.mqtt.health.evaluate_pc_state()
             state_str = getattr(getattr(pc_state, "state", None), "value", str(getattr(pc_state, "state", "")))
@@ -216,7 +230,7 @@ class PowerFlowManager:
                     chat_id,
                     text,
                     reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status),
-                    message_id=self.message_id
+                    message_id=mid
                 )
                 return
 
@@ -231,22 +245,23 @@ class PowerFlowManager:
                     chat_id,
                     text,
                     reply_markup=self.ui.power_menu_markup(pc_state=pc_state, session=self.mqtt.system_session, system_status=self.mqtt.system_status),
-                    message_id=self.message_id
+                    message_id=mid
                 )
                 return
 
-            self.flow_id = str(uuid.uuid4())
-            self.chat_id = chat_id
-            self.stage = PowerFlowStage.POWERING_ON
-            self.created_at = time.time()
-            self.expires_at = self.created_at + FLOW_TTL_SECONDS
-            self.unlock_attempts = 0
-            self.pending_unlock_command_id = None
-            self.workspace_cancelled = False
-            self.last_card_update_at = self.created_at
-            self.win_online_at = None
-            self.logon_ready_at = None
-            self.unlocked_at = None
+            with self._lock:
+                self.flow_id = str(uuid.uuid4())
+                self.chat_id = chat_id
+                self.stage = PowerFlowStage.POWERING_ON
+                self.created_at = time.time()
+                self.expires_at = self.created_at + FLOW_TTL_SECONDS
+                self.unlock_attempts = 0
+                self.pending_unlock_command_id = None
+                self.workspace_cancelled = False
+                self.last_card_update_at = self.created_at
+                self.win_online_at = None
+                self.logon_ready_at = None
+                self.unlocked_at = None
 
             # Send LED command via ESP if enabled by user
             led_state = getattr(getattr(self, "app", None), "user_led_state", "on")
@@ -256,6 +271,9 @@ class PowerFlowManager:
                     self.mqtt.publish_esp_action("LED_COLOR", value=user_color)
                 else:
                     self.mqtt.publish_esp_action("LED_ON")
+        finally:
+            with self._lock:
+                self._starting_power_on = False
 
         self._update_launch_card(force=True, is_initial=True)
         self.save_state()
@@ -283,49 +301,53 @@ class PowerFlowManager:
         return None, None, None
 
     def _update_launch_card(self, force=False, is_initial=False, chat_id=None):
-        if self.stage not in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
-            return
-        if getattr(self, "selecting_mode", False):
-            return
-        cid = chat_id or self.chat_id
-        if not cid:
-            return
-        self.chat_id = cid
-        mid = self.message_id
-
         now = time.time()
-        if not force and not is_initial and (now - getattr(self, "last_card_update_at", 0.0) < 2.5):
-            return
+        with self._lock:
+            if self.stage not in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
+                return
+            if getattr(self, "selecting_mode", False):
+                return
+            cid = chat_id or self.chat_id
+            if not cid:
+                return
+            self.chat_id = cid
+            mid = self.message_id
 
-        elapsed = max(0, int(now - getattr(self, "created_at", now)))
-        is_delayed = elapsed >= 60
+            if not force and not is_initial and (now - getattr(self, "last_card_update_at", 0.0) < 2.5):
+                return
 
-        target_mode, target_detail, target_label = self._get_target_mode_info()
+            stage = self.stage
+            created = getattr(self, "created_at", now)
+            elapsed = max(0, int(now - created))
+            is_delayed = elapsed >= 60
 
-        created = getattr(self, "created_at", now)
-        win_elapsed = (int(self.win_online_at - created) if getattr(self, "win_online_at", None) else None)
-        logon_elapsed = (int(self.logon_ready_at - created) if getattr(self, "logon_ready_at", None) else None)
-        unlocked_elapsed = (int(self.unlocked_at - created) if getattr(self, "unlocked_at", None) else None)
+            target_mode, target_detail, target_label = self._get_target_mode_info()
+
+            win_elapsed = (int(self.win_online_at - created) if getattr(self, "win_online_at", None) else None)
+            logon_elapsed = (int(self.logon_ready_at - created) if getattr(self, "logon_ready_at", None) else None)
+            unlocked_elapsed = (int(self.unlocked_at - created) if getattr(self, "unlocked_at", None) else None)
+            unlock_attempts = self.unlock_attempts
+            self.last_card_update_at = now
 
         sys_status = getattr(self.mqtt, "system_status", "offline")
         sys_session = getattr(self.mqtt, "system_session", "unknown")
 
         if hasattr(self.ui, "launch_card_text") and hasattr(self.ui, "launch_card_markup"):
             text = self.ui.launch_card_text(
-                stage=self.stage,
+                stage=stage,
                 elapsed_seconds=elapsed,
                 session_status=sys_session,
                 system_status=sys_status,
                 target_mode=target_mode,
                 target_detail=target_detail,
-                unlock_attempts=self.unlock_attempts,
+                unlock_attempts=unlock_attempts,
                 win_online_elapsed=win_elapsed,
                 logon_ready_elapsed=logon_elapsed,
                 unlocked_elapsed=unlocked_elapsed,
                 is_delayed=is_delayed,
             )
             markup = self.ui.launch_card_markup(
-                stage=self.stage,
+                stage=stage,
                 target_mode=target_mode,
                 target_label=target_label,
                 show_emergency=is_delayed,
@@ -334,131 +356,185 @@ class PowerFlowManager:
             text = "<b>ПК запускается...</b>"
             markup = self._get_unlocking_markup()
 
-        self.last_card_update_at = now
         res = self.ui.send_message(cid, text, reply_markup=markup, message_id=mid)
         if res and res.get("message_id") and not mid:
-            self.message_id = res["message_id"]
-            self.save_state()
+            updated_msg_id = False
+            with self._lock:
+                if self.stage != PowerFlowStage.IDLE and not self.message_id:
+                    self.message_id = res["message_id"]
+                    updated_msg_id = True
+            if updated_msg_id:
+                self.save_state()
 
     def tick(self, now=None):
         now = time.time() if now is None else float(now)
         if self.check_timeout(now):
             return True
-        if self.stage in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
+        with self._lock:
+            stage = self.stage
+        if stage in (PowerFlowStage.POWERING_ON, PowerFlowStage.UNLOCKING):
             self._update_launch_card(force=False)
         return False
 
-    def handle_unlock_decision(self, choice, chat_id):
+    def handle_unlock_decision(self, choice, chat_id, message_id=None):
         if choice == "flow_unlock_no":
+            with self._lock:
+                mid = self.message_id or message_id
             text = (
                 "<b>ПК запускается</b>\n\n"
                 "Разблокировка Windows пропущена."
             )
             markup = {"inline_keyboard": [self.ui.back_button("menu")]}
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
+            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
             self.reset_flow()
             return
 
         if choice in {"flow_unlock_yes", "flow_unlock_and_workspace", "flow_unlock_and_game"}:
-            self.stage = PowerFlowStage.UNLOCKING
-            self.pending_unlock_command_id = None
-            if choice == "flow_unlock_and_workspace":
-                self.auto_launch_workspace = True
-                self.auto_launch_game = False
-                if not getattr(self, "target_workspace_vpn", None):
-                    self.target_workspace_vpn = "incy"
-            elif choice == "flow_unlock_and_game":
-                self.auto_launch_game = True
-                self.auto_launch_workspace = False
-            elif choice == "flow_unlock_yes":
-                self.auto_launch_workspace = False
-                self.auto_launch_game = False
-            if chat_id:
-                self.chat_id = chat_id
+            now = time.time()
+            with self._lock:
+                if not self.flow_id:
+                    self.flow_id = str(uuid.uuid4())
+                if not self.created_at:
+                    self.created_at = now
+                self.expires_at = now + FLOW_TTL_SECONDS
+                self.unlock_attempts = 0
+                self.stage = PowerFlowStage.UNLOCKING
+                self.pending_unlock_command_id = None
+                if choice == "flow_unlock_and_workspace":
+                    self.auto_launch_workspace = True
+                    self.auto_launch_game = False
+                    if not getattr(self, "target_workspace_vpn", None):
+                        self.target_workspace_vpn = "incy"
+                elif choice == "flow_unlock_and_game":
+                    self.auto_launch_game = True
+                    self.auto_launch_workspace = False
+                elif choice == "flow_unlock_yes":
+                    self.auto_launch_workspace = False
+                    self.auto_launch_game = False
+                if chat_id:
+                    self.chat_id = chat_id
             self.save_state()
             self._update_launch_card(force=True, chat_id=chat_id)
             self.check_and_trigger_unlock(chat_id)
 
+    @staticmethod
+    def _btn(text, style, callback_data, icon=None):
+        btn = {"text": text, "style": style, "callback_data": callback_data}
+        if icon:
+            btn["icon_custom_emoji_id"] = icon
+        return btn
+
+    @staticmethod
+    def _invoke_cb_filtered(cb, cb_name, chat_id, card_message_id, optional_kwargs, **fixed_kwargs):
+        if not cb:
+            return
+        try:
+            import inspect
+            sig = inspect.signature(cb)
+            accepts_var_kw = any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
+            kwargs = dict(fixed_kwargs)
+            for k, v in optional_kwargs.items():
+                if accepts_var_kw or k in sig.parameters:
+                    kwargs[k] = v
+            cb(chat_id, card_message_id=card_message_id, **kwargs)
+        except Exception:
+            LOG.exception("Failed to invoke %s", cb_name)
+
     def _get_unlocking_markup(self):
-        check_icon = ICONS.get("check")
-        apps_icon = ICONS.get("apps")
-        game_icon = ICONS.get("game")
-        cross_icon = ICONS.get("cross")
+        with self._lock:
+            auto_game = getattr(self, "auto_launch_game", False)
+            auto_workspace = getattr(self, "auto_launch_workspace", False)
+        cancel_btn = self._btn("Отмена", "danger", "flow_unlock_no", ICONS.get("cross"))
+        if auto_game:
+            top_btn = self._btn("Игра запланирована", "success", "noop", ICONS.get("game") or ICONS.get("check"))
+        elif auto_workspace:
+            top_btn = self._btn("Сетап запланирован", "success", "noop", ICONS.get("check"))
+        else:
+            top_btn = self._btn("+ Запустить рабочий сетап", "primary", "flow_unlock_and_workspace", ICONS.get("apps"))
+        return {"inline_keyboard": [[top_btn], [cancel_btn]]}
 
-        cancel_btn = {"text": "Отмена", "style": "danger", "callback_data": "flow_unlock_no"}
-        if cross_icon:
-            cancel_btn["icon_custom_emoji_id"] = cross_icon
+    def set_auto_launch_workspace(self, enable=True, vpn="incy", chat_id=None, message_id=None):
+        cid = None
+        now = time.time()
+        with self._lock:
+            self.auto_launch_workspace = bool(enable)
+            if enable:
+                self.flow_id = self.flow_id or str(uuid.uuid4())
+                if not self.created_at:
+                    self.created_at = now
+                self.expires_at = now + FLOW_TTL_SECONDS
+                self.unlock_attempts = 0
+                self.workspace_cancelled = False
+                self.auto_launch_game = False
+                self.target_workspace_vpn = str(vpn)
+                self.stage = PowerFlowStage.UNLOCKING
+                self.pending_unlock_command_id = None
+                if chat_id:
+                    self.chat_id = chat_id
+                if message_id is not None:
+                    self.message_id = message_id
+                cid = chat_id or self.chat_id
+        self.save_state()
+        if enable and cid:
+            self._update_launch_card(force=True, chat_id=cid)
+            self.check_and_trigger_unlock(cid)
 
-        if getattr(self, "auto_launch_game", False):
-            sched_btn = {"text": "Игра запланирована", "style": "success", "callback_data": "noop"}
-            if game_icon or check_icon:
-                sched_btn["icon_custom_emoji_id"] = game_icon or check_icon
-            return {
-                "inline_keyboard": [
-                    [sched_btn],
-                    [cancel_btn],
-                ]
-            }
-
-        if getattr(self, "auto_launch_workspace", False):
-            sched_btn = {"text": "Сетап запланирован", "style": "success", "callback_data": "noop"}
-            if check_icon:
-                sched_btn["icon_custom_emoji_id"] = check_icon
-            return {
-                "inline_keyboard": [
-                    [sched_btn],
-                    [cancel_btn],
-                ]
-            }
-
-        start_btn = {"text": "+ Запустить рабочий сетап", "style": "primary", "callback_data": "flow_unlock_and_workspace"}
-        if apps_icon:
-            start_btn["icon_custom_emoji_id"] = apps_icon
-        return {
-            "inline_keyboard": [
-                [start_btn],
-                [cancel_btn],
-            ]
-        }
-
-    def set_auto_launch_workspace(self, enable=True, vpn="incy", chat_id=None):
-        self.auto_launch_workspace = bool(enable)
-        if enable:
-            self.auto_launch_game = False
-            self.target_workspace_vpn = str(vpn)
+    def set_auto_launch_game(self, game="gta5", vpn="incy", chat_id=None, message_id=None):
+        now = time.time()
+        with self._lock:
+            self.flow_id = self.flow_id or str(uuid.uuid4())
+            if not self.created_at:
+                self.created_at = now
+            self.expires_at = now + FLOW_TTL_SECONDS
+            self.unlock_attempts = 0
+            self.workspace_cancelled = False
+            self.auto_launch_game = True
+            self.auto_launch_workspace = False
+            self.target_game = str(game)
+            self.target_game_vpn = str(vpn)
             self.stage = PowerFlowStage.UNLOCKING
             self.pending_unlock_command_id = None
-            self.save_state()
-
-            vpn_label = "INCY VPN" if vpn == "incy" else "Happ VPN"
-            text = (
-                "<b>Ожидаю экран входа Windows...</b>\n\n"
-                f"<i>Режим 'Разблок + Сетап' ({vpn_label}).\n"
-                "Запуск начнётся сразу после разблокировки.</i>"
-            )
-            markup = self._get_unlocking_markup()
+            if chat_id:
+                self.chat_id = chat_id
+            if message_id is not None:
+                self.message_id = message_id
             cid = chat_id or self.chat_id
-            if cid:
-                self._update_launch_card(force=True)
-                self.check_and_trigger_unlock(cid)
         self.save_state()
 
-    def set_auto_launch_game(self, game="gta5", vpn="incy", chat_id=None):
-        self.auto_launch_game = True
-        self.auto_launch_workspace = False
-        self.target_game = str(game)
-        self.target_game_vpn = str(vpn)
-        self.stage = PowerFlowStage.UNLOCKING
-        self.pending_unlock_command_id = None
-        if chat_id:
-            self.chat_id = chat_id
-        self.save_state()
-
-        cid = chat_id or self.chat_id
         if cid:
             self._update_launch_card(force=True, chat_id=cid)
             self.check_and_trigger_unlock(cid)
+
+    def prepare_unlock_waiting(self, chat_id, auto_launch_workspace=False):
+        now = time.time()
+        with self._lock:
+            self.flow_id = self.flow_id or str(uuid.uuid4())
+            self.created_at = self.created_at or now
+            self.expires_at = now + FLOW_TTL_SECONDS
+            self.stage = PowerFlowStage.UNLOCKING
+            self.unlock_attempts = 0
+            self.pending_unlock_command_id = None
+            self.workspace_cancelled = False
+            if auto_launch_workspace:
+                self.auto_launch_workspace = True
+            self.chat_id = chat_id
         self.save_state()
+
+    def start_direct_setup(self, chat_id, message_id=None, prefix="ws"):
+        now = time.time()
+        ws_id = f"{prefix}-{int(now)}"
+        with self._lock:
+            self.flow_id = self.flow_id or str(uuid.uuid4())
+            self.created_at = self.created_at or now
+            self.expires_at = now + FLOW_TTL_SECONDS
+            self.chat_id = chat_id
+            if message_id is not None:
+                self.message_id = message_id
+            self.stage = PowerFlowStage.WORKSPACE_RUNNING
+            self.workspace_cancelled = False
+            self.active_workspace_id = ws_id
+        self.save_state()
+        return ws_id
 
     def start_reboot_flow(self, chat_id, message_id=None, unlock=True):
         with self._lock:
@@ -488,15 +564,8 @@ class PowerFlowManager:
             "Команда на перезагрузку отправлена.\n"
             f"{detail_text}"
         )
-        cancel_btn = {"text": "✖ Отмена ожидания", "style": "danger", "callback_data": "flow_reboot_cancel"}
-        if ICONS.get("cross"):
-            cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
-
-        markup = {
-            "inline_keyboard": [
-                [cancel_btn]
-            ]
-        }
+        cancel_btn = self._btn("✖ Отмена ожидания", "danger", "flow_reboot_cancel", ICONS.get("cross"))
+        markup = {"inline_keyboard": [[cancel_btn]]}
         res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
         if res and res.get("message_id"):
             with self._lock:
@@ -549,15 +618,21 @@ class PowerFlowManager:
         self.check_and_trigger_unlock(chat_id)
 
     def check_and_trigger_unlock(self, chat_id):
-        if self.stage != PowerFlowStage.UNLOCKING:
-            return
-
         session = self.mqtt.system_session
         system_online = self.mqtt.system_status == "online"
+
+        with self._lock:
+            stage = self.stage
+            pending_cmd = self.pending_unlock_command_id
+            attempts = self.unlock_attempts
+
         LOG.info(
             "check_and_trigger_unlock: system_online=%s, session=%s, pending_cmd=%s, attempts=%d",
-            system_online, session, self.pending_unlock_command_id, self.unlock_attempts
+            system_online, session, pending_cmd, attempts
         )
+
+        if stage != PowerFlowStage.UNLOCKING:
+            return
 
         if session == "unlocked":
             # Session is already unlocked!
@@ -565,33 +640,58 @@ class PowerFlowManager:
             return
 
         # Note: no_console is NOT a ready login screen (ready states are login_screen or locked)
-        if system_online and session in {"login_screen", "locked"}:
-            now = time.time()
+        if not (system_online and session in {"login_screen", "locked"}):
+            return
+
+        now = time.time()
+        action = None
+        fail_reason = None
+        with self._lock:
+            if self.stage != PowerFlowStage.UNLOCKING:
+                return
             if self.pending_unlock_command_id:
                 sent_at = getattr(self, "pending_unlock_sent_at", 0.0)
                 if sent_at > 0.0 and (now - sent_at > 45.0):
                     LOG.warning("Unlock command %s timed out waiting for ACK after 45s", self.pending_unlock_command_id)
                     self.pending_unlock_command_id = None
                     if self.unlock_attempts >= 2:
-                        self.on_unlock_failed(chat_id, "Таймаут ответа от агента при разблокировке.")
-                        return
+                        action = "fail"
+                        fail_reason = "Таймаут ответа от агента при разблокировке."
                 else:
                     LOG.info("Already waiting for an in-flight unlock command ACK (%s)", self.pending_unlock_command_id)
                     return
 
-            if self.unlock_attempts >= 2:
-                self.on_unlock_failed(chat_id, "Не удалось разблокировать Windows за 2 попытки.")
-                return
+            if action is None:
+                if getattr(self, "_unlock_dispatch_in_flight", False):
+                    LOG.info("Unlock dispatch already in progress; skipping duplicate trigger")
+                    return
+                if self.unlock_attempts >= 2:
+                    action = "fail"
+                    fail_reason = "Не удалось разблокировать Windows за 2 попытки."
+                else:
+                    self.unlock_attempts += 1
+                    self._unlock_dispatch_in_flight = True
+                    action = "dispatch"
 
-            self.unlock_attempts += 1
+        if action == "fail":
+            self.on_unlock_failed(chat_id, fail_reason)
+            return
+
+        try:
             self.save_state()
             self._update_launch_card(force=True)
-
+            with self._lock:
+                if self.stage != PowerFlowStage.UNLOCKING:
+                    return
             # Send unlock command to boot_agent.py
             cmd_id = self.mqtt.publish_system_action("unlock")
             LOG.info("Sent unlock action to boot_agent.py (cmd_id=%s)", cmd_id)
-            self.pending_unlock_command_id = cmd_id
-            self.pending_unlock_sent_at = now
+            with self._lock:
+                self.pending_unlock_command_id = cmd_id
+                self.pending_unlock_sent_at = now
+        finally:
+            with self._lock:
+                self._unlock_dispatch_in_flight = False
 
     def handle_ack(self, ack_data):
         cmd_id = ack_data.get("id")
@@ -599,215 +699,221 @@ class PowerFlowManager:
         data = ack_data.get("data") or {}
 
         matched = False
+        attempts = 0
+        cid = 0
+        mid = None
         with self._lock:
             if self.stage == PowerFlowStage.UNLOCKING and cmd_id == self.pending_unlock_command_id:
                 self.pending_unlock_command_id = None
                 matched = True
+                attempts = self.unlock_attempts
+                cid = self.chat_id or 0
+                mid = self.message_id
 
         if matched:
-
             sess = data.get("session") or self.mqtt.system_session
             if result == "executed":
                 if sess == "unlocked":
-                    self.on_unlock_success(self.chat_id or 0)
+                    self.on_unlock_success(cid)
                 else:
                     LOG.info(
                         "Unlock attempt %d keystrokes injected successfully. Awaiting session update (current session=%s)...",
-                        self.unlock_attempts,
+                        attempts,
                         sess,
                     )
             elif result == "busy":
                 LOG.info("System agent reported unlock busy (already running)")
             else:
-                LOG.warning("Unlock attempt %d ACK failed: result=%s session=%s", self.unlock_attempts, result, sess)
-                if self.unlock_attempts < 2:
+                LOG.warning("Unlock attempt %d ACK failed: result=%s session=%s", attempts, result, sess)
+                if attempts < 2:
                     text = (
                         "<b>⚠️ Первая попытка ввода пароля не подтверждена.</b>\n\n"
                         "Ожидаю стабилизации экрана входа перед второй попыткой..."
                     )
-                    self.ui.send_message(self.chat_id or 0, text, reply_markup=None, message_id=self.message_id)
+                    self.ui.send_message(cid, text, reply_markup=None, message_id=mid)
                 else:
-                    self.on_unlock_failed(self.chat_id or 0, f"Разблокировка не подтверждена ({result}).")
+                    self.on_unlock_failed(cid, f"Разблокировка не подтверждена ({result}).")
 
     def on_system_session_update(self, session, chat_id):
         """
         CRITICAL: Sole proof of unlocked session is system_session == 'unlocked'.
         desktop-agent online status is NEVER used as proof of session unlock.
         """
-        LOG.info("on_system_session_update: session=%s, stage=%s, pending_cmd=%s, attempts=%d", session, self.stage, self.pending_unlock_command_id, self.unlock_attempts)
         now = time.time()
         sys_status = getattr(self.mqtt, "system_status", "unknown")
-        if sys_status == "online" and not getattr(self, "win_online_at", None):
-            self.win_online_at = now
-        if session in {"login_screen", "locked", "unlocked"} and not getattr(self, "logon_ready_at", None):
-            self.logon_ready_at = now
-        if session == "unlocked" and not getattr(self, "unlocked_at", None):
-            self.unlocked_at = now
+        desk_status = getattr(self.mqtt, "desktop_status", None)
 
-        if self.stage == PowerFlowStage.POWERING_ON:
-            self._update_launch_card(force=True)
+        action = None
+        save_needed = False
+        update_power_card = False
+        mid = None
 
-        if self.stage == PowerFlowStage.REBOOTING:
-            now = time.time()
-            sys_status = self.mqtt.system_status
-            desk_status = getattr(self.mqtt, "desktop_status", None)
-            is_reboot_elapsed = (now - getattr(self, "reboot_started_at", 0.0) >= 25.0)
-
-            if sys_status == "offline" or desk_status == "offline" or session in ("unknown", "no_console"):
-                if not getattr(self, "reboot_offline_detected", False):
-                    self.reboot_offline_detected = True
-                    LOG.info("Reboot flow: offline state confirmed.")
-                    self.save_state()
-                if sys_status == "offline":
-                    return
-
-            is_back_online = (
-                sys_status == "online"
-                and (
-                    getattr(self, "reboot_offline_detected", False)
-                    or (is_reboot_elapsed and session in {"login_screen", "locked"})
-                )
-                and session in {"login_screen", "locked", "unlocked"}
+        with self._lock:
+            LOG.info(
+                "on_system_session_update: session=%s, stage=%s, pending_cmd=%s, attempts=%d",
+                session, self.stage, self.pending_unlock_command_id, self.unlock_attempts
             )
+            if sys_status == "online" and not getattr(self, "win_online_at", None):
+                self.win_online_at = now
+            if session in {"login_screen", "locked", "unlocked"} and not getattr(self, "logon_ready_at", None):
+                self.logon_ready_at = now
+            if session == "unlocked" and not getattr(self, "unlocked_at", None):
+                self.unlocked_at = now
 
-            if is_back_online:
-                LOG.info("PC returned online after reboot (session=%s, unlock=%s)", session, getattr(self, "reboot_with_unlock", False))
-                if getattr(self, "reboot_with_unlock", False):
-                    self.stage = PowerFlowStage.UNLOCKING
-                    self.unlock_attempts = 0
-                    self.pending_unlock_command_id = None
-                    self.save_state()
-                    if session == "unlocked":
-                        self.on_unlock_success(chat_id)
+            if self.stage == PowerFlowStage.POWERING_ON:
+                if session == "unlocked":
+                    if self.auto_launch_workspace or self.auto_launch_game:
+                        action = "unlock_success"
+                    elif not getattr(self, "selecting_mode", False):
+                        action = "unlock_success_manual"
                     else:
-                        text = (
-                            "<b>ПК перезагрузился!</b>\n\n"
-                            "Ожидаю готовность экрана входа Windows для ввода пароля..."
-                        )
-                        self.ui.send_message(chat_id, text, reply_markup=self._get_unlocking_markup(), message_id=self.message_id)
-                        self.check_and_trigger_unlock(chat_id)
+                        update_power_card = True
                 else:
-                    text = (
-                        "<b>ПК успешно перезагружен!</b>\n\n"
-                        f"Состояние: {session}"
-                    )
-                    lock_btn = {"text": "Разблокировать Windows", "style": "success", "callback_data": "unlock_windows_manual"}
-                    if ICONS.get("lock"):
-                        lock_btn["icon_custom_emoji_id"] = ICONS.get("lock")
-                    markup = {
-                        "inline_keyboard": [
-                            [lock_btn],
-                            self.ui.back_button("menu"),
-                        ]
-                    }
-                    self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
-                    self.reset_flow()
-                return
+                    update_power_card = True
 
-        elif self.stage == PowerFlowStage.UNLOCKING:
-            if session == "unlocked":
-                self.on_unlock_success(chat_id)
-            elif session in {"login_screen", "locked"}:
-                if not self.pending_unlock_command_id and self.unlock_attempts < 2:
-                    self.check_and_trigger_unlock(chat_id)
-            elif session in {"no_console", "unknown"}:
-                LOG.info("PC boot session '%s' reported, waiting for login_screen/locked...", session)
-        elif self.stage == PowerFlowStage.UNLOCK_FAILED:
-            if session == "unlocked":
-                LOG.info("Session became unlocked manually after unlock failure, auto-recovering power flow")
-                self.on_unlock_success(chat_id, manual=True)
+            if self.stage == PowerFlowStage.REBOOTING:
+                is_reboot_elapsed = (now - getattr(self, "reboot_started_at", 0.0) >= 25.0)
+
+                if sys_status == "offline" or (sys_status != "online" and session in ("unknown", "no_console")):
+                    if not getattr(self, "reboot_offline_detected", False):
+                        self.reboot_offline_detected = True
+                        LOG.info("Reboot flow: offline state confirmed.")
+                        save_needed = True
+                    if sys_status == "offline":
+                        action = "return"
+
+                if action is None:
+                    is_back_online = (
+                        sys_status == "online"
+                        and (
+                            getattr(self, "reboot_offline_detected", False)
+                            or (is_reboot_elapsed and session in {"login_screen", "locked"})
+                        )
+                        and session in {"login_screen", "locked", "unlocked"}
+                    )
+                    if is_back_online:
+                        LOG.info("PC returned online after reboot (session=%s, unlock=%s)", session, getattr(self, "reboot_with_unlock", False))
+                        mid = self.message_id
+                        if getattr(self, "reboot_with_unlock", False):
+                            self.stage = PowerFlowStage.UNLOCKING
+                            self.unlock_attempts = 0
+                            self.pending_unlock_command_id = None
+                            save_needed = True
+                            action = "unlock_success" if session == "unlocked" else "reboot_unlock_wait"
+                        else:
+                            self.stage = PowerFlowStage.IDLE
+                            action = "reboot_done"
+                    else:
+                        action = "return"
+
+            elif self.stage == PowerFlowStage.UNLOCKING:
+                if session == "unlocked":
+                    action = "unlock_success"
+                elif session in {"login_screen", "locked"}:
+                    if not self.pending_unlock_command_id and self.unlock_attempts < 2:
+                        action = "check_unlock"
+                elif session in {"no_console", "unknown"}:
+                    LOG.info("PC boot session '%s' reported, waiting for login_screen/locked...", session)
+            elif self.stage == PowerFlowStage.UNLOCK_FAILED:
+                if session == "unlocked":
+                    LOG.info("Session became unlocked manually after unlock failure, auto-recovering power flow")
+                    action = "unlock_success_manual"
+
+        if update_power_card:
+            self._update_launch_card(force=True)
+        if save_needed:
+            self.save_state()
+
+        if action == "unlock_success":
+            self.on_unlock_success(chat_id)
+        elif action == "unlock_success_manual":
+            self.on_unlock_success(chat_id, manual=True)
+        elif action == "check_unlock":
+            self.check_and_trigger_unlock(chat_id)
+        elif action == "reboot_unlock_wait":
+            text = (
+                "<b>ПК перезагрузился!</b>\n\n"
+                "Ожидаю готовность экрана входа Windows для ввода пароля..."
+            )
+            self.ui.send_message(chat_id, text, reply_markup=self._get_unlocking_markup(), message_id=mid)
+            self.check_and_trigger_unlock(chat_id)
+        elif action == "reboot_done":
+            text = f"<b>ПК успешно перезагружен!</b>\n\nСостояние: {session}"
+            lock_btn = self._btn("Разблокировать Windows", "success", "unlock_windows_manual", ICONS.get("lock"))
+            markup = {"inline_keyboard": [[lock_btn], self.ui.back_button("menu")]}
+            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
+            self.reset_flow()
 
     def on_unlock_success(self, chat_id, manual=False):
-        if getattr(self, "auto_launch_game", False) and getattr(self, "target_game", None):
-            game_key = self.target_game
-            vpn_key = getattr(self, "target_game_vpn", None) or "incy"
-            self.auto_launch_game = False
-            self.stage = PowerFlowStage.WORKSPACE_RUNNING
-            self.workspace_cancelled = False
-            self.active_workspace_id = f"game-{int(time.time())}"
-            self.save_state()
-            if self.on_game_start_cb:
-                try:
-                    import inspect
-                    sig = inspect.signature(self.on_game_start_cb)
-                    if "workspace_id" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
-                        self.on_game_start_cb(
-                            chat_id,
-                            card_message_id=self.message_id,
-                            game=game_key,
-                            vpn=vpn_key,
-                            workspace_id=self.active_workspace_id,
-                        )
-                    else:
-                        self.on_game_start_cb(
-                            chat_id,
-                            card_message_id=self.message_id,
-                            game=game_key,
-                            vpn=vpn_key,
-                        )
-                except Exception:
-                    LOG.exception("Failed to invoke on_game_start_cb")
+        mode = None
+        game_key = None
+        vpn_key = None
+        ws_id = None
+        mid = None
+
+        with self._lock:
+            if self.stage in (PowerFlowStage.WORKSPACE_RUNNING, PowerFlowStage.WAITING_WORKSPACE_DECISION):
+                return
+            mid = self.message_id
+            if getattr(self, "auto_launch_game", False) and getattr(self, "target_game", None):
+                mode = "game"
+                game_key = self.target_game
+                vpn_key = getattr(self, "target_game_vpn", None) or "incy"
+                self.auto_launch_game = False
+                self.stage = PowerFlowStage.WORKSPACE_RUNNING
+                self.workspace_cancelled = False
+                ws_id = f"game-{int(time.time())}"
+                self.active_workspace_id = ws_id
+            elif getattr(self, "auto_launch_workspace", False):
+                mode = "workspace"
+                vpn_key = getattr(self, "target_workspace_vpn", None) or "incy"
+                self.auto_launch_workspace = False
+                self.stage = PowerFlowStage.WORKSPACE_RUNNING
+                self.workspace_cancelled = False
+                ws_id = f"ws-{int(time.time())}"
+                self.active_workspace_id = ws_id
+            else:
+                mode = "decision"
+                self.stage = PowerFlowStage.WAITING_WORKSPACE_DECISION
+                self.auto_launch_workspace = False
+
+        self.save_state()
+
+        if mode == "game":
+            self._invoke_cb_filtered(
+                self.on_game_start_cb, "on_game_start_cb", chat_id, mid,
+                {"workspace_id": ws_id}, game=game_key, vpn=vpn_key,
+            )
             return
 
-        if getattr(self, "auto_launch_workspace", False):
-            vpn_key = getattr(self, "target_workspace_vpn", None) or "incy"
-            self.auto_launch_workspace = False
-            self.stage = PowerFlowStage.WORKSPACE_RUNNING
-            self.workspace_cancelled = False
-            self.active_workspace_id = f"ws-{int(time.time())}"
-            self.save_state()
-            if self.on_workspace_start_cb:
-                try:
-                    import inspect
-                    sig = inspect.signature(self.on_workspace_start_cb)
-                    if "vpn" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
-                        self.on_workspace_start_cb(
-                            chat_id,
-                            card_message_id=self.message_id,
-                            workspace_id=self.active_workspace_id,
-                            vpn=vpn_key,
-                        )
-                    else:
-                        self.on_workspace_start_cb(
-                            chat_id,
-                            card_message_id=self.message_id,
-                            workspace_id=self.active_workspace_id,
-                        )
-                except Exception:
-                    LOG.exception("Failed to invoke on_workspace_start_cb")
+        if mode == "workspace":
+            self._invoke_cb_filtered(
+                self.on_workspace_start_cb, "on_workspace_start_cb", chat_id, mid,
+                {"vpn": vpn_key}, workspace_id=ws_id,
+            )
             return
 
         status_title = "<b>ℹ️ Windows разблокирована вручную.</b>" if manual else "<b>✅ Windows разблокирована!</b>"
-        
-        self.stage = PowerFlowStage.WAITING_WORKSPACE_DECISION
-        self.auto_launch_workspace = False
-        self.save_state()
-
         happ_icon = ICONS.get("app_happ") or ICONS.get("network")
         incy_icon = ICONS.get("app_incy") or ICONS.get("network")
-        cross_icon = ICONS.get("cross")
+        cancel_btn = self._btn("Не сейчас", "danger", "flow_workspace_no", ICONS.get("cross"))
 
-        cancel_btn = {"text": "Не сейчас", "style": "danger", "callback_data": "flow_workspace_no"}
-        if cross_icon:
-            cancel_btn["icon_custom_emoji_id"] = cross_icon
-
-        text = (
-            f"{status_title}\n\n"
-            "Запустить рабочий сетап? Выберите VPN:"
-        )
+        text = f"{status_title}\n\nЗапустить рабочий сетап? Выберите VPN:"
         markup = {
             "inline_keyboard": [
                 [
                     {"text": "Сетап с INCY", "style": "primary", "icon_custom_emoji_id": incy_icon, "callback_data": "workspace_vpn:incy"},
                     {"text": "Сетап с Happ", "style": "primary", "icon_custom_emoji_id": happ_icon, "callback_data": "workspace_vpn:happ"},
                 ],
-                [cancel_btn]
+                [cancel_btn],
             ]
         }
-        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
+        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
 
     def on_unlock_failed(self, chat_id, reason):
-        self.stage = PowerFlowStage.UNLOCK_FAILED
+        with self._lock:
+            self.stage = PowerFlowStage.UNLOCK_FAILED
+            mid = self.message_id
         self.save_state()
 
         text = (
@@ -815,63 +921,61 @@ class PowerFlowManager:
             f"{reason}\n\n"
             "Пароль отклонён или экран входа недоступен."
         )
-        retry_btn = {"text": "Попробовать снова", "style": "success", "callback_data": "flow_unlock_retry"}
-        if ICONS.get("refresh"):
-            retry_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
-        cancel_btn = {"text": "Отмена", "style": "danger", "callback_data": "flow_unlock_cancel"}
-        if ICONS.get("cross"):
-            cancel_btn["icon_custom_emoji_id"] = ICONS.get("cross")
-        emerg_btn = {"text": "⚡ Аварийное выключение", "style": "danger", "callback_data": "emergency_power_off"}
-        if ICONS.get("power"):
-            emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
-
-        markup = {
-            "inline_keyboard": [
-                [retry_btn, cancel_btn],
-                [emerg_btn],
-            ]
-        }
-        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
+        retry_btn = self._btn("Попробовать снова", "success", "flow_unlock_retry", ICONS.get("refresh"))
+        cancel_btn = self._btn("Отмена", "danger", "flow_unlock_cancel", ICONS.get("cross"))
+        emerg_btn = self._btn("⚡ Аварийное выключение", "danger", "emergency_power_off", ICONS.get("power"))
+        markup = {"inline_keyboard": [[retry_btn, cancel_btn], [emerg_btn]]}
+        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
 
     def handle_unlock_retry(self, chat_id):
-        self.unlock_attempts = 0
-        self.pending_unlock_command_id = None
+        with self._lock:
+            self.unlock_attempts = 0
+            self.pending_unlock_command_id = None
         self.handle_unlock_decision("flow_unlock_yes", chat_id)
 
     def handle_unlock_cancel(self, chat_id):
+        with self._lock:
+            mid = self.message_id
         text = "<b>Разблокировка отменена.</b>"
         markup = {"inline_keyboard": [self.ui.back_button("menu")]}
-        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
+        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
         self.reset_flow()
 
-    def handle_workspace_decision(self, choice, chat_id, runner_func):
+    def handle_workspace_decision(self, choice, chat_id, runner_func, message_id=None):
         if choice == "flow_workspace_no":
+            with self._lock:
+                mid = self.message_id or message_id
             text = (
                 "<b>Windows готова к работе</b>\n\n"
                 "Запуск рабочего сетапа пропущен."
             )
             markup = {"inline_keyboard": [self.ui.back_button("menu")]}
-            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
+            self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
             self.reset_flow()
             return
 
         if choice == "flow_workspace_yes":
-            self.stage = PowerFlowStage.WORKSPACE_RUNNING
-            self.workspace_cancelled = False
-            self.active_workspace_id = f"ws-{int(time.time())}"
+            with self._lock:
+                self.stage = PowerFlowStage.WORKSPACE_RUNNING
+                self.workspace_cancelled = False
+                ws_id = f"ws-{int(time.time())}"
+                self.active_workspace_id = ws_id
+                mid = self.message_id
             self.save_state()
-            runner_func(chat_id, card_message_id=self.message_id, workspace_id=self.active_workspace_id)
+            runner_func(chat_id, card_message_id=mid, workspace_id=ws_id)
 
     def cancel_workspace(self, chat_id):
-        self.workspace_cancelled = True
-        ws_id = self.active_workspace_id
+        with self._lock:
+            self.workspace_cancelled = True
+            ws_id = self.active_workspace_id
+            mid = self.message_id
         if ws_id:
             # Publish real cancel_workspace command with workspace_id to desktop agent
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
 
         text = "<b>Запуск рабочего сетапа отменён.</b>" if not (ws_id and str(ws_id).startswith("game")) else "<b>Запуск игры отменён.</b>"
         markup = {"inline_keyboard": [self.ui.back_button("menu")]}
-        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
+        self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
         # Note: reset_flow() is called by the workspace runner thread upon clean exit so workspace_cancelled remains True while runner halts.
 
     def check_timeout(self, now=None):
@@ -881,38 +985,44 @@ class PowerFlowManager:
         it is cleanly expired, resetting to IDLE and notifying the user.
         """
         now = time.time() if now is None else float(now)
-        if self.stage in (
-            PowerFlowStage.IDLE,
-            PowerFlowStage.WAITING_WORKSPACE_DECISION,
-            PowerFlowStage.WORKSPACE_RUNNING,
-        ):
-            return False
+        with self._lock:
+            if self.stage in (
+                PowerFlowStage.IDLE,
+                PowerFlowStage.WAITING_WORKSPACE_DECISION,
+                PowerFlowStage.WORKSPACE_RUNNING,
+            ):
+                return False
 
-        if self.expires_at > 0 and now > self.expires_at:
-            LOG.warning(
-                "PowerFlowManager: flow %s expired at stage %s (created_at=%.1f, expires_at=%.1f, now=%.1f)",
-                self.flow_id, self.stage, self.created_at, self.expires_at, now
-            )
+            if not (self.expires_at > 0 and now > self.expires_at):
+                return False
+
+            flow_id = self.flow_id
+            stage_at_timeout = self.stage
+            created_at = self.created_at
+            expires_at = self.expires_at
             chat_id = self.chat_id
             msg_id = self.message_id
-            stage_at_timeout = self.stage
-            self.reset_flow()
 
-            if chat_id and msg_id:
-                try:
-                    if stage_at_timeout == PowerFlowStage.REBOOTING:
-                        text = (
-                            "<b>Время ожидания перезагрузки истекло.</b>\n\n"
-                            "ПК не вернулся в сеть в течение 5 минут."
-                        )
-                    else:
-                        text = (
-                            "⏱ <b>Время ожидания запуска ПК истекло.</b>\n\n"
-                            "Процесс был автоматически отменён по таймауту безопасности (5 минут)."
-                        )
-                    markup = {"inline_keyboard": [self.ui.back_button("menu")]}
-                    self.ui.send_message(chat_id, text, reply_markup=markup, message_id=msg_id)
-                except Exception:
-                    LOG.exception("Failed to send flow timeout notification to chat %s", chat_id)
-            return True
-        return False
+        LOG.warning(
+            "PowerFlowManager: flow %s expired at stage %s (created_at=%.1f, expires_at=%.1f, now=%.1f)",
+            flow_id, stage_at_timeout, created_at, expires_at, now
+        )
+        self.reset_flow()
+
+        if chat_id and msg_id:
+            try:
+                if stage_at_timeout == PowerFlowStage.REBOOTING:
+                    text = (
+                        "<b>Время ожидания перезагрузки истекло.</b>\n\n"
+                        "ПК не вернулся в сеть в течение 5 минут."
+                    )
+                else:
+                    text = (
+                        "⏱ <b>Время ожидания запуска ПК истекло.</b>\n\n"
+                        "Процесс был автоматически отменён по таймауту безопасности (5 минут)."
+                    )
+                markup = {"inline_keyboard": [self.ui.back_button("menu")]}
+                self.ui.send_message(chat_id, text, reply_markup=markup, message_id=msg_id)
+            except Exception:
+                LOG.exception("Failed to send flow timeout notification to chat %s", chat_id)
+        return True

@@ -59,7 +59,13 @@ class ActivityDB:
                 self._conn = None
 
     def __del__(self) -> None:
-        self.close()
+        conn = getattr(self, "_conn", None)
+        self._conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +131,7 @@ class ActivityDB:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            app_name,
+                            app_name or "unknown",
                             window_title or "",
                             exe_path or "",
                             started_at,
@@ -141,7 +147,7 @@ class ActivityDB:
                     return cursor.lastrowid
             except Exception as e:
                 LOG.exception("Failed to record session for %s: %s", app_name, e)
-                return None
+                raise
 
     def get_activity_at(self, target_ts: float) -> Optional[Dict[str, Any]]:
         """Find the active app and window at an exact timestamp."""

@@ -54,7 +54,8 @@ def test_check_happ_vpn_active_true_when_process_and_probe():
 def test_connect_incy_vpn_when_already_active():
     agent = PCControlAgent.__new__(PCControlAgent)
     agent.config = {}
-    with patch.object(agent, "check_incy_vpn_active", return_value=True):
+    with patch.object(agent, "check_incy_vpn_active", return_value=True), \
+         patch.object(agent, "probe_google_https", return_value=True):
         result = agent.connect_incy_vpn()
         assert result.get("verified") is True
         assert result.get("already_connected") is True
@@ -71,6 +72,7 @@ def test_connect_incy_vpn_auto_connect_and_launch(tmp_path):
 
     with patch("os.path.expandvars", return_value=str(fake_pref_file)), \
          patch.object(agent, "check_incy_vpn_active", side_effect=[False, True]), \
+         patch.object(agent, "probe_google_https", return_value=True), \
          patch("psutil.process_iter", return_value=[]), \
          patch("pathlib.Path.exists", return_value=True), \
          patch("subprocess.Popen") as mock_popen:

@@ -63,13 +63,38 @@ IGNORED_PROCESSES = {
 
 class AppEmojiManager:
     def __init__(self, token=None, user_id=None, pack_name=None):
-        self.token = token or DEFAULT_TOKEN
-        self.user_id = user_id or DEFAULT_USER_ID
+        self.token = DEFAULT_TOKEN if token is None else token
+        self.user_id = DEFAULT_USER_ID if user_id is None else user_id
         self.pack_name = pack_name or DEFAULT_PACK_NAME
         self.cache = self._load_cache()
         self.last_notified_exe = None
         self.last_notified_time = 0.0
         self.upload_lock = threading.Lock()
+        self._sticker_set_lock = threading.Lock()
+        self._inflight = {}
+        self._cache_epoch = 0
+
+    def _get_sticker_set_lock(self):
+        lock = getattr(self, "_sticker_set_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._sticker_set_lock = lock
+        return lock
+
+    def _get_inflight(self):
+        inflight = getattr(self, "_inflight", None)
+        if inflight is None:
+            inflight = {}
+            self._inflight = inflight
+        return inflight
+
+    def get_cached_emoji_id(self, key: str):
+        normalized = (key or "").lower()
+        if not normalized:
+            return None
+        with self.upload_lock:
+            entry = self.cache.get(normalized)
+            return entry.get("emoji_id") if isinstance(entry, dict) else None
 
     def _load_cache(self):
         if CACHE_FILE.exists():
@@ -91,7 +116,18 @@ class AppEmojiManager:
             LOG.error("Failed to save icon cache: %s", e)
 
     def get_or_create_emoji_id(self, exe_path, exe_name):
-        key = exe_name.lower()
+        token = getattr(self, "token", None)
+        user_id = getattr(self, "user_id", None)
+        if not token or not user_id:
+            return None
+
+        key = (exe_name or "").lower()
+        if not key:
+            return None
+        wait_event = None
+        my_event = None
+        epoch = 0
+
         with self.upload_lock:
             if key in self.cache:
                 entry = self.cache[key]
@@ -100,116 +136,160 @@ class AppEmojiManager:
                 if entry.get("failed_at") and (time.time() - entry["failed_at"] < 60.0):
                     return None
 
-            if not exe_path or not os.path.exists(exe_path):
+            if not exe_path:
                 return None
 
-            # Extract real 100x100 transparent PNG
+            inflight = self._get_inflight()
+            if key in inflight:
+                wait_event = inflight[key]
+            else:
+                epoch = getattr(self, "_cache_epoch", 0)
+                my_event = threading.Event()
+                inflight[key] = my_event
+
+        if wait_event is not None:
+            wait_event.wait(timeout=15.0)
+            with self.upload_lock:
+                entry = self.cache.get(key)
+                return entry.get("emoji_id") if isinstance(entry, dict) else None
+
+        emoji_id = None
+        should_negative_cache = False
+        try:
+            if not os.path.exists(exe_path):
+                return None
+
+            # Extract real 100x100 transparent PNG outside upload_lock
             png_bytes = extract_app_icon_png(exe_path)
             if not png_bytes:
                 LOG.warning("Could not extract icon for %s (%s)", exe_name, exe_path)
-                self.cache[key] = {"emoji_id": None, "failed_at": time.time()}
-                self._save_cache()
-                return None
-
-            try:
-                # Upload to Telegram Sticker Pack
-                files = {"sticker": (f"{key}.png", png_bytes, "image/png")}
-                stickers_data = {
-                    "sticker": "attach://sticker",
-                    "emoji_list": ["🪟"],
-                    "format": "static"
-                }
-                res = requests.post(
-                    f"https://api.telegram.org/bot{self.token}/addStickerToSet",
-                    data={
-                        "user_id": self.user_id,
-                        "name": self.pack_name,
-                        "sticker": json.dumps(stickers_data)
-                    },
-                    files=files,
-                    timeout=5
-                )
-                data = res.json()
-                if not data.get("ok"):
-                    desc = data.get("description", "")
-                    if "STICKERSET_INVALID" in desc:
-                        LOG.info("Sticker set invalid/missing, recreating set via createNewStickerSet...")
-                        c_res = requests.post(
-                            f"https://api.telegram.org/bot{self.token}/createNewStickerSet",
+                should_negative_cache = True
+            else:
+                with self._get_sticker_set_lock():
+                    try:
+                        # Upload to Telegram Sticker Pack outside upload_lock
+                        files = {"sticker": (f"{key}.png", png_bytes, "image/png")}
+                        stickers_data = {
+                            "sticker": "attach://sticker",
+                            "emoji_list": ["🪟"],
+                            "format": "static"
+                        }
+                        res = requests.post(
+                            f"https://api.telegram.org/bot{self.token}/addStickerToSet",
                             data={
                                 "user_id": self.user_id,
                                 "name": self.pack_name,
-                                "title": "PC Control App Icons",
-                                "sticker_type": "custom_emoji",
-                                "stickers": json.dumps([stickers_data])
+                                "sticker": json.dumps(stickers_data)
                             },
-                            files={"sticker": (f"{key}.png", png_bytes, "image/png")},
+                            files=files,
                             timeout=5
                         )
-                        data = c_res.json()
+                        data = res.json()
+                        if not data.get("ok"):
+                            desc = data.get("description", "")
+                            if "STICKERSET_INVALID" in desc:
+                                LOG.info("Sticker set invalid/missing, recreating set via createNewStickerSet...")
+                                c_res = requests.post(
+                                    f"https://api.telegram.org/bot{self.token}/createNewStickerSet",
+                                    data={
+                                        "user_id": self.user_id,
+                                        "name": self.pack_name,
+                                        "title": "PC Control App Icons",
+                                        "sticker_type": "custom_emoji",
+                                        "stickers": json.dumps([stickers_data])
+                                    },
+                                    files={"sticker": (f"{key}.png", png_bytes, "image/png")},
+                                    timeout=5
+                                )
+                                data = c_res.json()
 
-                    if not data.get("ok"):
-                        LOG.error("Failed adding sticker for %s: %s", exe_name, data)
+                            if not data.get("ok"):
+                                LOG.error("Failed adding sticker for %s: %s", exe_name, data)
+                                should_negative_cache = True
+
+                        if not should_negative_cache:
+                            # Get sticker set to find newest custom_emoji_id
+                            set_res = requests.get(
+                                f"https://api.telegram.org/bot{self.token}/getStickerSet",
+                                params={"name": self.pack_name},
+                                timeout=5
+                            ).json()
+
+                            stickers = set_res.get("result", {}).get("stickers", [])
+                            if not stickers:
+                                should_negative_cache = True
+                            else:
+                                emoji_id = stickers[-1].get("custom_emoji_id")
+                                if not emoji_id:
+                                    should_negative_cache = True
+                    except Exception as e:
+                        err_msg = str(e)
+                        if self.token and self.token in err_msg:
+                            err_msg = err_msg.replace(self.token, "[REDACTED]")
+                        LOG.warning("Exception adding emoji for %s (will negative cache for 60s): %s", exe_name, err_msg)
+                        should_negative_cache = True
+
+            if emoji_id:
+                with self.upload_lock:
+                    if getattr(self, "_cache_epoch", 0) == epoch:
+                        self.cache[key] = {
+                            "emoji_id": emoji_id,
+                            "exe_path": exe_path,
+                            "created_at": time.time()
+                        }
+                        self._save_cache()
+                LOG.info("Successfully added custom emoji for %s: %s", exe_name, emoji_id)
+                return emoji_id
+
+            if should_negative_cache:
+                with self.upload_lock:
+                    if getattr(self, "_cache_epoch", 0) == epoch:
                         self.cache[key] = {"emoji_id": None, "failed_at": time.time()}
                         self._save_cache()
-                        return None
-
-                # Get sticker set to find newest custom_emoji_id
-                set_res = requests.get(
-                    f"https://api.telegram.org/bot{self.token}/getStickerSet",
-                    params={"name": self.pack_name},
-                    timeout=5
-                ).json()
-
-                stickers = set_res.get("result", {}).get("stickers", [])
-                if not stickers:
-                    self.cache[key] = {"emoji_id": None, "failed_at": time.time()}
-                    self._save_cache()
-                    return None
-
-                emoji_id = stickers[-1].get("custom_emoji_id")
-                if emoji_id:
-                    self.cache[key] = {
-                        "emoji_id": emoji_id,
-                        "exe_path": exe_path,
-                        "created_at": time.time()
-                    }
-                    self._save_cache()
-                    LOG.info("Successfully added custom emoji for %s: %s", exe_name, emoji_id)
-                    return emoji_id
-
-            except Exception as e:
-                err_msg = str(e)
-                if self.token and self.token in err_msg:
-                    err_msg = err_msg.replace(self.token, "[REDACTED]")
-                LOG.warning("Exception adding emoji for %s (will negative cache for 60s): %s", exe_name, err_msg)
-                self.cache[key] = {"emoji_id": None, "failed_at": time.time()}
-                self._save_cache()
-
             return None
+        finally:
+            with self.upload_lock:
+                inflight = self._get_inflight()
+                if inflight.get(key) is my_event:
+                    inflight.pop(key, None)
+            if my_event is not None:
+                my_event.set()
 
     def clear_all_emojis(self):
         """Wipe local cache and reset state."""
         with self.upload_lock:
+            self._cache_epoch = getattr(self, "_cache_epoch", 0) + 1
             self.cache = {}
             self._save_cache()
             self.last_notified_exe = None
             self.last_notified_time = 0.0
 
-    def notify_app_opened(self, exe_path, exe_name, window_title=None, send_telegram_message=False):
+    def notify_app_opened(self, exe_path, exe_name, window_title=None):
         key = exe_name.lower()
         if key in IGNORED_PROCESSES:
             return None
 
         now = time.time()
-        # Debounce: don't process same app repeatedly within 10 seconds
-        if key == self.last_notified_exe and (now - self.last_notified_time < 10.0):
-            return self.cache.get(key, {}).get("emoji_id")
+        with self.upload_lock:
+            # Debounce: don't process same app repeatedly within 10 seconds
+            if key == self.last_notified_exe and (now - self.last_notified_time < 10.0):
+                entry = self.cache.get(key)
+                return entry.get("emoji_id") if isinstance(entry, dict) else None
 
-        self.last_notified_exe = key
-        self.last_notified_time = now
+            self.last_notified_exe = key
+            self.last_notified_time = now
 
         # Ensure icon is extracted and cached in custom emoji pack
         emoji_id = self.get_or_create_emoji_id(exe_path, exe_name)
         return emoji_id
+
+
+def read_cached_emoji_id(emoji_manager, exe_key: str):
+    """Safely read an emoji_id from AppEmojiManager or compatible test mock."""
+    if emoji_manager is None or not exe_key:
+        return None
+    if hasattr(type(emoji_manager), "get_cached_emoji_id"):
+        return emoji_manager.get_cached_emoji_id(exe_key)
+    entry = getattr(emoji_manager, "cache", {}).get(exe_key.lower())
+    return entry.get("emoji_id") if isinstance(entry, dict) else None
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Inline keyboard markup builders for PC Control Bot."""
 
+import hashlib
 import logging
-from pathlib import Path
 
 try:
     from .ui_icons import (
@@ -142,6 +142,8 @@ class UiMarkupsMixin:
                 [
                     {"text": "25%", "style": "primary", "callback_data": "volume:25"},
                     {"text": "50%", "style": "primary", "callback_data": "volume:50"},
+                ],
+                [
                     {"text": "75%", "style": "primary", "callback_data": "volume:75"},
                     {"text": "100%", "style": "primary", "callback_data": "volume:100"},
                 ],
@@ -244,7 +246,7 @@ class UiMarkupsMixin:
 
     def shutdown_menu_markup(self, scheduled_ts=None):
         rows = [
-            [{"text": "Выключить сейчас", "style": "danger", "callback_data": "shutdown_now_confirm"}],
+            [{"text": "Выключить сейчас", "style": "danger", "callback_data": "shutdown_now"}],
             [
                 {"text": "15 мин", "style": "primary", "callback_data": "shutdown_after:15"},
                 {"text": "30 мин", "style": "primary", "callback_data": "shutdown_after:30"},
@@ -261,7 +263,7 @@ class UiMarkupsMixin:
         reboot_unlock_btn = {
             "text": "Перезагрузка + Разблок",
             "style": "success",
-            "callback_data": "reboot_unlock",
+            "callback_data": "reboot_ask:unlock",
         }
         if ICONS.get("refresh"):
             reboot_unlock_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
@@ -269,7 +271,7 @@ class UiMarkupsMixin:
         reboot_plain_btn = {
             "text": "Только перезагрузка",
             "style": "primary",
-            "callback_data": "reboot_confirm",
+            "callback_data": "reboot_ask:plain",
         }
         if ICONS.get("refresh"):
             reboot_plain_btn["icon_custom_emoji_id"] = ICONS.get("refresh")
@@ -522,6 +524,8 @@ class UiMarkupsMixin:
                 [
                     {"text": "whoami", "callback_data": "console_quick:whoami"},
                     {"text": "ipconfig", "callback_data": "console_quick:ipconfig"},
+                ],
+                [
                     {"text": "tasklist", "callback_data": "console_quick:tasklist"},
                     {"text": "dir", "callback_data": "console_quick:dir"},
                 ],
@@ -649,15 +653,22 @@ class UiMarkupsMixin:
         check_icon = ICONS.get("check")
         back_icon = ICONS.get("back")
         gear_icon = ICONS.get("gear")
-        power_icon = ICONS.get("power")
         term_icon = ICONS.get("terminal")
 
-        # 1. Accounts grid (buttons to switch)
-        for acc in accounts:
+        # 1. Accounts grid (buttons to switch, capped at 25 to respect Telegram limits)
+        visible_accounts = accounts[:25]
+        for acc in visible_accounts:
             is_active = acc.get("is_active", False)
-            acc_id = acc.get("id", "")
-            name = acc.get("name") or acc.get("email", "").split("@")[0]
-            pct = acc.get("min_quota", 100)
+            acc_id = str(acc.get("id", ""))
+            raw_email = acc.get("email") or ""
+            name = acc.get("name") or raw_email.split("@")[0]
+            pct = acc.get("min_quota")
+            pct = 0 if pct is None else pct
+
+            cb_data = f"ag_switch:{acc_id}"
+            if len(cb_data.encode("utf-8")) > 64:
+                short_hash = hashlib.sha256(acc_id.encode("utf-8")).hexdigest()[:16]
+                cb_data = f"ag_switch:#{short_hash}"
 
             if is_active:
                 btn = {
@@ -671,9 +682,15 @@ class UiMarkupsMixin:
                 btn = {
                     "text": f"{name} ({pct}%)",
                     "style": "primary",
-                    "callback_data": f"ag_switch:{acc_id}",
+                    "callback_data": cb_data,
                 }
             rows.append([btn])
+
+        if len(accounts) > 25:
+            rows.append([{
+                "text": f"📋 Показаны 25 из {len(accounts)} аккаунтов",
+                "callback_data": "ag_noop",
+            }])
 
         # 2. Auto-switch, Heal & Restart actions
         action_row = [
@@ -685,7 +702,6 @@ class UiMarkupsMixin:
             },
             {
                 "text": "Лечение AG & VPN",
-                "style": "secondary",
                 "icon_custom_emoji_id": refresh_icon,
                 "callback_data": "ag_heal",
             },
@@ -695,7 +711,6 @@ class UiMarkupsMixin:
         rows.append([
             {
                 "text": "Перезапуск IDE",
-                "style": "secondary",
                 "icon_custom_emoji_id": term_icon,
                 "callback_data": "ag_restart",
             }
@@ -710,7 +725,6 @@ class UiMarkupsMixin:
             },
             {
                 "text": "Меню",
-                "style": "secondary",
                 "callback_data": "menu",
             },
         ]

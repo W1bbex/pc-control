@@ -3,7 +3,6 @@
 
 import html
 import logging
-from pathlib import Path
 
 try:
     from .ui_icons import (
@@ -60,20 +59,27 @@ class UiTemplatesMixin(UiMarkupsMixin):
         else:
             artist_badge = ""
 
-        # Title and artist formatting
-        safe_title = html.escape(str(title).strip(), quote=False)
-        safe_artist = html.escape(str(artist).strip(), quote=False)
+        # Title and artist formatting (clamp plaintext so HTML tags never exceed Telegram 1024-char caption limit)
+        raw_title = str(title).strip()
+        raw_artist = str(artist).strip()
+        if len(raw_title) > 180:
+            raw_title = raw_title[:179] + "…"
+        if len(raw_artist) > 140:
+            raw_artist = raw_artist[:139] + "…"
+        safe_title = html.escape(raw_title, quote=False)
+        safe_artist = html.escape(raw_artist, quote=False)
 
         # 2. Format timeline & progress bar
         # Add +2s latency compensation when playing, and +1s to duration
-        display_pos = (pos + 2.0) if is_playing else pos
-        display_dur = (dur + 1.0) if dur > 0 else 0.0
+        display_pos = max(0.0, (pos + 2.0) if is_playing else pos)
+        display_dur = max(0.0, (dur + 1.0) if dur > 0 else 0.0)
         if display_dur > 0:
             display_pos = min(display_dur, display_pos)
 
         def format_time(seconds):
-            m = int(round(seconds)) // 60
-            s = int(round(seconds)) % 60
+            total_sec = max(0, int(round(seconds)))
+            m = total_sec // 60
+            s = total_sec % 60
             return f"{m:02d}:{s:02d}"
 
         pos_str = format_time(display_pos)
@@ -108,23 +114,34 @@ class UiTemplatesMixin(UiMarkupsMixin):
         return text
 
     def player_card_caption(self, media_state):
-        return self.player_card_text(media_state)
+        text = self.player_card_text(media_state)
+        if len(text) <= 1024:
+            return text
+        # Trim overlong custom emoji / metadata gracefully while preserving HTML validity
+        trimmed_state = dict(media_state or {})
+        trimmed_state["title"] = str(trimmed_state.get("title") or "")[:60]
+        trimmed_state["artist"] = str(trimmed_state.get("artist") or "")[:50]
+        text = self.player_card_text(trimmed_state)
+        return text[:1024]
 
     def activity_card_text(self, summary_data, date_str):
+        safe_date = html.escape(str(date_str))
         if not summary_data:
-            return f"📊 <b>Активность за {date_str}</b>\n\n<i>Записей за этот день пока нет.</i>"
-        lines = [f"📊 <b>Активность за {date_str}</b>:\n"]
+            return f"📊 <b>Активность за {safe_date}</b>\n\n<i>Записей за этот день пока нет.</i>"
+        lines = [f"📊 <b>Активность за {safe_date}</b>:\n"]
         for i, item in enumerate(summary_data[:12], 1):
-            app = item.get("app_name", "unknown")
-            dur = float(item.get("total_duration") or 0.0)
+            app = str(item.get("app_name", "unknown"))
+            if len(app) > 80:
+                app = app[:79] + "…"
+            dur = max(0.0, float(item.get("total_duration") or 0.0))
             eid = item.get("emoji_id")
             emoji_tag = f'<tg-emoji emoji-id="{eid}">🪟</tg-emoji> ' if eid else "📱 "
             m = int(dur) // 60
             h = m // 60
             rem_m = m % 60
             time_str = f"{h}ч {rem_m}м" if h > 0 else f"{rem_m}м"
-            lines.append(f"{i}. {emoji_tag}<b>{html.escape(str(app))}</b> — {time_str}")
-        return "\n".join(lines)
+            lines.append(f"{i}. {emoji_tag}<b>{html.escape(app)}</b> — {time_str}")
+        return "\n".join(lines)[:4096]
 
     def console_card_text(self, target="desktop", shell="powershell", last_cmd=None, is_executing=False):
         shell_name = "PowerShell" if (shell or "").lower() == "powershell" else "CMD"
@@ -165,7 +182,6 @@ class UiTemplatesMixin(UiMarkupsMixin):
         green_pulse = ICONS.get("status_active") or "5345809221961167372"
         yellow_pulse = ICONS.get("status_warning") or ICONS.get("pulse_yellow") or "5359432244043754958"
         red_pulse = ICONS.get("status_inactive") or "5345825096160291312"
-        clock_id = ICONS.get("clock")
 
         power_tag = f'<tg-emoji emoji-id="{power_id}">⚡</tg-emoji> ' if power_id else ""
         user_tag = f'<tg-emoji emoji-id="{user_id}">👤</tg-emoji> ' if user_id else ""
@@ -244,7 +260,20 @@ class UiTemplatesMixin(UiMarkupsMixin):
     def sound_menu_text(self, volume=None):
         sound_id = ICONS.get("sound")
         sound_tag = f'<tg-emoji emoji-id="{sound_id}">🔊</tg-emoji> ' if sound_id else ""
-        vol_line = f" ├ Текущая громкость: {volume}%\n" if volume is not None else ""
+        if isinstance(volume, dict):
+            pct = volume.get("percent")
+            muted = bool(volume.get("muted", False))
+            if pct is not None:
+                mute_suffix = " (🔇 без звука)" if muted else ""
+                vol_line = f" ├ Текущая громкость: {pct}%{mute_suffix}\n"
+            elif muted:
+                vol_line = " ├ Звук: 🔇 без звука\n"
+            else:
+                vol_line = ""
+        elif volume is not None:
+            vol_line = f" ├ Текущая громкость: {volume}%\n"
+        else:
+            vol_line = ""
         return (
             f"{sound_tag}<b>Управление звуком</b>\n\n"
             f"<b>Параметры аудио</b>\n"
@@ -308,12 +337,13 @@ class UiTemplatesMixin(UiMarkupsMixin):
             s = max(0, int(sec))
             return f"{s // 60:02d}:{s % 60:02d}"
 
+        elapsed_seconds = max(0, int(elapsed_seconds or 0))
         if target_mode == "workspace":
-            vpn_name = target_detail or "INCY VPN"
+            vpn_name = html.escape(str(target_detail or "INCY VPN"))
             mode_label = f"Разблок + Сетап ({vpn_name})"
             note_line = "\n<i>Запуск начнётся сразу после разблокировки.</i>\n"
         elif target_mode == "game":
-            g_name = target_detail or "Игра"
+            g_name = html.escape(str(target_detail or "Игра"))
             mode_label = f"Разблок + Игра ({g_name})"
             note_line = "\n<i>Запуск начнётся сразу после разблокировки.</i>\n"
         elif target_mode == "unlock":
@@ -376,18 +406,20 @@ class UiTemplatesMixin(UiMarkupsMixin):
             log_lines.append(f"{lock_tag} --:-- · Разблокировка пропущена")
 
         # Step 5: Setup / Game (if targeted)
+        safe_detail_ws = html.escape(str(target_detail or "INCY"))
+        safe_detail_game = html.escape(str(target_detail or "Игра"))
         if target_mode == "workspace":
             app_tag = f'<tg-emoji emoji-id="{apps_id}">🗂️</tg-emoji>' if apps_id else "📱"
             if sess_clean == "unlocked":
-                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Запуск сетапа ({target_detail or 'INCY'})...")
+                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Запуск сетапа ({safe_detail_ws})...")
             else:
-                log_lines.append(f"{app_tag} --:-- · Рабочий сетап ({target_detail or 'INCY'})")
+                log_lines.append(f"{app_tag} --:-- · Рабочий сетап ({safe_detail_ws})")
         elif target_mode == "game":
             g_tag = f'<tg-emoji emoji-id="{game_id}">🎮</tg-emoji>' if game_id else "🎮"
             if sess_clean == "unlocked":
-                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Запуск игры ({target_detail or 'Игра'})...")
+                log_lines.append(f"{spinner_tag} {_fmt(elapsed_seconds)} · Запуск игры ({safe_detail_game})...")
             else:
-                log_lines.append(f"{g_tag} --:-- · Игровой сетап ({target_detail or 'Игра'})")
+                log_lines.append(f"{g_tag} --:-- · Игровой сетап ({safe_detail_game})")
 
         log_quote = "<blockquote>\n" + "\n".join(log_lines) + "\n</blockquote>"
 
@@ -446,7 +478,7 @@ class UiTemplatesMixin(UiMarkupsMixin):
         lines.append("<b>Активный профиль:</b>")
         lines.append(f"├ 👤 <b>{html.escape(str(active_name))}</b> (<code>{html.escape(str(active_email))}</code>)")
         lines.append(f"├ 🖥️ IDE: <b>{ide_status}</b>")
-        lines.append(f"└ ⏳ Сброс квот: <code>{reset_time}</code>\n")
+        lines.append(f"└ ⏳ Сброс квот: <code>{html.escape(str(reset_time))}</code>\n")
 
         # Quotas breakdown for active profile
         quotas = active.get("models_quota", {})
@@ -462,32 +494,48 @@ class UiTemplatesMixin(UiMarkupsMixin):
             items = []
             for k, label in model_keys:
                 if k in quotas:
-                    pct = quotas[k].get("percentage", 100)
+                    raw_pct = quotas[k].get("percentage")
+                    pct = 0 if raw_pct is None else raw_pct
                     items.append((label, pct))
             if not items:
                 # Fallback to any models
                 for k, v in list(quotas.items())[:4]:
-                    items.append((v.get("name", k), v.get("percentage", 100)))
+                    raw_pct = v.get("percentage")
+                    items.append((v.get("name", k), 0 if raw_pct is None else raw_pct))
 
             for i, (m_label, pct) in enumerate(items):
                 prefix = "└" if i == len(items) - 1 else "├"
-                bar = "🟩" if pct >= 50 else ("🟨" if pct > 15 else "🟥")
-                lines.append(f"{prefix} {bar} {m_label}: <b>{pct}%</b>")
+                try:
+                    pct_num = float(pct)
+                except (TypeError, ValueError):
+                    pct_num = 0.0
+                bar = "🟩" if pct_num >= 50 else ("🟨" if pct_num > 15 else "🟥")
+                lines.append(f"{prefix} {bar} {html.escape(str(m_label))}: <b>{html.escape(str(pct))}%</b>")
             lines.append("")
 
         # Other available accounts summary
         others = [a for a in accounts if not a.get("is_active")]
         if others:
             lines.append(f"<b>Резервные аккаунты ({len(others)}):</b>")
-            for i, o in enumerate(others):
-                prefix = "└" if i == len(others) - 1 else "├"
+            max_others = 20
+            shown_others = others[:max_others]
+            for i, o in enumerate(shown_others):
+                is_last = (i == len(shown_others) - 1) and len(others) <= max_others
+                prefix = "└" if is_last else "├"
                 raw_email = o.get("email") or ""
                 raw_name = o.get("name")
                 o_name = raw_name or (raw_email.split("@")[0] if "@" in raw_email else "Без имени")
-                o_pct = o.get("min_quota", 100)
-                lines.append(f"{prefix} 👤 {html.escape(str(o_name))}: <b>{o_pct}%</b> квоты")
+                raw_opct = o.get("min_quota")
+                o_pct = 0 if raw_opct is None else raw_opct
+                lines.append(f"{prefix} 👤 {html.escape(str(o_name))}: <b>{html.escape(str(o_pct))}%</b> квоты")
+            if len(others) > max_others:
+                lines.append(f"└ <i>...и ещё {len(others) - max_others}</i>")
             lines.append("")
 
-        lines.append("<i>⚡ Выберите аккаунт ниже для мгновенного переключения:</i>")
-        return "\n".join(lines)
+        footer = "<i>⚡ Выберите аккаунт ниже для мгновенного переключения:</i>"
+        if sum(len(ln) + 1 for ln in lines) + len(footer) > 4096:
+            while len(lines) > 6 and sum(len(ln) + 1 for ln in lines) + len(footer) > 4060:
+                lines.pop()
+        lines.append(footer)
+        return "\n".join(lines)[:4096]
 

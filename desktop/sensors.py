@@ -65,31 +65,65 @@ class SensorHelper:
             LOG.warning("Sensor helper: %s", line.rstrip())
 
     def _find_admin_snapshot(self) -> Path:
-        for candidate in (
+        candidates = (
             BASE_DIR / "data" / "admin-sensors.json",
             self.executable.parent / "admin-sensors.json",
             BASE_DIR / "hardware" / "admin-sensors.json",
-        ):
-            if candidate.exists():
-                return candidate
+        )
+        existing = []
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    existing.append((candidate.stat().st_mtime, candidate))
+            except OSError:
+                continue
+        if existing:
+            return max(existing, key=lambda item: item[0])[1]
         return BASE_DIR / "data" / "admin-sensors.json"
 
     def snapshot(self):
         target = self._find_admin_snapshot()
-        try:
-            age = time.time() - target.stat().st_mtime
-            if age < 15:
-                data = json.loads(target.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return data
-        except (FileNotFoundError, PermissionError, OSError):
-            pass
-        except Exception:
-            LOG.exception("Could not read elevated sensor snapshot")
+        for attempt in range(3):
+            try:
+                age = time.time() - target.stat().st_mtime
+                if age < 15:
+                    data = json.loads(target.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        return data
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt < 2:
+                    time.sleep(0.1)
+                    continue
+                break
+            except OSError:
+                break
+            except Exception:
+                LOG.exception("Could not read elevated sensor snapshot")
+                break
 
         with self.lock:
             return list(self.latest)
 
     def stop(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
+        if self.process is None:
+            return
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+        except Exception:
+            pass
+        finally:
+            for stream in (getattr(self.process, "stdout", None), getattr(self.process, "stderr", None)):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass

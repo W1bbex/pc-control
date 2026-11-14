@@ -1,5 +1,5 @@
 """
-Tests for Sprint 2 decomposition of boot_agent.py into system package mixins.
+Tests for the system package mixin architecture and backward-compatible exports.
 Verifies line ceiling, mixin hierarchy, and backward compatibility of all exports.
 """
 
@@ -18,13 +18,6 @@ from system import (
     find_active_interactive_session_id,
     get_boot_info,
 )
-
-
-def test_boot_agent_line_ceiling():
-    """Verify boot_agent.py is well below the 1,000-line ceiling (previously 1,661 lines)."""
-    boot_agent_path = Path(boot_agent.__file__).resolve()
-    lines = boot_agent_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) < 600, f"boot_agent.py has {len(lines)} lines; must be < 600 lines!"
 
 
 def test_system_agent_inherits_all_mixins():

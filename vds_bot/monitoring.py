@@ -4,10 +4,13 @@
 
 import html
 import logging
+import os
 import time
 from pathlib import Path
 
 from history import TelemetryHistory
+
+HISTORY_DB_PATH = Path(os.environ.get("TELEMETRY_HISTORY_DB_PATH", "/var/lib/pc-control-bot/telemetry_history.db"))
 
 LOG = logging.getLogger("pc-control-bot.monitoring")
 
@@ -76,9 +79,9 @@ def format_number(value, suffix="", digits=0):
 
 class MonitoringManager:
     def __init__(self, telegram_ui, mqtt_gateway, history_db_path=None):
-        self.ui = telegram_ui
+        del telegram_ui
         self.mqtt = mqtt_gateway
-        db_path = history_db_path or Path("/var/lib/pc-control-bot/telemetry_history.db")
+        db_path = history_db_path or HISTORY_DB_PATH
         self.history = TelemetryHistory(db_path)
         self.latest_telemetry = None
         self.latest_received_at = 0.0
@@ -241,18 +244,23 @@ class MonitoringManager:
             last_telem_info = ""
             if self.latest_telemetry:
                 ts = self.latest_telemetry.get("ts") or self.latest_telemetry.get("timestamp")
-                if ts:
-                    diff = int(time.time() - float(ts))
-                    last_telem_info = f"\n\n<i>Последняя телеметрия получена {format_duration(diff)} назад.</i>"
+                if ts is not None:
+                    try:
+                        diff = max(0, int(time.time() - float(ts)))
+                        last_telem_info = f"\n\n<i>Последняя телеметрия получена {format_duration(diff)} назад.</i>"
+                    except (TypeError, ValueError):
+                        pass
 
             os_tag = self.header_os_tag()
             os_type = self.get_os_type()
             os_label = "Windows" if os_type == "windows" else ("Linux" if os_type == "linux" else "Система")
             return (
                 f'{os_tag} <b>PC Control</b> — {header}\n'
-                f"{os_label}: {pc_state.label}\n\n"
-                f"<i>{pc_state.reason}</i>{last_telem_info}\n\n"
-                f"<i>Агенты: System {pc_state.system_status} | Desktop {pc_state.desktop_status} | ESP {pc_state.esp_status}</i>"
+                f"{os_label}: {html.escape(str(pc_state.label or ''))}\n\n"
+                f"<i>{html.escape(str(pc_state.reason or ''))}</i>{last_telem_info}\n\n"
+                f"<i>Агенты: System {html.escape(str(pc_state.system_status))} | "
+                f"Desktop {html.escape(str(pc_state.desktop_status))} | "
+                f"ESP {html.escape(str(pc_state.esp_status))}</i>"
             )
 
         telemetry = self.latest_telemetry or {}
@@ -340,8 +348,15 @@ class MonitoringManager:
             media_state = getattr(self.mqtt, "last_media_state", None) or {}
         media_line = ""
         if media_state and media_state.get("active") and media_state.get("title"):
-            m_title = html.escape(str(media_state.get("title") or "").strip())
-            m_artist = html.escape(str(media_state.get("artist") or "").strip())
+            raw_title = str(media_state.get("title") or "").strip()
+            raw_artist = str(media_state.get("artist") or "").strip()
+            raw_track = raw_title
+            if raw_artist:
+                raw_track += f" — {raw_artist}"
+            if len(raw_track) > 65:
+                raw_track = raw_track[:62] + "..."
+            track_info = html.escape(raw_track)
+
             m_playing = media_state.get("is_playing", False)
             m_liked = media_state.get("is_liked", False)
             icons = media_state.get("ui_icons") or {}
@@ -363,12 +378,6 @@ class MonitoringManager:
                 liked_icon = f' <tg-emoji emoji-id="{heart_eid}">❤️</tg-emoji>'
             else:
                 liked_icon = f' <tg-emoji emoji-id="{unliked_eid}">💔</tg-emoji>'
-
-            track_info = m_title
-            if m_artist:
-                track_info += f" — {m_artist}"
-            if len(track_info) > 65:
-                track_info = track_info[:62] + "..."
 
             media_line = f" └ Музыка: {status_symbol} {track_info}{liked_icon}\n"
 

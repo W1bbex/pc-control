@@ -12,7 +12,7 @@ from system.constants import LOG
 
 
 def acquire_single_instance():
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -25,7 +25,7 @@ def acquire_single_instance():
         True,
         "Global\\W1bbexPCControlSystemAgent",
     )
-    err = kernel32.GetLastError()
+    err = ctypes.get_last_error()
     if err == 183:
         if mutex:
             kernel32.CloseHandle(mutex)
@@ -36,7 +36,7 @@ def acquire_single_instance():
             True,
             "Local\\W1bbexPCControlSystemAgent",
         )
-        if kernel32.GetLastError() == 183:
+        if ctypes.get_last_error() == 183:
             if mutex:
                 kernel32.CloseHandle(mutex)
             raise SystemExit("PC Control System Agent is already running")
@@ -48,13 +48,17 @@ _console_session_cache_time = 0.0
 _console_session_cache_lock = threading.Lock()
 
 _cached_boot_info = None
+_cached_boot_info_time = 0.0
 
 
 def get_boot_info():
     """Detect boot type (cold_boot, hybrid_boot, resume) from Windows Event Log and registry (cached)."""
-    global _cached_boot_info
+    global _cached_boot_info, _cached_boot_info_time
     if _cached_boot_info is not None:
-        return _cached_boot_info
+        if _cached_boot_info.get("boot_type") != "unknown":
+            return _cached_boot_info
+        if (time.monotonic() - _cached_boot_info_time) < 60.0:
+            return _cached_boot_info
 
     boot_type = "unknown"
     boot_code = None
@@ -80,6 +84,8 @@ def get_boot_info():
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
@@ -106,6 +112,7 @@ def get_boot_info():
     except Exception as e:
         LOG.warning("Could not read boot type from event log: %s", e)
 
+    _cached_boot_info_time = time.monotonic()
     _cached_boot_info = {
         "boot_type": boot_type,
         "boot_code": boot_code,
@@ -211,9 +218,19 @@ def active_console_session(ttl=0.5):
     user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     user32.CloseDesktop.argtypes = [wintypes.HANDLE]
     user32.CloseDesktop.restype = wintypes.BOOL
+    user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user32.GetUserObjectInformationW.restype = wintypes.BOOL
+    kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
 
     hdesk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
-    err_desk = ctypes.GetLastError()
+    err_desk = kernel32.GetLastError() if hasattr(kernel32, "GetLastError") else 0
     input_desktop_accessible = bool(hdesk)
     input_desk_name = ""
     if hdesk:
@@ -265,8 +282,10 @@ def active_console_session(ttl=0.5):
     ))
     if infoex_ok and infoex_buf.value:
         try:
-            info = ctypes.cast(infoex_buf, ctypes.POINTER(WTSINFOEXW)).contents
-            session_flags = info.Data.SessionFlags
+            if infoex_bytes.value >= ctypes.sizeof(WTSINFOEXW):
+                info = ctypes.cast(infoex_buf, ctypes.POINTER(WTSINFOEXW)).contents
+                if info.Level == 1:
+                    session_flags = info.Data.SessionFlags
         finally:
             wtsapi32.WTSFreeMemory(infoex_buf)
 
@@ -296,9 +315,6 @@ def active_console_session(ttl=0.5):
                             if psess.value == session_id:
                                 logonui_found = True
                                 break
-                        else:
-                            logonui_found = True
-                            break
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception:
@@ -344,6 +360,16 @@ def find_active_interactive_session_id():
 
     p_info = ctypes.POINTER(_WTS_SESSION_INFOW)()
     count = wintypes.DWORD()
+    wtsapi32.WTSEnumerateSessionsW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(_WTS_SESSION_INFOW)),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    wtsapi32.WTSEnumerateSessionsW.restype = wintypes.BOOL
+    wtsapi32.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+    wtsapi32.WTSFreeMemory.restype = None
     fallback_sid = None
     if wtsapi32.WTSEnumerateSessionsW(None, 0, 1, ctypes.byref(p_info), ctypes.byref(count)):
         try:

@@ -13,6 +13,22 @@ except Exception:
 
 LOG = logging.getLogger("pc-control-bot.routers.command")
 
+try:
+    from vds_bot.action_helpers import apply_led_power, apply_led_preset, apply_stealth_state
+except ImportError:
+    from action_helpers import apply_led_power, apply_led_preset, apply_stealth_state
+
+
+def _handle_player_command(app, chat_id: int, incoming_msg_id=None) -> None:
+    if incoming_msg_id:
+        try:
+            app.ui.delete_message(chat_id, incoming_msg_id)
+        except Exception:
+            pass
+    media_state = getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {})
+    app._send_player_card(chat_id, media_state, business_connection_id=None)
+    app.mqtt.send_media_command("refresh")
+
 
 def _get_allowed_user_id(app) -> int:
     val = getattr(app, "allowed_user_id", None)
@@ -47,15 +63,7 @@ def route_message(app, message: dict) -> None:
         if from_id != allowed_id:
             return
         if text.lower().startswith(("/player", "плеер")):
-            incoming_msg_id = message.get("message_id")
-            if incoming_msg_id:
-                try:
-                    app.ui.delete_message(chat_id, incoming_msg_id)
-                except Exception:
-                    pass
-            media_state = getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {})
-            app._send_player_card(chat_id, media_state, business_connection_id=None)
-            app.mqtt.send_media_command("refresh")
+            _handle_player_command(app, chat_id, message.get("message_id"))
         return
 
     if chat_id != allowed_id:
@@ -77,6 +85,7 @@ def route_message(app, message: dict) -> None:
 
     # 1. Main Menu / Dashboard
     if lower_text in {"/start", "/menu", "меню", "меню пк"}:
+        app.awaiting_shutdown_time_chat_id = None
         app.console_active_chat_id = None
         res = app.ui.send_message(
             chat_id,
@@ -91,6 +100,7 @@ def route_message(app, message: dict) -> None:
 
     # 2. Console (Open/Exit)
     if lower_text in {"/console", "консоль"}:
+        app.awaiting_shutdown_time_chat_id = None
         app.console_active_chat_id = chat_id
         app.current_menu_view = "console"
         text_card = app.ui.console_card_text(target=app.console_target, shell=app.console_shell)
@@ -137,50 +147,18 @@ def route_message(app, message: dict) -> None:
         parts = lower_text.split()
         subcmd = parts[1] if len(parts) > 1 else ""
         if subcmd in ("on", "1", "вкл", "включить"):
-            app.mqtt.publish_desktop_action("stealth_mode", {"state": "on"})
-            msg = app.ui.send_message(
-                chat_id,
-                "<b>🕶️ Режим скрытности активирован</b>\n\n"
-                "• Мониторы переведены в спящий режим\n"
-                "• Физический ввод мыши и клавиатуры поглощается\n"
-                "• Системный звук заглушен\n\n"
-                "<i>Снятие режима: /stealth off или кнопка ниже.\n"
-                "Локальный выход: <code>Win+W+1</code></i>",
-                reply_markup=app.ui.stealth_menu_markup(active=True),
-            )
-            if isinstance(msg, dict) and msg.get("message_id"):
-                app.active_stealth_card = (chat_id, msg["message_id"])
+            apply_stealth_state(app, chat_id, "on", is_command=True)
         elif subcmd in ("off", "0", "выкл", "отключить"):
-            app.mqtt.publish_desktop_action("stealth_mode", {"state": "off"})
-            app.active_stealth_card = None
-            app.ui.send_message(
-                chat_id,
-                "<b>🔓 Режим скрытности отключен</b>\n\n"
-                "• Дисплеи разбужены\n"
-                "• Ввод мыши и клавиатуры восстановлен\n"
-                "• Звук восстановлен",
-                reply_markup=app.ui.stealth_menu_markup(active=False),
-            )
+            apply_stealth_state(app, chat_id, "off", is_command=True)
         else:
-            is_active = bool(app.monitoring.latest_telemetry.get("stealth_mode")) if app.monitoring.latest_telemetry else False
-            status_label = "🟢 АКТИВЕН" if is_active else "⚪ ВЫКЛЮЧЕН"
-            msg = app.ui.send_message(
-                chat_id,
-                f"<b>🕶️ Режим скрытности (Blackout Mode)</b>\n\n"
-                f"Текущий статус: <b>{status_label}</b>\n\n"
-                "Режим гасит мониторы, заглушает звук и поглощает все клики мыши и нажатия клавиш («Черная дыра»).\n"
-                "Локальный выход доступен по комбинации <code>Win+W+1</code>.",
-                reply_markup=app.ui.stealth_menu_markup(active=is_active),
-            )
-            if is_active and isinstance(msg, dict) and msg.get("message_id"):
-                app.active_stealth_card = (chat_id, msg["message_id"])
+            apply_stealth_state(app, chat_id, "status", is_command=True)
         return
 
     # 6. Scheduled Shutdown
     time_text = text.strip()
     if getattr(app, "awaiting_shutdown_time_chat_id", None) == chat_id:
         lower_txt = time_text.lower()
-        if lower_txt in ("/cancel", "отмена", "назад", "/menu", "cancel"):
+        if lower_txt in ("/cancel", "отмена", "назад", "cancel"):
             app.awaiting_shutdown_time_chat_id = None
             app.ui.send_message(chat_id, "Ввод времени отменён.", reply_markup=app._main_menu_markup())
             return
@@ -225,15 +203,7 @@ def route_message(app, message: dict) -> None:
 
     # 7. Media player
     if lower_text.startswith("/player") or lower_text == "плеер":
-        incoming_msg_id = message.get("message_id")
-        if incoming_msg_id:
-            try:
-                app.ui.delete_message(chat_id, incoming_msg_id)
-            except Exception:
-                pass
-        media_state = getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {})
-        app._send_player_card(chat_id, media_state, business_connection_id=None)
-        app.mqtt.send_media_command("refresh")
+        _handle_player_command(app, chat_id, message.get("message_id"))
         return
 
     # 8. Activity summary
@@ -251,21 +221,9 @@ def route_message(app, message: dict) -> None:
             return
         parts = lower_text.split(None, 1)
         arg = parts[1].strip() if len(parts) > 1 else ""
-        try:
-            from .monitoring_router import LED_WHITE_PRESETS
-        except ImportError:
-            try:
-                from routers.monitoring_router import LED_WHITE_PRESETS
-            except ImportError:
-                from vds_bot.routers.monitoring_router import LED_WHITE_PRESETS
-        if arg in LED_WHITE_PRESETS:
-            rgb, name = LED_WHITE_PRESETS[arg]
-            app.user_led_state = "on"
-            app.last_auto_led_state = "on"
-            app.user_led_color = rgb
-            if hasattr(app, "save_state"):
-                app.save_state()
-            app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
+        applied = apply_led_preset(app, arg)
+        if applied:
+            rgb, name, _ = applied
             app.ui.send_message(chat_id, f"💡 Выбран оттенок #{arg}: {name} (<code>{rgb}</code>)")
             return
 
@@ -273,14 +231,7 @@ def route_message(app, message: dict) -> None:
         if getattr(app.mqtt, "esp_status", None) != "online":
             app.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
             return
-        app.user_led_state = "on"
-        app.last_auto_led_state = "on"
-        if hasattr(app, "save_state"):
-            app.save_state()
-        if getattr(app, "user_led_color", None):
-            app.mqtt.publish_esp_action("LED_COLOR", value=app.user_led_color)
-        else:
-            app.mqtt.publish_esp_action("LED_ON")
+        apply_led_power(app, True)
         app.ui.send_message(chat_id, "💡 Подсветка кулера включена")
         return
 
@@ -288,10 +239,6 @@ def route_message(app, message: dict) -> None:
         if getattr(app.mqtt, "esp_status", None) != "online":
             app.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
             return
-        app.user_led_state = "off"
-        app.last_auto_led_state = "off"
-        if hasattr(app, "save_state"):
-            app.save_state()
-        app.mqtt.publish_esp_action("LED_OFF")
+        apply_led_power(app, False)
         app.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
         return

@@ -1,9 +1,23 @@
-import time
 import logging
+import math
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 LOG = logging.getLogger("pc-control-bot.health_engine")
+
+PC_LIFECYCLE_COMPONENTS = ("windows_system", "windows_session", "windows_desktop", "telemetry")
+
+
+def _parse_ts(ts):
+    """Safely convert an incoming timestamp to a finite float or None."""
+    if ts is None or isinstance(ts, bool):
+        return None
+    try:
+        val = float(ts)
+    except (ValueError, TypeError):
+        return None
+    return val if math.isfinite(val) else None
 
 
 class PCState:
@@ -39,28 +53,30 @@ class ComponentState:
 
     def update(self, status, boot_id=None, ts=None, is_retained=False):
         now = time.time()
-        
+
         # Protect against empty status
         if not status:
             status = "unknown"
 
-        # Check reboot / boot_id transition before sequence check
+        # Check reboot / boot_id transition before sequence check.
+        # Keep the monotonic timestamp floor intact when boot_id matches (same OS boot session).
         if boot_id is not None:
-            if (self.boot_id is not None and boot_id != self.boot_id) or self.status in ("offline", "unknown"):
+            same_boot = self.boot_id is not None and boot_id == self.boot_id
+            real_reboot = self.boot_id is not None and boot_id != self.boot_id
+            cold_live_boot = self.boot_id is None and not is_retained and self.status in ("offline", "unknown")
+            if not same_boot and (real_reboot or cold_live_boot):
                 LOG.info(
                     "Component %s rebooted or woke from offline (boot_id: %s). Resetting timestamp sequence.",
                     self.name, boot_id
                 )
                 self.last_ts = 0.0
             self.boot_id = boot_id
-            
+
         # Safely coerce ts to float to prevent TypeError '<' not supported between str and float
-        if ts is not None:
-            try:
-                ts = float(ts)
-            except (ValueError, TypeError):
-                LOG.warning("Invalid non-numeric ts received for %s: %r", self.name, ts)
-                ts = None
+        parsed_ts = _parse_ts(ts)
+        if ts is not None and parsed_ts is None:
+            LOG.warning("Invalid non-numeric ts received for %s: %r", self.name, ts)
+        ts = parsed_ts
 
         # Pre-NTP timestamps (e.g. ESP8266 boots before NTP sync and reports ts=0)
         if ts is not None and ts <= 0:
@@ -75,9 +91,10 @@ class ComponentState:
         if ts is not None and self.last_ts is not None and self.last_ts > 0.0:
             if ts < self.last_ts:
                 LOG.debug("Ignoring out-of-order packet for %s (ts=%.2f < last_ts=%.2f)", self.name, ts, self.last_ts)
-                return
+                return False
 
         # Strict TS check for all components (except mqtt_broker/telegram which don't have TS)
+        future_skew = False
         if self.name not in ("mqtt_broker", "telegram"):
             if ts is None:
                 # Without TS, we cannot trust freshness, EXCEPT for offline (LWT)
@@ -85,15 +102,20 @@ class ComponentState:
                     status = "unknown"
             else:
                 age = now - ts
-                # If older than threshold, or impossibly far in the future (> 60s drift)
-                if age > self.stale_threshold or age < -600.0:
+                if age < -600.0:
+                    future_skew = True
                     if status in ("online", "unlocked", "locked", "fresh"):
                         status = "stale"
-                        
+                elif age > self.stale_threshold:
+                    if status in ("online", "unlocked", "locked", "fresh"):
+                        status = "stale"
+
         self.status = status
-        if ts is not None:
+        self._last_future_skew = future_skew
+        if ts is not None and not future_skew:
             self.last_ts = ts
         self.local_updated_at = now
+        return True
 
     def check_stale(self):
         if self.status in ("online", "unlocked", "locked", "fresh"):
@@ -124,11 +146,22 @@ class HealthEngine:
         if component in self.components:
             comp = self.components[component]
             old_boot_id = comp.boot_id
-            comp.update(status, boot_id, ts, is_retained)
-            # An active online heartbeat cancels shutdown_observed and graceful_shutdown ONLY IF
-            # it is strictly newer than the shutdown observation timestamp (or a confirmed reboot occurred)!
-            if status in ("online", "unlocked", "locked", "fresh"):
-                msg_ts = ts if ts is not None else time.time()
+            accepted = comp.update(status, boot_id, ts, is_retained)
+            # Only live, accepted PC lifecycle components with valid timestamps may clear shutdown flags.
+            # Auxiliary 24/7 components (esp, mqtt_broker, telegram) stay online while the PC is off.
+            parsed_ts = _parse_ts(ts)
+            invalid_ts = ts is not None and parsed_ts is None
+            future_skew = getattr(comp, "_last_future_skew", False)
+            if (
+                component in PC_LIFECYCLE_COMPONENTS
+                and accepted
+                and not invalid_ts
+                and not future_skew
+                and status in ("online", "unlocked", "locked", "fresh")
+            ):
+                msg_ts = parsed_ts if (parsed_ts is not None and parsed_ts > 0) else (
+                    comp.last_ts if comp.last_ts > 0 else time.time()
+                )
                 reboot_detected = bool(
                     boot_id and (
                         (old_boot_id and boot_id != old_boot_id)

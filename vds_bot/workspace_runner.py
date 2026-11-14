@@ -349,7 +349,7 @@ class WorkspaceRunnerMixin:
         vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
         vpn_name = "INCY" if active_vpn == "incy" else "Happ"
 
-        if not vpn_ready and (vpn_event and not vpn_event.is_set()):
+        if (not vpn_ready and (vpn_event and not vpn_event.is_set())) or self.app_statuses.get(vpn_step_id) in ("❌", "❌ Ошибка VPN"):
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
             self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
             error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
@@ -375,7 +375,20 @@ class WorkspaceRunnerMixin:
             self.power_flow.reset_flow()
             return
 
-        if not ws_executed or self.workspace_execution_result == "failed":
+        if getattr(self, "workspace_execution_result", None) == "cancelled":
+            LOG.info("Desktop agent reported workspace execution cancelled.")
+            cancel_text = render_checklist() + "\n\n<b>Запуск рабочего сетапа отменён.</b>"
+            cancel_markup = {
+                "inline_keyboard": [
+                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                    [{"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"}],
+                ]
+            }
+            self.ui.send_message(chat_id, cancel_text, reply_markup=cancel_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+            return
+
+        if not ws_executed or self.workspace_execution_result != "executed":
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
             error_text = render_checklist() + "\n\n<b>Ошибка выполнения рабочего сетапа.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
             error_markup = {
@@ -564,7 +577,7 @@ class WorkspaceRunnerMixin:
         vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
         vpn_name = "INCY" if active_vpn == "incy" else "Happ"
 
-        if not vpn_ready and (vpn_event and not vpn_event.is_set()):
+        if (not vpn_ready and (vpn_event and not vpn_event.is_set())) or self.app_statuses.get(vpn_step_id) in ("❌", "❌ Ошибка VPN"):
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
             self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
             error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск игры отменён в целях безопасности."
@@ -590,7 +603,20 @@ class WorkspaceRunnerMixin:
             self.power_flow.reset_flow()
             return
 
-        if not ws_executed or self.workspace_execution_result == "failed":
+        if getattr(self, "workspace_execution_result", None) == "cancelled":
+            LOG.info("Desktop agent reported game execution cancelled.")
+            cancel_text = render_checklist() + f"\n\n<b>Запуск {game_name} отменён.</b>"
+            cancel_markup = {
+                "inline_keyboard": [
+                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                    [{"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"}],
+                ]
+            }
+            self.ui.send_message(chat_id, cancel_text, reply_markup=cancel_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+            return
+
+        if not ws_executed or self.workspace_execution_result != "executed":
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
             error_text = render_checklist() + f"\n\n<b>Ошибка запуска {game_name}.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
             error_markup = {

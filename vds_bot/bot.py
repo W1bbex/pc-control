@@ -142,6 +142,8 @@ def resolve_menu_view(data: str) -> Optional[str]:
         return "history_menu"
     if data == "led_menu" or data.startswith("led_"):
         return "led_menu"
+    if data == "console_close":
+        return "main"
     if data in ("console_open", "console") or data.startswith("console_"):
         return "console"
     if data in ("antigravity_menu", "ag_refresh") or data.startswith("ag_"):
@@ -278,11 +280,7 @@ class PcControlBotApp(
                 self.last_unlock_gesture_time = time.time()
             self.power_flow.start_manual_unlock(chat_id)
         else:
-            self.power_flow.stage = PowerFlowStage.UNLOCKING
-            self.power_flow.unlock_attempts = 0
-            self.power_flow.pending_unlock_command_id = None
-            self.power_flow.chat_id = chat_id
-            self.power_flow.save_state()
+            self.power_flow.prepare_unlock_waiting(chat_id, auto_launch_workspace=False)
             res = self.ui.send_message(
                 chat_id,
                 "🔓 <b>Жест разблокировки принят!</b>\n⏳ ПК загружается — пароль будет введён автоматически при появлении экрана входа.",
@@ -299,15 +297,12 @@ class PcControlBotApp(
             if self.power_flow.stage == PowerFlowStage.WORKSPACE_RUNNING:
                 self.ui.send_message(chat_id, "ℹ️ <b>Рабочий сетап уже запускается.</b>")
                 return
-            self.power_flow.stage = PowerFlowStage.WORKSPACE_RUNNING
-            self.power_flow.workspace_cancelled = False
-            self.power_flow.active_workspace_id = f"ws-{int(time.time())}"
-            self.power_flow.save_state()
+            ws_id = self.power_flow.start_direct_setup(chat_id, prefix="ws")
             self.ui.send_message(
                 chat_id,
                 "🚀 <b>Жест 'Разблок + Сетап' принят!</b>\nWindows уже разблокирована — запускаю рабочий сетап...",
             )
-            self.start_async_workspace_setup(chat_id, workspace_id=self.power_flow.active_workspace_id)
+            self.start_async_workspace_setup(chat_id, workspace_id=ws_id)
             return
 
         self.power_flow.set_auto_launch_workspace(True)
@@ -324,11 +319,7 @@ class PcControlBotApp(
             if self.power_flow.stage != PowerFlowStage.UNLOCKING:
                 self.power_flow.start_manual_unlock(chat_id, auto_launch_workspace=True)
         else:
-            self.power_flow.stage = PowerFlowStage.UNLOCKING
-            self.power_flow.unlock_attempts = 0
-            self.power_flow.pending_unlock_command_id = None
-            self.power_flow.chat_id = chat_id
-            self.power_flow.save_state()
+            self.power_flow.prepare_unlock_waiting(chat_id, auto_launch_workspace=True)
             msg_text = "🚀 <b>Жест 'Разблок + Сетап' принят!</b>\n⏳ ПК загружается — после разблокировки автоматически запустится рабочий сетап."
             if can_edit:
                 self.ui.send_message(chat_id, msg_text, message_id=prev_msg_id)
@@ -338,47 +329,73 @@ class PcControlBotApp(
     def load_state(self):
         with getattr(self, "state_lock", threading.RLock()):
             try:
-                if STATE_PATH.exists():
-                    data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-                    self.offset = int(data.get("telegram_offset", 0))
-                    pwd = data.get("physical_password")
-                    if pwd:
-                        self.physical_btn.set_saved_password(pwd)
-                    unlock_pat = data.get("physical_unlock_pattern")
-                    if unlock_pat:
-                        self.physical_btn.saved_unlock_pattern = unlock_pat
-                    self.physical_btn.last_physical_morse_success_at = data.get("last_physical_morse_success_at")
-                    self.physical_btn.physical_morse_unlock_eligible = bool(data.get("physical_morse_unlock_eligible", False))
-                    self.physical_btn.esp_locked = bool(data.get("esp_locked", False))
-                    scheduled = data.get("scheduled_shutdown_ts")
-                    if scheduled:
-                        self.scheduled_shutdown_ts = float(scheduled)
-                    pending_shutdown = data.get("pending_shutdown") or {}
+                if not STATE_PATH.exists():
+                    return
+                data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    return
+            except Exception:
+                LOG.exception("Could not load state.json")
+                return
+
+            def _restore(field, fn):
+                try:
+                    fn()
+                except Exception as exc:
+                    LOG.warning("Ignoring corrupt state.json field %r: %s", field, exc)
+
+            _restore("telegram_offset", lambda: setattr(self, "offset", int(data.get("telegram_offset", 0) or 0)))
+
+            def _restore_physical():
+                pwd = data.get("physical_password")
+                if pwd:
+                    self.physical_btn.set_saved_password(pwd)
+                unlock_pat = data.get("physical_unlock_pattern")
+                if unlock_pat:
+                    self.physical_btn.saved_unlock_pattern = unlock_pat
+                self.physical_btn.last_physical_morse_success_at = data.get("last_physical_morse_success_at")
+                self.physical_btn.physical_morse_unlock_eligible = bool(data.get("physical_morse_unlock_eligible", False))
+                self.physical_btn.esp_locked = bool(data.get("esp_locked", False))
+
+            _restore("physical_btn", _restore_physical)
+
+            def _restore_shutdown():
+                scheduled = data.get("scheduled_shutdown_ts")
+                if scheduled:
+                    self.scheduled_shutdown_ts = float(scheduled)
+                pending_shutdown = data.get("pending_shutdown")
+                if isinstance(pending_shutdown, dict):
                     self.pending_shutdown_cmd_id = pending_shutdown.get("id")
                     self.pending_shutdown_started_at = pending_shutdown.get("started_at")
                     self.shutdown_acknowledged = bool(pending_shutdown.get("acknowledged"))
-                    active_p = data.get("active_player") or {}
-                    if active_p.get("message_id"):
-                        self.active_player_message_id = active_p.get("message_id")
-                        self.active_player_chat_id = active_p.get("chat_id")
-                        self.active_player_business_connection_id = active_p.get("business_connection_id")
-                        self.active_player_is_photo = bool(active_p.get("is_photo", False))
-                        self.active_player_cover_url = active_p.get("cover_url")
-                    self.active_main_menu_message_id = data.get("active_main_menu_message_id")
-                    self.current_menu_view = data.get("current_menu_view", "main")
-                    self.console_target = data.get("console_target", "desktop")
-                    self.console_shell = data.get("console_shell", "powershell")
-                    self.user_led_state = data.get("user_led_state", "on")
-                    self.user_led_color = data.get("user_led_color", "255,150,125")
-                    self.user_led_brightness = int(data.get("user_led_brightness", 160))
-            except Exception:
-                LOG.exception("Could not load state.json")
+
+            _restore("shutdown", _restore_shutdown)
+
+            def _restore_player():
+                active_p = data.get("active_player")
+                if isinstance(active_p, dict) and active_p.get("message_id"):
+                    self.active_player_message_id = active_p.get("message_id")
+                    self.active_player_chat_id = active_p.get("chat_id")
+                    self.active_player_business_connection_id = active_p.get("business_connection_id")
+                    self.active_player_is_photo = bool(active_p.get("is_photo", False))
+                    self.active_player_cover_url = active_p.get("cover_url")
+
+            _restore("active_player", _restore_player)
+
+            _restore("active_main_menu_message_id", lambda: setattr(self, "active_main_menu_message_id", data.get("active_main_menu_message_id")))
+            _restore("current_menu_view", lambda: setattr(self, "current_menu_view", str(data.get("current_menu_view") or "main")))
+            _restore("chosen_vpn", lambda: setattr(self, "chosen_vpn", data.get("chosen_vpn") if data.get("chosen_vpn") in ("incy", "happ") else getattr(self, "chosen_vpn", "incy")))
+            _restore("console_target", lambda: setattr(self, "console_target", str(data.get("console_target") or "desktop")))
+            _restore("console_shell", lambda: setattr(self, "console_shell", str(data.get("console_shell") or "powershell")))
+            _restore("user_led_state", lambda: setattr(self, "user_led_state", str(data.get("user_led_state") or "on")))
+            _restore("user_led_color", lambda: setattr(self, "user_led_color", str(data.get("user_led_color") or "255,150,125")))
+            _restore("user_led_brightness", lambda: setattr(self, "user_led_brightness", int(data.get("user_led_brightness", 160))))
 
     def save_state(self):
         with getattr(self, "state_lock", threading.RLock()):
+            temp = STATE_PATH.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
             try:
                 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                temp = STATE_PATH.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
                 phys_btn = getattr(self, "physical_btn", None)
                 data = {
                     "telegram_offset": getattr(self, "offset", 0),
@@ -402,6 +419,7 @@ class PcControlBotApp(
                     } if getattr(self, "active_player_message_id", None) else None,
                     "active_main_menu_message_id": getattr(self, "active_main_menu_message_id", None),
                     "current_menu_view": getattr(self, "current_menu_view", "main"),
+                    "chosen_vpn": getattr(self, "chosen_vpn", "incy"),
                     "console_target": getattr(self, "console_target", "desktop"),
                     "console_shell": getattr(self, "console_shell", "powershell"),
                     "user_led_state": getattr(self, "user_led_state", "on"),
@@ -409,10 +427,19 @@ class PcControlBotApp(
                     "user_led_brightness": getattr(self, "user_led_brightness", 160),
                 }
                 temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                os.chmod(temp, 0o600)
+                try:
+                    os.chmod(temp, 0o600)
+                except Exception:
+                    pass
                 os.replace(temp, STATE_PATH)
+                return True
             except Exception:
                 LOG.exception("Could not save state.json")
+                try:
+                    temp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False
 
     def _main_menu_markup(self):
         pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age())
@@ -460,10 +487,20 @@ class PcControlBotApp(
         if new_view is not None:
             self.current_menu_view = new_view
 
-        if getattr(getattr(self, "physical_btn", None), "mode", None) == "test" and data != "physical_test":
-            if hasattr(self.mqtt, "publish_esp_action"):
+        phys = getattr(self, "physical_btn", None)
+        if phys is not None:
+            phys_lock = getattr(phys, "_lock", None)
+            if phys_lock is not None:
+                with phys_lock:
+                    was_test = getattr(phys, "mode", None) == "test" and data != "physical_test"
+                    if was_test:
+                        phys.mode = None
+            else:
+                was_test = getattr(phys, "mode", None) == "test" and data != "physical_test"
+                if was_test:
+                    phys.mode = None
+            if was_test and hasattr(self.mqtt, "publish_esp_action"):
                 self.mqtt.publish_esp_action("STOP_PHYSICAL_TEST")
-            self.physical_btn.mode = None
 
         # Modular Router Delegation
         if route_power_callback(self, data, chat_id, message_id, callback_id):
@@ -575,18 +612,31 @@ class PcControlBotApp(
                     else:
                         self._dispatch_update(update)
                 self.save_state()
-        except Exception:
-            LOG.exception("Telegram polling exception")
+        except Exception as err:
+            LOG.error("Telegram polling error: %s", self.ui.sanitize_error(err))
             time.sleep(3)
 
     def _acquire_lock(self):
         try:
             LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-            if LOCK_PATH.exists():
+            for _attempt in range(3):
                 try:
-                    content = LOCK_PATH.read_text(encoding="utf-8").strip()
+                    fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    try:
+                        os.write(fd, str(os.getpid()).encode("utf-8"))
+                    finally:
+                        os.close(fd)
+                    LOG.info("Acquired single-instance lock (PID %d) at %s", os.getpid(), LOCK_PATH)
+                    return
+                except FileExistsError:
+                    try:
+                        content = LOCK_PATH.read_text(encoding="utf-8").strip()
+                    except FileNotFoundError:
+                        continue
                     old_pid = int(content) if content.isdigit() else None
-                    if old_pid and psutil.pid_exists(old_pid):
+                    if old_pid == os.getpid():
+                        LOG.warning("Lockfile holds our own PID %d (PID reuse after restart). Reclaiming lock.", old_pid)
+                    elif old_pid and psutil.pid_exists(old_pid):
                         is_bot = False
                         proc = None
                         try:
@@ -601,20 +651,21 @@ class PcControlBotApp(
                         if is_bot:
                             LOG.error("Another bot instance is already running (PID %d). Aborting to prevent 409 conflict.", old_pid)
                             sys.exit(0)
-                        else:
-                            proc_name_str = "unknown"
-                            if proc is not None:
-                                try:
-                                    proc_name_str = proc.name()
-                                except Exception:
-                                    pass
-                            LOG.warning("Lockfile PID %d belongs to unrelated process (%s). Overwriting stale lock.", old_pid, proc_name_str)
+                            return
+                        proc_name_str = "unknown"
+                        if proc is not None:
+                            try:
+                                proc_name_str = proc.name()
+                            except Exception:
+                                pass
+                        LOG.warning("Lockfile PID %d belongs to unrelated process (%s). Overwriting stale lock.", old_pid, proc_name_str)
                     else:
                         LOG.warning("Found stale lockfile from PID %s. Overwriting.", content)
-                except Exception as e:
-                    LOG.warning("Could not check existing lockfile: %s", e)
+
+                    LOCK_PATH.unlink(missing_ok=True)
+
+            LOG.warning("Failed to exclusively create lockfile after retries; forcing lock write.")
             LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
-            LOG.info("Acquired single-instance lock (PID %d) at %s", os.getpid(), LOCK_PATH)
         except Exception as e:
             LOG.warning("Could not acquire single-instance lock: %s", e)
 
@@ -632,9 +683,12 @@ class PcControlBotApp(
         LOG.info("Stopping PC Control Bot...")
         self.running = False
         try:
-            if hasattr(self, "mqtt") and hasattr(self.mqtt, "client"):
-                self.mqtt.client.loop_stop()
-                self.mqtt.client.disconnect()
+            if hasattr(self, "mqtt") and self.mqtt is not None:
+                if hasattr(self.mqtt, "stop") and callable(self.mqtt.stop):
+                    self.mqtt.stop()
+                elif hasattr(self.mqtt, "client"):
+                    self.mqtt.client.loop_stop()
+                    self.mqtt.client.disconnect()
         except Exception as e:
             LOG.warning("Error stopping MQTT client: %s", e)
         if hasattr(self, "_executor"):
@@ -642,6 +696,25 @@ class PcControlBotApp(
                 self._executor.shutdown(wait=False)
             except Exception:
                 pass
+        timer = getattr(self, "_player_timer", None)
+        if timer is not None and hasattr(timer, "cancel"):
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._player_timer = None
+        self._player_timer_running = False
+        polling_session = getattr(self, "polling_session", None)
+        if polling_session is not None and hasattr(polling_session, "close"):
+            try:
+                polling_session.close()
+            except Exception as e:
+                LOG.warning("Error closing Telegram polling session: %s", e)
+        try:
+            if hasattr(self, "ui") and hasattr(self.ui, "close_sessions"):
+                self.ui.close_sessions()
+        except Exception as e:
+            LOG.warning("Error closing Telegram HTTP sessions: %s", e)
         self._release_lock()
 
     def register_commands(self):

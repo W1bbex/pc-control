@@ -10,7 +10,7 @@ import threading
 import time
 
 LOG = logging.getLogger("pc-control-bot.player")
-ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "0"))
+ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID") or 0)
 
 
 class PlayerManagerMixin:
@@ -78,23 +78,59 @@ class PlayerManagerMixin:
         menu_msg_id = getattr(self, "active_main_menu_message_id", None)
         if not menu_msg_id or getattr(self, "current_menu_view", "main") != "main":
             return
-        try:
-            text = self.monitoring.dashboard_text(data)
-            markup = self._main_menu_markup()
-            target_user_id = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
-            self.ui.send_message(
-                target_user_id,
-                text,
-                reply_markup=markup,
-                message_id=menu_msg_id,
-            )
-        except Exception:
-            LOG.exception("Failed to update dashboard on media event")
+
+        def _send_update():
+            try:
+                text = self.monitoring.dashboard_text(data)
+                markup = self._main_menu_markup()
+                target_user_id = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
+                self.ui.send_message(
+                    target_user_id,
+                    text,
+                    reply_markup=markup,
+                    message_id=menu_msg_id,
+                )
+            except Exception:
+                LOG.exception("Failed to update dashboard on media event")
+
+        executor = getattr(self, "_executor", None)
+        if executor is not None and getattr(self, "async_dispatch", False):
+            executor.submit(_send_update)
+        else:
+            _send_update()
 
     def _delete_old_player_card(self):
-        old_msg_id = getattr(self, "active_player_message_id", None)
-        old_chat_id = getattr(self, "active_player_chat_id", None)
-        old_conn_id = getattr(self, "active_player_business_connection_id", None)
+        lock = getattr(self, "player_edit_lock", None)
+        if lock is not None:
+            with lock:
+                timer = getattr(self, "_player_timer", None)
+                if timer is not None:
+                    timer.cancel()
+                self._player_timer_running = False
+                self._pending_player_data = None
+                old_msg_id = getattr(self, "active_player_message_id", None)
+                old_chat_id = getattr(self, "active_player_chat_id", None)
+                old_conn_id = getattr(self, "active_player_business_connection_id", None)
+                self.active_player_message_id = None
+                self.active_player_chat_id = None
+                self.active_player_business_connection_id = None
+                self.active_player_is_photo = False
+                self.active_player_cover_url = None
+        else:
+            timer = getattr(self, "_player_timer", None)
+            if timer is not None:
+                timer.cancel()
+            self._player_timer_running = False
+            self._pending_player_data = None
+            old_msg_id = getattr(self, "active_player_message_id", None)
+            old_chat_id = getattr(self, "active_player_chat_id", None)
+            old_conn_id = getattr(self, "active_player_business_connection_id", None)
+            self.active_player_message_id = None
+            self.active_player_chat_id = None
+            self.active_player_business_connection_id = None
+            self.active_player_is_photo = False
+            self.active_player_cover_url = None
+
         target_user_id = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
         if old_chat_id == target_user_id:
             old_conn_id = None
@@ -103,11 +139,6 @@ class PlayerManagerMixin:
                 self.ui.delete_message(old_chat_id, old_msg_id, business_connection_id=old_conn_id)
             except Exception as e:
                 LOG.warning("Could not delete old player card %s in chat %s: %s", old_msg_id, old_chat_id, e)
-        self.active_player_message_id = None
-        self.active_player_chat_id = None
-        self.active_player_business_connection_id = None
-        self.active_player_is_photo = False
-        self.active_player_cover_url = None
 
     def _send_player_card(self, chat_id, media_state, business_connection_id=None):
         target_user_id = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
@@ -147,12 +178,22 @@ class PlayerManagerMixin:
             is_photo = False
 
         if res and isinstance(res, dict) and "message_id" in res:
-            self.active_player_message_id = res["message_id"]
-            self.active_player_chat_id = chat_id
-            self.active_player_business_connection_id = business_connection_id
-            self.active_player_is_photo = is_photo
-            self.active_player_cover_url = cover_url if is_photo else None
-            self.last_player_edit_time = time.time()
+            lock = getattr(self, "player_edit_lock", None)
+            if lock is not None:
+                with lock:
+                    self.active_player_message_id = res["message_id"]
+                    self.active_player_chat_id = chat_id
+                    self.active_player_business_connection_id = business_connection_id
+                    self.active_player_is_photo = is_photo
+                    self.active_player_cover_url = cover_url if is_photo else None
+                    self.last_player_edit_time = time.time()
+            else:
+                self.active_player_message_id = res["message_id"]
+                self.active_player_chat_id = chat_id
+                self.active_player_business_connection_id = business_connection_id
+                self.active_player_is_photo = is_photo
+                self.active_player_cover_url = cover_url if is_photo else None
+                self.last_player_edit_time = time.time()
             self.save_state()
             LOG.info("Active player set to chat %s msg %s (is_photo=%s, conn=%s)", chat_id, res["message_id"], is_photo, business_connection_id)
             return res

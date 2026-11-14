@@ -13,6 +13,13 @@ import time
 
 import psutil
 
+from core.hardware_utils import (
+    compute_network_rates,
+    get_cpu_name as read_cpu_name,
+    get_local_ip as resolve_local_ip,
+    query_nvidia_gpu,
+)
+from core.process_utils import get_top_processes
 from desktop.constants import (
     AGENT_BOOT_ID,
     AGENT_START_TIME,
@@ -22,32 +29,30 @@ from desktop.constants import (
 )
 
 LOG = logging.getLogger("pc-control-agent")
+_STATE_LOCK_INIT_GUARD = threading.Lock()
 
 
 class TelemetryMixin:
     """Provides system hardware metrics, network rates, audio control, and telemetry publishing."""
 
+    def _get_state_lock(self):
+        lock = getattr(self, "state_lock", None)
+        if lock is not None:
+            return lock
+        with _STATE_LOCK_INIT_GUARD:
+            lock = getattr(self, "state_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self.state_lock = lock
+            return lock
+
     @staticmethod
     def get_cpu_name():
-        try:
-            import winreg
-
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-            ) as key:
-                return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
-        except Exception:
-            return platform.processor() or "Unknown CPU"
+        return read_cpu_name()
 
     @staticmethod
     def get_local_ip():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.connect(("1.1.1.1", 53))
-                return sock.getsockname()[0]
-        except OSError:
-            return "unknown"
+        return resolve_local_ip()
 
     @staticmethod
     def get_session_seconds():
@@ -73,13 +78,25 @@ class TelemetryMixin:
         info.cbSize = ctypes.sizeof(info)
         if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
             return None
-        elapsed_ms = (ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+        kernel32 = ctypes.windll.kernel32
+        if hasattr(kernel32, "GetTickCount64"):
+            kernel32.GetTickCount64.restype = ctypes.c_uint64
+            kernel32.GetTickCount64.argtypes = []
+            now_ms = kernel32.GetTickCount64()
+        else:
+            kernel32.GetTickCount.restype = wintypes.DWORD
+            kernel32.GetTickCount.argtypes = []
+            now_ms = kernel32.GetTickCount()
+        elapsed_ms = (now_ms - info.dwTime) & 0xFFFFFFFF
         return max(0, int(elapsed_ms / 1000))
 
     @staticmethod
     def get_foreground_window_safe():
         try:
-            return ctypes.windll.user32.GetForegroundWindow() or None
+            user32 = ctypes.windll.user32
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetForegroundWindow.argtypes = []
+            return user32.GetForegroundWindow() or None
         except Exception:
             return None
 
@@ -88,6 +105,26 @@ class TelemetryMixin:
         try:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype = ctypes.c_int
+            user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetWindowTextW.restype = ctypes.c_int
+            user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetClassNameW.restype = ctypes.c_int
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE,
+                wintypes.DWORD,
+                wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
             hwnd = self.get_foreground_window_safe()
             if not hwnd:
                 return "Рабочий стол", desktop_emoji, None
@@ -95,7 +132,6 @@ class TelemetryMixin:
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if not pid.value:
                 return "Рабочий стол", desktop_emoji, None
-            kernel32.OpenProcess.restype = wintypes.HANDLE
             hproc = kernel32.OpenProcess(0x1000, False, pid.value)
             name = None
             if hproc:
@@ -135,52 +171,7 @@ class TelemetryMixin:
 
     @staticmethod
     def query_gpu():
-        command = [
-            "nvidia-smi",
-            "--query-gpu=name,temperature.gpu,utilization.gpu,"
-            "memory.used,memory.total,fan.speed,power.draw,"
-            "clocks.gr,clocks.mem",
-            "--format=csv,noheader,nounits",
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                check=True,
-            )
-            lines = [l for l in completed.stdout.splitlines() if l.strip()]
-            if not lines:
-                return None
-            values = [
-                item.strip()
-                for item in lines[0].split(",")
-            ]
-
-            def optional_number(value):
-                if value.upper() in {"N/A", "[N/A]", "NOT SUPPORTED"}:
-                    return None
-                return float(value)
-
-            return {
-                "name": values[0],
-                "temp_c": optional_number(values[1]),
-                "load_percent": optional_number(values[2]),
-                "vram_used_mb": optional_number(values[3]),
-                "vram_total_mb": optional_number(values[4]),
-                "fan_percent": optional_number(values[5]),
-                "power_w": optional_number(values[6]),
-                "clock_mhz": optional_number(values[7]),
-                "memory_clock_mhz": optional_number(values[8]),
-            }
-        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
-            LOG.debug("NVIDIA GPU query not available: %s", e)
-            return None
-        except Exception as e:
-            LOG.warning("Could not query NVIDIA GPU: %s", e)
-            return None
+        return query_nvidia_gpu(logger=LOG, warn_on_error=True)
 
     @staticmethod
     def get_volume():
@@ -232,29 +223,7 @@ class TelemetryMixin:
             pythoncom.CoUninitialize()
 
     def network_rates(self):
-        now = time.time()
-        current = psutil.net_io_counters()
-        if current is None or self.previous_net is None:
-            return {
-                "download_mbps": 0.0,
-                "upload_mbps": 0.0,
-                "received_gb": 0.0,
-                "sent_gb": 0.0,
-            }
-        elapsed = max(0.1, now - self.previous_net_time)
-
-        received = max(0, current.bytes_recv - self.previous_net.bytes_recv)
-        sent = max(0, current.bytes_sent - self.previous_net.bytes_sent)
-
-        self.previous_net = current
-        self.previous_net_time = now
-
-        return {
-            "download_mbps": round(received * 8 / elapsed / 1_000_000, 2),
-            "upload_mbps": round(sent * 8 / elapsed / 1_000_000, 2),
-            "received_gb": round(current.bytes_recv / 1_000_000_000, 2),
-            "sent_gb": round(current.bytes_sent / 1_000_000_000, 2),
-        }
+        return compute_network_rates(self, self._get_state_lock())
 
     def collect_telemetry(self):
         now = time.time()
@@ -325,7 +294,6 @@ class TelemetryMixin:
                 title_lower = (active_title or "").lower()
                 if "pc control" in title_lower or "your_pc_bot" in title_lower:
                     is_pc_control = True
-        self.in_pc_control_chat = is_pc_control
 
         telemetry = {
             "timestamp": int(now),
@@ -369,61 +337,18 @@ class TelemetryMixin:
             "sensors": temperatures,
             "stealth_mode": self.stealth_mgr.is_active(),
         }
-        self.last_telemetry = telemetry
+        with self._get_state_lock():
+            self.in_pc_control_chat = is_pc_control
+            self.last_telemetry = telemetry
         return telemetry
 
     @staticmethod
     def top_processes():
-        tracked = {}
-        for process in psutil.process_iter(["pid", "name"]):
-            try:
-                process.cpu_percent(None)
-                tracked[process.pid] = process
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-        time.sleep(0.7)
-
-        processes = []
-        for pid, process in tracked.items():
-            if pid == 0:
-                continue
-            try:
-                cpu_percent = process.cpu_percent(None)
-                cpu_percent /= max(1, psutil.cpu_count() or 1)
-                mem = process.info.get("memory_info") if hasattr(process, "info") and process.info else None
-                if mem is None:
-                    try:
-                        mem = process.memory_info()
-                    except Exception:
-                        mem = None
-                rss_bytes = getattr(mem, "rss", 0) if mem else 0
-                name = process.info.get("name") if hasattr(process, "info") and process.info else None
-                if not name:
-                    try:
-                        name = process.name()
-                    except Exception:
-                        name = "unknown"
-                processes.append(
-                    {
-                        "pid": pid,
-                        "name": name or "unknown",
-                        "cpu_percent": round(cpu_percent, 1),
-                        "memory_mb": round(rss_bytes / 1_000_000, 1),
-                    }
-                )
-            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, TypeError):
-                continue
-
-        processes.sort(
-            key=lambda item: (item["cpu_percent"], item["memory_mb"]),
-            reverse=True,
-        )
-        return processes[:10]
+        return get_top_processes()
 
     def publish_telemetry(self):
         telemetry = self.collect_telemetry()
-        with self.state_lock:
+        with self._get_state_lock():
             self.last_telemetry = telemetry
             payload = json.dumps(telemetry, ensure_ascii=False)
         self.mqtt.publish(
@@ -437,9 +362,14 @@ class TelemetryMixin:
         if not getattr(self, "mqtt_online", False):
             return
         try:
-            with self.state_lock:
-                if not self.last_telemetry:
-                    self.last_telemetry = self.collect_telemetry()
+            lock = self._get_state_lock()
+            with lock:
+                need_collect = not bool(getattr(self, "last_telemetry", None))
+            collected = self.collect_telemetry() if need_collect else None
+
+            with lock:
+                if not getattr(self, "last_telemetry", None):
+                    self.last_telemetry = collected if collected is not None else {}
                 self.last_telemetry["active_application"] = proc_name
                 self.last_telemetry["active_application_emoji_id"] = emoji_id
                 self.last_telemetry["active_window_title"] = title
@@ -466,38 +396,44 @@ class TelemetryMixin:
             LOG.exception("Failed to publish instant active app telemetry")
 
     def _handle_active_app_change(self, exe_path, exe_name, title):
-        from core.app_emoji_manager import IGNORED_PROCESSES
+        from core.app_emoji_manager import IGNORED_PROCESSES, read_cached_emoji_id
         from core.activity_db import get_activity_db
 
         key = exe_name.lower()
         if key in IGNORED_PROCESSES:
             return
 
-        with self.state_lock:
+        state_lock = self._get_state_lock()
+        emoji_id = read_cached_emoji_id(self.emoji_manager, key)
+
+        session_to_record = None
+        with state_lock:
             if self.current_session_app and key == self.current_session_app.lower():
                 self.current_session_title = title
                 return
 
             now = time.time()
             if self.current_session_app and self.current_session_start:
-                try:
-                    get_activity_db().record_session(
-                        app_name=self.current_session_app,
-                        window_title=self.current_session_title,
-                        exe_path=self.current_session_exe,
-                        started_at=self.current_session_start,
-                        ended_at=now,
-                        emoji_id=self.current_session_emoji_id,
-                    )
-                except Exception:
-                    LOG.exception("Failed to record session to SQLite")
+                session_to_record = {
+                    "app_name": self.current_session_app,
+                    "window_title": self.current_session_title,
+                    "exe_path": self.current_session_exe,
+                    "started_at": self.current_session_start,
+                    "ended_at": now,
+                    "emoji_id": self.current_session_emoji_id,
+                }
 
-            emoji_id = self.emoji_manager.cache.get(key, {}).get("emoji_id")
             self.current_session_app = exe_name
             self.current_session_title = title
             self.current_session_exe = exe_path
             self.current_session_start = now
             self.current_session_emoji_id = emoji_id
+
+        if session_to_record is not None:
+            try:
+                get_activity_db().record_session(**session_to_record)
+            except Exception:
+                LOG.exception("Failed to record session to SQLite")
 
         self.publish_active_app_update(exe_name, emoji_id, title)
 
@@ -509,7 +445,7 @@ class TelemetryMixin:
                     )
                     if new_emoji_id:
                         should_publish = False
-                        with self.state_lock:
+                        with state_lock:
                             if self.current_session_app == exe_name:
                                 self.current_session_emoji_id = new_emoji_id
                                 if new_emoji_id != emoji_id:

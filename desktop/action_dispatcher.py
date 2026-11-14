@@ -6,6 +6,7 @@ import os
 import subprocess
 import threading
 import time
+from core.process_utils import run_shell_command
 from desktop.codex_launch import diagnose_codex_launch
 
 LOG = logging.getLogger("pc-control-agent")
@@ -211,46 +212,12 @@ class ActionDispatcherMixin:
                 timeout_s = max(1, min(int(args.get("timeout", 60)), 300))
                 cwd = args.get("cwd") or os.environ.get("USERPROFILE") or "C:\\"
 
-                if use_ps:
-                    exec_args = [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {cmd_text}",
-                    ]
-                else:
-                    exec_args = ["cmd.exe", "/c", f"chcp 65001 >nul & {cmd_text}"]
-
-                try:
-                    p = subprocess.run(
-                        exec_args,
-                        capture_output=True,
-                        timeout=timeout_s,
-                        cwd=cwd,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                    stdout = p.stdout
-                    stderr = p.stderr
-                    code = p.returncode
-                except subprocess.TimeoutExpired:
-                    stdout = ""
-                    stderr = f"Command timed out after {timeout_s}s"
-                    code = 124
-                except Exception as e:
-                    stdout = ""
-                    stderr = f"Execution error: {e}"
-                    code = -1
-
-                max_len = 8000
-                if len(stdout) > max_len:
-                    stdout = stdout[:max_len] + f"\n... [обрезано {len(stdout) - max_len} симв.]"
-                if len(stderr) > 4000:
-                    stderr = stderr[:4000] + "\n... [обрезано]"
+                code, stdout, stderr = run_shell_command(
+                    cmd_text,
+                    use_ps=use_ps,
+                    timeout_s=timeout_s,
+                    cwd=cwd,
+                )
 
                 self.acknowledge(
                     command_id,
@@ -297,11 +264,26 @@ class ActionDispatcherMixin:
                 was_running = self.antigravity_manager.is_ide_running()
                 if was_running:
                     self.antigravity_manager.kill_ide()
-                restarted = self.antigravity_manager.launch_ide()
+                try:
+                    restarted = bool(self.antigravity_manager.launch_ide())
+                except Exception as err:
+                    self.acknowledge(
+                        command_id,
+                        "failed",
+                        {"success": False, "restarted": False, "error": str(err)},
+                    )
+                    return
+                if not restarted:
+                    self.acknowledge(
+                        command_id,
+                        "failed",
+                        {"success": False, "restarted": False, "error": "Failed to launch Antigravity IDE"},
+                    )
+                    return
                 self.acknowledge(
                     command_id,
                     "executed",
-                    {"success": True, "restarted": restarted},
+                    {"success": True, "restarted": True},
                 )
                 return
 

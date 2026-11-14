@@ -252,7 +252,7 @@ class StealthOverlay:
             return 1
         return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
-    def _are_modifiers_matching(self, allow_recent_win: bool = False) -> bool:
+    def _are_modifiers_matching(self) -> bool:
         """Check whether current modifier states match self.required_mods."""
         try:
             ctrl_hw = bool(user32.GetAsyncKeyState(0x11) & 0x8000)
@@ -303,7 +303,7 @@ class StealthOverlay:
                     return 1
 
             # 2. Check modifiers (Win MUST be physically down)
-            mods_ok = self._are_modifiers_matching(allow_recent_win=False)
+            mods_ok = self._are_modifiers_matching()
 
             # 3. Check chord match (all sequence keys pressed simultaneously while modifiers held)
             chord_matched = False
@@ -376,10 +376,15 @@ class StealthOverlay:
 
     def _periodic_guard(self):
         if self._stopped.is_set():
+            if self._root:
+                try:
+                    self._root.quit()
+                except Exception:
+                    pass
             return
         self._lock_cursor_and_topmost(set_pos=False)
         if self._root and not self._stopped.is_set():
-            self._root.after(500, self._periodic_guard)
+            self._root.after(200, self._periodic_guard)
 
     def _listen_stdin(self):
         """Listen on stdin for 'stop' command from parent process."""
@@ -445,6 +450,8 @@ class StealthOverlay:
 
         if not self._mouse_hook or not self._keyboard_hook:
             LOG.error("Failed to install Windows low-level input hooks!")
+            self._cleanup()
+            raise RuntimeError("Failed to install low-level input hooks")
 
         # Create Tkinter TopMost black window
         self._root = tk.Tk()
@@ -475,7 +482,7 @@ class StealthOverlay:
             self._network_thread.start()
 
         self._lock_cursor_and_topmost(set_pos=True)
-        self._root.after(500, self._periodic_guard)
+        self._root.after(200, self._periodic_guard)
 
         # Watchdog timeout
         timeout_ms = int(self.timeout_seconds * 1000)
@@ -525,9 +532,9 @@ class StealthOverlay:
         except Exception as err:
             LOG.debug("Failed saving stealth exit reason: %s", err)
 
-        if self._root:
+        if self._root and threading.current_thread() is threading.main_thread():
             try:
-                self._root.after(0, self._root.quit)
+                self._root.quit()
             except Exception:
                 pass
 
@@ -635,9 +642,13 @@ class StealthManager:
                 return True
 
             hk = hotkey or self.default_hotkey
-            tm = int(timeout_minutes or self.default_timeout_minutes)
+            tm = int(self.default_timeout_minutes if timeout_minutes is None else timeout_minutes)
             timeout_sec = tm * 60
-            otm = int(offline_timeout_minutes or self.default_offline_timeout_minutes)
+            otm = int(
+                self.default_offline_timeout_minutes
+                if offline_timeout_minutes is None
+                else offline_timeout_minutes
+            )
             offline_sec = otm * 60
 
             cmd = [
@@ -730,10 +741,12 @@ class StealthManager:
 
     def get_status(self) -> dict:
         """Return current status dict for telemetry."""
-        active = self.is_active()
+        with self._lock:
+            active = self.is_active()
+            pid = self._process.pid if active and self._process else None
         return {
             "active": active,
-            "pid": self._process.pid if active and self._process else None,
+            "pid": pid,
             "hotkey": self.default_hotkey,
             "timeout_minutes": self.default_timeout_minutes,
             "offline_timeout_minutes": self.default_offline_timeout_minutes,

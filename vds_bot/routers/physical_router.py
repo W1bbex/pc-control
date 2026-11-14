@@ -8,24 +8,29 @@ LOG = logging.getLogger("pc-control-bot.routers.physical")
 
 def route_physical_callback(app, data: str, chat_id: int, message_id: int, callback_id: str) -> bool:
     """Handle physical button and Morse code pattern callback queries. Returns True if handled, False otherwise."""
+    pbtn = app.physical_btn
+
     # 1. Physical Button Menu
     if data == "physical_button":
         app.ui.answer_callback(callback_id)
-        if getattr(app.physical_btn, "mode", None) == "test":
+        with pbtn._lock:
+            was_test = getattr(pbtn, "mode", None) == "test"
+            pbtn.mode = None
+            pbtn.active_message_id = None
+            pbtn.input_message_id = None
+            text = pbtn.physical_control_text()
+            markup = pbtn.physical_control_markup()
+        if was_test:
             app.mqtt.publish_esp_action("STOP_PHYSICAL_TEST")
-        app.physical_btn.mode = None
-        app.physical_btn.active_message_id = None
-        app.physical_btn.input_message_id = None
-        text = app.physical_btn.physical_control_text()
-        markup = app.physical_btn.physical_control_markup()
         app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
 
     # 2. Button Diagnostics / Test
     if data == "physical_test":
         app.ui.answer_callback(callback_id)
-        app.physical_btn.mode = "test"
-        app.physical_btn.input_entries = ["Ожидаю нажатия на кнопку..."]
+        with pbtn._lock:
+            pbtn.mode = "test"
+            pbtn.input_entries = ["Ожидаю нажатия на кнопку..."]
         app.mqtt.publish_esp_action("START_PHYSICAL_TEST")
         text = "<b>🕹 Физическая кнопка — диагностика</b>\n\nОжидаю нажатия..."
         res = app.ui.send_message(
@@ -35,169 +40,216 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
             message_id=message_id,
         )
         if res and res.get("message_id"):
-            app.physical_btn.input_message_id = res["message_id"]
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.input_message_id = res["message_id"]
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 3. Begin Password Recording
-    if data in ("physical_record_begin", "physical_password_begin"):
+    if data == "physical_record_begin":
         app.ui.answer_callback(callback_id)
         app.mqtt.publish_esp_action("START_PHYSICAL_RECORDING")
-        app.physical_btn.mode = "record_password"
-        app.physical_btn.password_draft = []
-        app.physical_btn.last_press_info = None
-        text = app.physical_btn.password_record_text()
-        markup = app.physical_btn.password_record_markup()
+        with pbtn._lock:
+            pbtn.mode = "record_password"
+            pbtn.password_draft = []
+            pbtn.last_press_info = None
+            text = pbtn.password_record_text()
+            markup = pbtn.password_record_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 4. Save Hardware Recording
     if data.startswith("physical_record_save:"):
         seq = data.split(":", 1)[1]
         app.ui.answer_callback(callback_id, "Сохраняю...")
-        app.physical_btn.mode = None
-        app.physical_btn.active_message_id = None
-        app.physical_btn.start_save_password(seq, chat_id, app.save_state)
+        with pbtn._lock:
+            pbtn.mode = None
+            pbtn.active_message_id = None
+        pbtn.start_save_password(seq, chat_id)
         return True
 
     # 5. Add Symbol to Password Draft
     if data.startswith("physical_add:"):
         app.ui.answer_callback(callback_id)
         symbol = data.split(":", 1)[1]
-        if len(app.physical_btn.password_draft) < 12:
-            app.physical_btn.password_draft.append(symbol)
-            app.physical_btn.last_press_info = "Введено в боте"
-        text = app.physical_btn.password_record_text()
-        markup = app.physical_btn.password_record_markup()
+        with pbtn._lock:
+            if len(pbtn.password_draft) < 12:
+                pbtn.password_draft.append(symbol)
+                pbtn.last_press_info = "Введено в боте"
+            text = pbtn.password_record_text()
+            markup = pbtn.password_record_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 6. Backspace Password Symbol
     if data == "physical_back":
         app.ui.answer_callback(callback_id)
-        if app.physical_btn.password_draft:
-            app.physical_btn.password_draft.pop()
-        text = app.physical_btn.password_record_text()
-        markup = app.physical_btn.password_record_markup()
+        with pbtn._lock:
+            if pbtn.password_draft:
+                pbtn.password_draft.pop()
+            text = pbtn.password_record_text()
+            markup = pbtn.password_record_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 7. Clear Password Draft
     if data == "physical_clear":
         app.ui.answer_callback(callback_id, "Очищено")
-        app.physical_btn.password_draft = []
-        app.physical_btn.last_press_info = None
-        text = app.physical_btn.password_record_text()
-        markup = app.physical_btn.password_record_markup()
+        with pbtn._lock:
+            pbtn.password_draft = []
+            pbtn.last_press_info = None
+            text = pbtn.password_record_text()
+            markup = pbtn.password_record_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 8. Save Password Draft
     if data == "physical_save":
         app.ui.answer_callback(callback_id, "Сохраняю...")
-        app.physical_btn.mode = None
-        app.physical_btn.active_message_id = None
-        seq = "".join(app.physical_btn.password_draft)
-        app.physical_btn.start_save_password(seq, chat_id, app.save_state)
+        with pbtn._lock:
+            pbtn.mode = None
+            pbtn.active_message_id = None
+            seq = "".join(pbtn.password_draft)
+        pbtn.start_save_password(seq, chat_id)
         return True
 
     # 9. Cancel Password Recording
     if data == "physical_cancel_record":
         app.ui.answer_callback(callback_id, "Отменено")
-        app.physical_btn.mode = None
-        app.physical_btn.active_message_id = None
-        app.physical_btn.password_draft = []
-        app.physical_btn.last_press_info = None
-        text = app.physical_btn.physical_control_text()
-        markup = app.physical_btn.physical_control_markup()
+        with pbtn._lock:
+            pbtn.mode = None
+            pbtn.active_message_id = None
+            pbtn.password_draft = []
+            pbtn.last_press_info = None
+            text = pbtn.physical_control_text()
+            markup = pbtn.physical_control_markup()
         app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
 
-    # 10. Delete Stored Password
+    # 10. Delete Stored Password (with confirmation & ESP online guard)
     if data == "physical_password_delete":
+        if getattr(app.mqtt, "esp_status", None) != "online":
+            app.ui.answer_callback(callback_id, "❌ Контроллер ESP8266 не в сети!", alert=True)
+            return True
+        app.ui.answer_callback(callback_id)
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🗑 Да, удалить пароль", "style": "danger", "callback_data": "physical_password_delete_confirm"}],
+                app.ui.back_button("physical_button"),
+            ]
+        }
+        app.ui.send_message(
+            chat_id,
+            "<b>⚠️ Удалить физический пароль из памяти ESP?</b>\n\nКнопка начнёт включать ПК одним нажатием без ввода пароля.",
+            reply_markup=markup,
+            message_id=message_id,
+        )
+        return True
+
+    if data == "physical_password_delete_confirm":
+        if getattr(app.mqtt, "esp_status", None) != "online":
+            app.ui.answer_callback(callback_id, "❌ Контроллер ESP8266 не в сети!", alert=True)
+            return True
         app.ui.answer_callback(callback_id, "Удаляю...")
-        app.physical_btn.start_delete_password(chat_id)
+        pbtn.start_delete_password(chat_id, message_id=message_id)
         return True
 
     # 11. Trigger Unlock Verification
     if data == "physical_unlock":
+        if getattr(app.mqtt, "esp_status", None) != "online":
+            app.ui.answer_callback(callback_id, "❌ Контроллер ESP8266 не в сети!", alert=True)
+            return True
         app.ui.answer_callback(callback_id, "Разблокирую...")
-        app.physical_btn.start_unlock_input(chat_id)
+        pbtn.start_unlock_input(chat_id)
         return True
 
     # 12. Begin Morse Unlock Pattern
     if data == "physical_unlock_pattern_begin":
         app.ui.answer_callback(callback_id)
-        app.physical_btn.mode = "record_unlock_pattern"
-        app.physical_btn.unlock_draft = list(app.physical_btn.saved_unlock_pattern or "CC")
-        app.physical_btn.last_press_info = None
-        text = app.physical_btn.unlock_builder_text()
-        markup = app.physical_btn.unlock_builder_markup()
+        with pbtn._lock:
+            pbtn.mode = "record_unlock_pattern"
+            pbtn.unlock_draft = list(pbtn.saved_unlock_pattern or "CC")
+            pbtn.last_press_info = None
+            text = pbtn.unlock_builder_text()
+            markup = pbtn.unlock_builder_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 13. Add Symbol to Unlock Pattern
     if data.startswith("unlock_pat_add:"):
         app.ui.answer_callback(callback_id)
         symbol = data.split(":", 1)[1]
-        if len(app.physical_btn.unlock_draft) < 8:
-            app.physical_btn.unlock_draft.append(symbol)
-            app.physical_btn.last_press_info = "Введено в боте"
-        text = app.physical_btn.unlock_builder_text()
-        markup = app.physical_btn.unlock_builder_markup()
+        with pbtn._lock:
+            if len(pbtn.unlock_draft) < 8:
+                pbtn.unlock_draft.append(symbol)
+                pbtn.last_press_info = "Введено в боте"
+            text = pbtn.unlock_builder_text()
+            markup = pbtn.unlock_builder_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 14. Backspace Symbol in Unlock Pattern
     if data == "unlock_pat_back":
         app.ui.answer_callback(callback_id)
-        if app.physical_btn.unlock_draft:
-            app.physical_btn.unlock_draft.pop()
-        text = app.physical_btn.unlock_builder_text()
-        markup = app.physical_btn.unlock_builder_markup()
+        with pbtn._lock:
+            if pbtn.unlock_draft:
+                pbtn.unlock_draft.pop()
+            text = pbtn.unlock_builder_text()
+            markup = pbtn.unlock_builder_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 15. Reset Unlock Pattern
     if data == "unlock_pat_reset":
         app.ui.answer_callback(callback_id)
-        app.physical_btn.unlock_draft = ["C", "C"]
-        app.physical_btn.last_press_info = "Сброс"
-        text = app.physical_btn.unlock_builder_text()
-        markup = app.physical_btn.unlock_builder_markup()
+        with pbtn._lock:
+            pbtn.unlock_draft = ["C", "C"]
+            pbtn.last_press_info = "Сброс"
+            text = pbtn.unlock_builder_text()
+            markup = pbtn.unlock_builder_markup()
         res = app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         if res and res.get("message_id"):
-            app.physical_btn.active_message_id = res["message_id"]
+            with pbtn._lock:
+                pbtn.active_message_id = res["message_id"]
         return True
 
     # 16. Save Unlock Pattern
     if data == "unlock_pat_save":
         app.ui.answer_callback(callback_id, "Сохраняю...")
-        app.physical_btn.mode = None
-        app.physical_btn.active_message_id = None
-        seq = "".join(app.physical_btn.unlock_draft)
-        app.physical_btn.saved_unlock_pattern = seq
+        with pbtn._lock:
+            pbtn.mode = None
+            pbtn.active_message_id = None
+            seq = "".join(pbtn.unlock_draft)
+            pbtn.saved_unlock_pattern = seq
+            markup = pbtn.physical_control_markup()
+            pat_disp = pbtn.format_password_display(seq)
         app.save_state()
-        pat_disp = app.physical_btn.format_password_display(seq)
         text = (
             f"<b>✅ Жест разблокировки сохранён!</b>\n\n<blockquote><b>{pat_disp}</b></blockquote>\n"
             "Теперь при вводе этой комбинации на кнопке (в течение 5 минут после морзе-включения) Windows автоматически разблокируется."
         )
-        app.ui.send_message(chat_id, text, reply_markup=app.physical_btn.physical_control_markup(), message_id=message_id)
+        app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
 
     return False

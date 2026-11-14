@@ -114,6 +114,16 @@ def test_replace_unified_topic_entry():
     assert base64.b64encode(b"payloadA") not in replaced
 
 
+def test_launch_ide_raises_runtime_error_when_binary_missing(tmp_path):
+    from unittest.mock import patch
+
+    with patch("core.antigravity_switcher.sys.platform", "win32"), \
+         patch.dict("core.antigravity_switcher.os.environ", {"LOCALAPPDATA": str(tmp_path)}), \
+         patch("core.antigravity_switcher.subprocess.Popen", side_effect=FileNotFoundError("Antigravity.exe")):
+        with pytest.raises(RuntimeError, match="Failed to launch Antigravity IDE"):
+            AntigravityAccountManager.launch_ide()
+
+
 # =====================================================================
 # 3. Account Manager Integration Tests (Isolated Temp DB)
 # =====================================================================
@@ -419,3 +429,104 @@ def test_antigravity_router_callbacks():
     assert route_antigravity_callback(app, "ag_restart", 123, 456, "cb_3") is True
     assert len(app.published_actions) == 2
     assert app.published_actions[1][0] == "antigravity_restart"
+
+
+def test_refresh_token_rejects_missing_access_token_in_oauth_response(temp_environment):
+    import io
+    from unittest.mock import patch
+
+    mgr = temp_environment["mgr"]
+    crypto = temp_environment["crypto"]
+    cloud_db = temp_environment["cloud_db"]
+
+    enc_token = crypto.encrypt_payload({"access_token": "old_at", "refresh_token": "rt1", "expiry_timestamp": 0})
+    conn = sqlite3.connect(str(cloud_db))
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, '', '{}', 1000, 1000, 'active', 0)",
+        ("acc_bad_refresh", "badrefresh@gmail.com", "BadRefresh", enc_token),
+    )
+    conn.commit()
+    conn.close()
+
+    class _FakeResp(io.BytesIO):
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    row = {"id": "acc_bad_refresh", "email": "badrefresh@gmail.com", "token_json": enc_token}
+    with patch("urllib.request.urlopen", return_value=_FakeResp(b'{"expires_in": 3600}')):
+        with pytest.raises(ValueError, match="access_token"):
+            mgr.refresh_token_if_needed(row)
+
+
+def test_switch_account_aborts_before_killing_ide_on_missing_access_token(temp_environment):
+    from unittest.mock import MagicMock
+
+    mgr = temp_environment["mgr"]
+    crypto = temp_environment["crypto"]
+    cloud_db = temp_environment["cloud_db"]
+    storage_path = temp_environment["storage_path"]
+
+    enc_token = crypto.encrypt_payload({"access_token": "", "refresh_token": "rt", "expiry_timestamp": 1900000000})
+    dev = json.dumps({"schemaVersion": 1, "profile": {"machineId": "m9", "macMachineId": "mac9", "devDeviceId": "dev9", "sqmId": "{sqm9}"}})
+    conn = sqlite3.connect(str(cloud_db))
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, '', ?, 1000, 1000, 'active', 0)",
+        ("acc_empty_at", "emptyat@gmail.com", "EmptyAt", enc_token, dev),
+    )
+    conn.commit()
+    conn.close()
+
+    kill_mock = MagicMock()
+    mgr.is_ide_running = lambda: True
+    mgr.kill_ide = kill_mock
+    mgr.refresh_token_if_needed = MagicMock(return_value={"access_token": None, "refresh_token": "rt"})
+
+    with pytest.raises(ValueError, match="access_token"):
+        mgr.switch_account("acc_empty_at")
+
+    kill_mock.assert_not_called()
+    assert storage_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_create_oauth_info_allows_optional_refresh_and_rejects_empty_access():
+    payload = ProtobufHelper.create_oauth_info("at_only", None, 1900000000)
+    assert isinstance(payload, bytes) and len(payload) > 0
+
+    with pytest.raises(ValueError, match="access_token"):
+        ProtobufHelper.create_oauth_info("", "rt", 1900000000)
+
+
+def test_list_accounts_corrupt_or_empty_quota_not_ranked_as_100(temp_environment):
+    mgr = temp_environment["mgr"]
+    crypto = temp_environment["crypto"]
+    cloud_db = temp_environment["cloud_db"]
+
+    tok = crypto.encrypt_payload({"access_token": "at", "refresh_token": "rt", "expiry_timestamp": 1900000000})
+    good_quota = crypto.encrypt_payload({"gemini-3.1-pro-high": {"percentage": 45, "resetTime": "2026-10-15T00:00:00Z"}})
+    conn = sqlite3.connect(str(cloud_db))
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, ?, '{}', 1000, 900, 'active', 1)",
+        ("acc_good", "good@gmail.com", "Good", tok, good_quota),
+    )
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, ?, '{}', 1000, 100, 'active', 0)",
+        ("acc_corrupt", "corrupt@gmail.com", "Corrupt", tok, "corrupt-cipher-text"),
+    )
+    conn.commit()
+    conn.close()
+
+    accounts = {a["id"]: a for a in mgr.list_accounts()}
+    assert accounts["acc_corrupt"]["min_quota"] == 0
+    assert accounts["acc_corrupt"]["has_quota_data"] is False
+    assert accounts["acc_good"]["min_quota"] == 45
+    assert accounts["acc_good"]["has_quota_data"] is True
+
+    best = mgr.find_best_account()
+    assert best is not None
+    assert best["id"] == "acc_good"

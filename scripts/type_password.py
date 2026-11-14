@@ -44,6 +44,102 @@ user32.LoadKeyboardLayoutW.restype = wintypes.HKL
 user32.ActivateKeyboardLayout.argtypes = [wintypes.HKL, wintypes.UINT]
 user32.ActivateKeyboardLayout.restype = wintypes.HKL
 
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
+
+user32.VkKeyScanExW.argtypes = [wintypes.WCHAR, wintypes.HKL]
+user32.VkKeyScanExW.restype = ctypes.c_short
+
+user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
+user32.VkKeyScanW.restype = ctypes.c_short
+
+user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+user32.MapVirtualKeyW.restype = wintypes.UINT
+
+user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ctypes.c_void_p]
+user32.keybd_event.restype = None
+
+kernel32.GetLastError.argtypes = []
+kernel32.GetLastError.restype = wintypes.DWORD
+
+kernel32.GetCurrentProcessId.argtypes = []
+kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+
+kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+kernel32.ReleaseMutex.restype = wintypes.BOOL
+
+
+def _switch_layout_us_english():
+    """Load English (US) layout and request the foreground window (e.g. LogonUI) to adopt it."""
+    hkl = user32.LoadKeyboardLayoutW("00000409", 1)
+    if hkl:
+        user32.ActivateKeyboardLayout(hkl, 0)
+        fg_hwnd = user32.GetForegroundWindow()
+        if fg_hwnd:
+            user32.PostMessageW(fg_hwnd, 0x0050, 0, hkl)  # WM_INPUTLANGCHANGEREQUEST
+            time.sleep(0.05)
+            try:
+                thread_id = user32.GetWindowThreadProcessId(fg_hwnd, None)
+                if thread_id:
+                    curr_hkl = user32.GetKeyboardLayout(thread_id)
+                    if (curr_hkl & 0xFFFF) != 0x0409:
+                        VK_MENU = 0x12
+                        VK_SHIFT = 0x10
+                        user32.keybd_event(VK_MENU, user32.MapVirtualKeyW(VK_MENU, 0), 0, 0)
+                        user32.keybd_event(VK_SHIFT, user32.MapVirtualKeyW(VK_SHIFT, 0), 0, 0)
+                        time.sleep(0.03)
+                        user32.keybd_event(VK_SHIFT, user32.MapVirtualKeyW(VK_SHIFT, 0), 2, 0)
+                        user32.keybd_event(VK_MENU, user32.MapVirtualKeyW(VK_MENU, 0), 2, 0)
+                        time.sleep(0.05)
+            except Exception:
+                pass
+    return hkl
+
+
+def _send_vk_with_modifiers(vk: int, mod_mask: int, hold_delay: float = 0.06):
+    """Send a virtual key wrapped with Shift (1), Ctrl (2), and/or Alt (4) modifiers."""
+    active_mods = []
+    for bit, mod_vk in ((1, 0x10), (2, 0x11), (4, 0x12)):
+        if mod_mask & bit:
+            mod_scan = user32.MapVirtualKeyW(mod_vk, 0)
+            active_mods.append((mod_vk, mod_scan))
+            user32.keybd_event(mod_vk, mod_scan, 0, 0)
+            time.sleep(0.02)
+
+    vk_scan = user32.MapVirtualKeyW(vk, 0)
+    user32.keybd_event(vk, vk_scan, 0, 0)
+    time.sleep(hold_delay)
+    user32.keybd_event(vk, vk_scan, 2, 0)
+    time.sleep(hold_delay)
+
+    for mod_vk, mod_scan in reversed(active_mods):
+        user32.keybd_event(mod_vk, mod_scan, 2, 0)
+        time.sleep(0.02)
+
+
+def type_character(ch: str, hkl=None):
+    """Map and type a single password character using the target keyboard layout."""
+    if ch.isdigit():
+        _send_vk_with_modifiers(0x30 + int(ch), 0)
+        return
+
+    scan = user32.VkKeyScanExW(ch, hkl) if hkl else user32.VkKeyScanW(ch)
+    if scan == -1 or (scan & 0xFFFF) == 0xFFFF:
+        raise ValueError(f"Unsupported character in password: ord={ord(ch)}")
+
+    vk = scan & 0xFF
+    mod_mask = (scan >> 8) & 0xFF
+    _send_vk_with_modifiers(vk, mod_mask)
+
 def _load_env_file(path: Path):
     if not path.exists():
         return
@@ -211,11 +307,10 @@ def run_unlock():
         for _ in range(15):
             send_key(0x08, 0.02)
 
-        # Ensure English layout for reliable key mapping
+        # Ensure English layout for reliable key mapping on LogonUI / active window
+        hkl = None
         try:
-            hkl = user32.LoadKeyboardLayoutW("00000409", 1)
-            if hkl:
-                user32.ActivateKeyboardLayout(hkl, 0)
+            hkl = _switch_layout_us_english()
         except Exception:
             pass
 
@@ -228,31 +323,13 @@ def run_unlock():
 
         time.sleep(0.1)
         log("Typing password...")
-        VK_SHIFT = 0x10
-        shift_scan = user32.MapVirtualKeyW(VK_SHIFT, 0)
 
         for ch in str(password):
-            if ch.isdigit():
-                vk = 0x30 + int(ch)
-                send_key(vk, 0.06)
-                continue
-
-            scan = user32.VkKeyScanW(ord(ch))
-            if scan == -1 or (scan & 0xFFFF) == 0xFFFF:
-                log(f"Unsupported character in password: ord={ord(ch)}. Aborting typing to prevent lockout!")
+            try:
+                type_character(ch, hkl=hkl)
+            except ValueError as err:
+                log(f"{err}. Aborting typing to prevent lockout!")
                 sys.exit(1)
-
-            vk = scan & 0xFF
-            need_shift = bool((scan >> 8) & 1)
-
-            if need_shift:
-                user32.keybd_event(VK_SHIFT, shift_scan, 0, 0)
-                time.sleep(0.02)
-                send_key(vk, 0.06)
-                user32.keybd_event(VK_SHIFT, shift_scan, 2, 0)
-                time.sleep(0.02)
-            else:
-                send_key(vk, 0.06)
 
         time.sleep(0.2)
         log("Pressing ENTER")

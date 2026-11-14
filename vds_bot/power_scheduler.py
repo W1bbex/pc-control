@@ -27,6 +27,73 @@ SCREENSHOT_TIMEOUT_SECONDS = 35
 SHUTDOWN_CONFIRM_TIMEOUT_SECONDS = 120
 
 
+def get_app_state_lock(app):
+    """Return the app's state_lock, creating a reusable fallback lock if omitted in mocks."""
+    lock = getattr(app, "state_lock", None)
+    if lock is None:
+        lock = getattr(app, "_fallback_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            app._fallback_state_lock = lock
+    return lock
+
+
+def is_pc_online_for_auto_led(app, sys_status, desk_status, session):
+    """Single source of truth for whether the cooler Auto-LED should stay powered."""
+    pc_online = (
+        sys_status == "online"
+        or desk_status == "online"
+        or session in ("unlocked", "locked", "login_screen")
+    )
+    telem_age = None
+    monitoring = getattr(app, "monitoring", None)
+    if monitoring is not None and hasattr(monitoring, "telemetry_age"):
+        telem_age = monitoring.telemetry_age()
+        if isinstance(telem_age, (int, float)) and not isinstance(telem_age, bool) and telem_age > 45.0:
+            pc_online = False
+    return pc_online, telem_age
+
+
+def sync_auto_led(app, pc_online, esp_just_reconnected=False, force_off=False, source="Auto-LED", detail=""):
+    """Compute target Auto-LED state under lock, publish MQTT command outside lock, then commit state."""
+    mqtt_gw = getattr(app, "mqtt", None)
+    if not mqtt_gw or not hasattr(mqtt_gw, "publish_esp_action"):
+        return
+
+    with get_app_state_lock(app):
+        user_led_pref = getattr(app, "user_led_state", "on")
+        color = getattr(app, "user_led_color", None)
+        current_state = getattr(app, "last_auto_led_state", None)
+        desired_state = "off" if (force_off or user_led_pref == "off" or not pc_online) else "on"
+
+        if not esp_just_reconnected and not force_off and current_state == desired_state:
+            return
+
+        epoch = getattr(app, "_auto_led_seq", 0) + 1
+        app._auto_led_seq = epoch
+        if desired_state == "off":
+            action, value = "LED_OFF", None
+        elif color:
+            action, value = "LED_COLOR", color
+        else:
+            action, value = "LED_ON", None
+
+    if action == "LED_COLOR":
+        published = mqtt_gw.publish_esp_action("LED_COLOR", value=value)
+    else:
+        published = mqtt_gw.publish_esp_action(action)
+
+    if not published:
+        return
+
+    with get_app_state_lock(app):
+        if getattr(app, "_auto_led_seq", epoch) == epoch:
+            app.last_auto_led_state = desired_state
+
+    suffix = f" ({detail})" if detail else ""
+    LOG.info("%s: -> %s%s", source, action, suffix)
+
+
 class PowerSchedulerMixin:
     """
     Mixin for PcControlBotApp providing shutdown scheduling, timeouts, auto-refresh, and periodic watchdog ticks.
@@ -50,8 +117,8 @@ class PowerSchedulerMixin:
             or (self.pending_shutdown_started_at and self.monitoring.latest_received_at < self.pending_shutdown_started_at)
         )
         both_offline = (
-            self.mqtt.system_status in ("offline", "stale")
-            and self.mqtt.desktop_status in ("offline", "stale")
+            self.mqtt.system_status in ("offline", "stale", "unknown")
+            and self.mqtt.desktop_status in ("offline", "stale", "unknown")
         )
 
         if (
@@ -87,7 +154,7 @@ class PowerSchedulerMixin:
         markup = {
             "inline_keyboard": [
                 [{"text": "Установить таймер", "style": "success", "callback_data": f"shutdown_schedule_confirm:{int(self.shutdown_candidate_ts)}"}],
-                [{"text": "✖ Отмена", "callback_data": "shutdown_pc"}],
+                [{"text": "Отмена", "callback_data": "shutdown_pc"}],
             ]
         }
         self.ui.send_message(
@@ -113,17 +180,33 @@ class PowerSchedulerMixin:
             message_id=message_id,
         )
 
-    def _request_shutdown(self, chat_id, source, now=None):
+    def _request_shutdown(self, chat_id, source, now=None, message_id=None):
         now = time.time() if now is None else float(now)
+        back_markup = {"inline_keyboard": [self.ui.back_button("power_menu")]}
         if getattr(self, "pending_shutdown_cmd_id", None):
-            self.ui.send_message(chat_id, "⏳ Команда выключения уже отправлена. Ожидаю подтверждение.")
+            self.ui.send_message(
+                chat_id,
+                "⏳ Команда выключения уже отправлена. Ожидаю подтверждение.",
+                reply_markup=back_markup,
+                message_id=message_id,
+            )
             return False
         pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age(), now=now)
         if pc_state.state == "SHUTDOWN_OBSERVED":
-            self.ui.send_message(chat_id, "ℹ️ ПК уже выключен (наблюдается).", reply_markup=self._power_menu_markup())
+            self.ui.send_message(
+                chat_id,
+                "ℹ️ ПК уже выключен (наблюдается).",
+                reply_markup=self._power_menu_markup(),
+                message_id=message_id,
+            )
             return False
         if not getattr(self.mqtt, "mqtt_online", False):
-            self.ui.send_message(chat_id, "❌ MQTT недоступен. Выключение не отправлено.")
+            self.ui.send_message(
+                chat_id,
+                "❌ MQTT недоступен. Выключение не отправлено.",
+                reply_markup=back_markup,
+                message_id=message_id,
+            )
             return False
         if self.mqtt.system_status == "online":
             cmd_id = self.mqtt.publish_system_action("shutdown")
@@ -134,12 +217,18 @@ class PowerSchedulerMixin:
                 chat_id,
                 f"❌ Агенты Windows сейчас недоступны (system: {self.mqtt.system_status}, desktop: {getattr(self.mqtt, 'desktop_status', 'offline')}). Выключение не отправлено.",
                 reply_markup=self._power_menu_markup(),
+                message_id=message_id,
             )
             return False
         if hasattr(self.mqtt, "publish_esp_action"):
             self.mqtt.publish_esp_action("LED_OFF")
         if not cmd_id:
-            self.ui.send_message(chat_id, "❌ MQTT недоступен. Выключение не отправлено.")
+            self.ui.send_message(
+                chat_id,
+                "❌ MQTT недоступен. Выключение не отправлено.",
+                reply_markup=back_markup,
+                message_id=message_id,
+            )
             return False
         self.pending_shutdown_cmd_id = cmd_id
         self.pending_shutdown_started_at = now
@@ -147,7 +236,12 @@ class PowerSchedulerMixin:
         self.shutdown_offline_detected_at = None
         self.save_state()
         label = "по таймеру" if source == "schedule" else "вручную"
-        self.ui.send_message(chat_id, f"<b>🛑 Команда выключения отправлена {label}.</b>\n\nЖду ответ Windows…")
+        self.ui.send_message(
+            chat_id,
+            f"<b>🛑 Команда выключения отправлена {label}.</b>\n\nЖду ответ Windows…",
+            reply_markup=back_markup,
+            message_id=message_id,
+        )
         return True
 
     def _clear_pending_shutdown(self):
@@ -206,22 +300,38 @@ class PowerSchedulerMixin:
             return
 
         self.last_dashboard_auto_refresh = now
-        try:
-            target_user = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
-            text = self.monitoring.dashboard_text(getattr(self, "latest_media_state", None) or getattr(self.mqtt, "last_media_state", {}))
-            markup = self._main_menu_markup()
-            res = self.ui.send_message(
-                target_user,
-                text,
-                reply_markup=markup,
-                message_id=self.active_main_menu_message_id,
-            )
-            if res and res.get("not_modified"):
-                pass
-            elif not res:
-                LOG.debug("Auto-refresh of main menu message %s returned None", self.active_main_menu_message_id)
-        except Exception:
-            LOG.exception("Failed to auto-refresh main menu")
+
+        def _send_refresh():
+            try:
+                target_user = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
+                text = self.monitoring.dashboard_text(getattr(self, "latest_media_state", None) or getattr(self.mqtt, "last_media_state", {}))
+                markup = self._main_menu_markup()
+                res = self.ui.send_message(
+                    target_user,
+                    text,
+                    reply_markup=markup,
+                    message_id=self.active_main_menu_message_id,
+                )
+                if res and res.get("not_modified"):
+                    pass
+                elif not res:
+                    LOG.debug("Auto-refresh of main menu message %s returned None", self.active_main_menu_message_id)
+            except Exception:
+                LOG.exception("Failed to auto-refresh main menu")
+            finally:
+                self._dashboard_refresh_in_flight = False
+
+        if getattr(self, "_dashboard_refresh_in_flight", False):
+            return
+        self._dashboard_refresh_in_flight = True
+        executor = getattr(self, "_executor", None)
+        if executor is not None and getattr(self, "async_dispatch", False):
+            try:
+                executor.submit(_send_refresh)
+            except Exception:
+                self._dashboard_refresh_in_flight = False
+        else:
+            _send_refresh()
 
     def scheduler_tick(self, now=None):
         now = time.time() if now is None else float(now)
@@ -240,41 +350,16 @@ class PowerSchedulerMixin:
                 LOG.exception("power_flow.tick failed in scheduler_tick")
 
         # Auto-LED cooler power watchdog (cuts fan power if PC is turned off, asleep, or frozen)
-        telem_age = self.monitoring.telemetry_age()
         sys_status = getattr(self.mqtt, "system_status", "unknown")
         desk_status = getattr(self.mqtt, "desktop_status", "unknown")
         sys_session = getattr(self.mqtt, "system_session", "unknown")
-        watchdog_pc_online = (
-            sys_status == "online"
-            or desk_status == "online"
-            or sys_session in ("unlocked", "locked", "login_screen")
+        watchdog_pc_online, telem_age = is_pc_online_for_auto_led(self, sys_status, desk_status, sys_session)
+        sync_auto_led(
+            self,
+            watchdog_pc_online,
+            source="Auto-LED Watchdog",
+            detail=f"telem_age={telem_age}",
         )
-        if telem_age is not None and telem_age > 45.0:
-            watchdog_pc_online = False
-
-        user_led_pref = getattr(self, "user_led_state", "on")
-        with getattr(self, "state_lock", threading.RLock()):
-            if user_led_pref == "off":
-                if getattr(self, "last_auto_led_state", None) != "off":
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_OFF"):
-                            self.last_auto_led_state = "off"
-                            LOG.info("Auto-LED Watchdog: user_led_state=off -> LED_OFF enforced")
-            else:
-                if (not watchdog_pc_online) and getattr(self, "last_auto_led_state", None) != "off":
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        if self.mqtt.publish_esp_action("LED_OFF"):
-                            self.last_auto_led_state = "off"
-                            LOG.info("Auto-LED Watchdog: PC offline/sleeping (telem_age=%s) -> LED_OFF sent to cooler", telem_age)
-                elif watchdog_pc_online and getattr(self, "last_auto_led_state", None) != "on":
-                    if hasattr(self.mqtt, "publish_esp_action"):
-                        color = getattr(self, "user_led_color", None)
-                        if color:
-                            self.mqtt.publish_esp_action("LED_COLOR", value=color)
-                        else:
-                            self.mqtt.publish_esp_action("LED_ON")
-                        self.last_auto_led_state = "on"
-                        LOG.info("Auto-LED Watchdog: PC online/awake -> LED sent to cooler")
 
         for cmd_id, pending in list(getattr(self, "pending_screenshots", {}).items()):
             if now - pending["requested_at"] >= SCREENSHOT_TIMEOUT_SECONDS:
@@ -296,6 +381,23 @@ class PowerSchedulerMixin:
                 cmd_timestamps.pop(cmd_id, None)
                 pending_telem.pop(cmd_id, None)
                 pending_ag.pop(cmd_id, None)
+
+        act_chat = getattr(self, "pending_activity_chat_id", None)
+        act_ts = getattr(self, "pending_activity_requested_at", None)
+        if act_chat and act_ts is not None and (now - float(act_ts) >= 15.0):
+            act_msg = getattr(self, "pending_activity_msg_id", None)
+            self.pending_activity_chat_id = None
+            self.pending_activity_msg_id = None
+            self.pending_activity_requested_at = None
+            try:
+                self.ui.send_message(
+                    act_chat,
+                    "⏱ <b>Desktop-агент не прислал статистику активности вовремя.</b>",
+                    reply_markup={"inline_keyboard": [self.ui.back_button("menu")]},
+                    message_id=act_msg,
+                )
+            except Exception:
+                LOG.exception("Failed to send activity timeout notification")
 
         if getattr(self, "pending_shutdown_cmd_id", None) and getattr(self, "pending_shutdown_started_at", None):
             confirmed = self._check_shutdown_confirmation(now)
@@ -340,7 +442,7 @@ class PowerSchedulerMixin:
             self.save_state()
             self.ui.send_message(target_user, "ℹ️ Таймер сработал, но ПК уже был выключен (наблюдается).")
             return
-        if self.mqtt.system_status != "online":
+        if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
             return
         if self._request_shutdown(target_user, source="schedule", now=now):
             self.scheduled_shutdown_ts = None

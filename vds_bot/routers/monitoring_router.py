@@ -13,33 +13,25 @@ except Exception:
     MOSCOW = timezone(timedelta(hours=3))
 
 try:
+    from vds_bot.action_helpers import (
+        LED_WHITE_PRESETS,
+        apply_led_power,
+        apply_led_preset,
+        led_brightness_percent,
+    )
     from vds_bot.power_flow import PowerFlowStage
     from vds_bot.telegram_ui import ICONS
 except ImportError:
+    from action_helpers import (
+        LED_WHITE_PRESETS,
+        apply_led_power,
+        apply_led_preset,
+        led_brightness_percent,
+    )
     from power_flow import PowerFlowStage
     from telegram_ui import ICONS
 
 LOG = logging.getLogger("pc-control-bot.routers.monitoring")
-
-LED_WHITE_PRESETS = {
-    "1": ("255,150,165", "Холодный снежный"),
-    "2": ("255,140,160", "Арктический холодный"),
-    "3": ("255,130,155", "Ледяной кристалл"),
-    "4": ("255,120,150", "Глубокий холодный"),
-    "5": ("255,160,160", "Симметричный чистый (G=B)"),
-    "6": ("255,145,145", "Симметричный нейтральный"),
-    "7": ("255,130,130", "Сбалансированный белый"),
-    "8": ("255,115,115", "Мягкий белый"),
-    "9": ("255,165,140", "Светлый нейтральный"),
-    "10": ("255,150,125", "Идеальный белый"),
-    "11": ("255,135,100", "Естественный дневной"),
-    "12": ("255,120,75", "Тёплый ламповый"),
-    "eye": ("255,150,125", "Для глаз (Идеал)"),
-    "photo": ("228,245,255", "Для фото и видео"),
-    "глаз": ("255,150,125", "Для глаз (Идеал)"),
-    "фото": ("228,245,255", "Для фото и видео"),
-    "камера": ("228,245,255", "Для фото и видео"),
-}
 
 
 def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, callback_id: str) -> bool:
@@ -92,12 +84,39 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
 
     # 4. Activity Query
     if data == "menu_activity":
-        app.ui.answer_callback(callback_id, "Запрашиваю активность...")
+        if getattr(app.mqtt, "desktop_status", None) != "online":
+            app.ui.answer_callback(callback_id, "Desktop-агент не в сети.", alert=True)
+            app.ui.send_message(
+                chat_id,
+                "⚠️ <b>Desktop-агент не в сети</b>\nСтатистика активности недоступна при выключенном ПК.",
+                reply_markup={"inline_keyboard": [app.ui.back_button("menu")]},
+                message_id=message_id,
+            )
+            return True
         today_str = datetime.now(MOSCOW).strftime("%Y-%m-%d")
         app.pending_activity_chat_id = chat_id
         app.pending_activity_msg_id = message_id
-        app.mqtt.query_activity("summary", today_str)
-        app.ui.send_message(chat_id, f"📊 Запрашиваю статистику за {today_str}...", message_id=message_id)
+        app.pending_activity_requested_at = time.time()
+        sent = app.mqtt.query_activity("summary", today_str)
+        if not sent:
+            app.pending_activity_chat_id = None
+            app.pending_activity_msg_id = None
+            app.pending_activity_requested_at = None
+            app.ui.answer_callback(callback_id, "MQTT недоступен", alert=True)
+            app.ui.send_message(
+                chat_id,
+                "❌ <b>Не удалось запросить активность:</b> MQTT недоступен.",
+                reply_markup={"inline_keyboard": [app.ui.back_button("menu")]},
+                message_id=message_id,
+            )
+            return True
+        app.ui.answer_callback(callback_id, "Запрашиваю активность...")
+        app.ui.send_message(
+            chat_id,
+            f"📊 Запрашиваю статистику за {today_str}...",
+            reply_markup={"inline_keyboard": [app.ui.back_button("menu")]},
+            message_id=message_id,
+        )
         return True
 
     # 5. Screenshot
@@ -106,7 +125,10 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             app.ui.answer_callback(callback_id, "Desktop-агент недоступен — скриншот сделать нельзя.", alert=True)
             return True
         app.ui.answer_callback(callback_id, "Делаю скриншот...")
-        cmd_id = app.mqtt.publish_desktop_action("screenshot")
+        try:
+            cmd_id = app.mqtt.publish_desktop_action("screenshot", timeout=35)
+        except TypeError:
+            cmd_id = app.mqtt.publish_desktop_action("screenshot")
         if not cmd_id:
             app.ui.send_message(chat_id, "❌ Не удалось отправить запрос скриншота: MQTT недоступен.")
             return True
@@ -211,51 +233,30 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             return True
         action = data.split(":", 1)[1]
         if action == "on":
-            app.user_led_state = "on"
-            app.last_auto_led_state = "on"
-            if hasattr(app, "save_state"):
-                app.save_state()
-            if getattr(app, "user_led_color", None):
-                app.mqtt.publish_esp_action("LED_COLOR", value=app.user_led_color)
-            else:
-                app.mqtt.publish_esp_action("LED_ON")
+            apply_led_power(app, True)
             app.ui.answer_callback(callback_id, "💡 Подсветка включена")
         elif action == "off":
-            app.user_led_state = "off"
-            app.last_auto_led_state = "off"
-            if hasattr(app, "save_state"):
-                app.save_state()
-            app.mqtt.publish_esp_action("LED_OFF")
+            apply_led_power(app, False)
             app.ui.answer_callback(callback_id, "🌑 Подсветка выключена")
         elif action.startswith("bright:"):
-            level = action.split(":", 1)[1]
+            level_str = action.split(":", 1)[1].strip()
             try:
-                app.user_led_brightness = int(level)
-            except Exception:
-                pass
+                level_int = int(level_str)
+            except (TypeError, ValueError):
+                app.ui.answer_callback(callback_id, "Некорректная яркость", alert=True)
+                return True
+            level_int = max(0, min(255, level_int))
+            app.user_led_brightness = level_int
             if hasattr(app, "save_state"):
                 app.save_state()
-            app.mqtt.publish_esp_action("LED_BRIGHTNESS", value=level)
-            app.ui.answer_callback(callback_id, f"🔆 Яркость: {level}")
-        elif action.startswith("color:"):
-            rgb = action.split(":", 1)[1]
-            app.user_led_state = "on"
-            app.last_auto_led_state = "on"
-            app.user_led_color = rgb
-            if hasattr(app, "save_state"):
-                app.save_state()
-            app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
-            app.ui.answer_callback(callback_id, "🎨 Оттенок изменён")
+            app.mqtt.publish_esp_action("LED_BRIGHTNESS", value=str(level_int))
+            pct = led_brightness_percent(level_int)
+            app.ui.answer_callback(callback_id, f"🔆 Яркость: {pct}%")
         elif action.startswith("preset:"):
             preset_id = action.split(":", 1)[1]
-            if preset_id in LED_WHITE_PRESETS:
-                rgb, name = LED_WHITE_PRESETS[preset_id]
-                app.user_led_state = "on"
-                app.last_auto_led_state = "on"
-                app.user_led_color = rgb
-                if hasattr(app, "save_state"):
-                    app.save_state()
-                app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
+            applied = apply_led_preset(app, preset_id)
+            if applied:
+                rgb, name, _ = applied
                 app.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
             else:
                 app.ui.answer_callback(callback_id, "Неизвестный пресет", alert=True)

@@ -14,6 +14,40 @@ except Exception:
 LOG = logging.getLogger("pc-control-bot.routers.power")
 
 
+def _is_pc_agent_online(app) -> bool:
+    return (
+        getattr(app.mqtt, "system_status", None) == "online"
+        or getattr(app.mqtt, "desktop_status", None) == "online"
+    )
+
+
+def _send_confirm_card(app, chat_id: int, message_id: int, text: str, confirm_btn: dict, cancel_target: str) -> None:
+    markup = {
+        "inline_keyboard": [
+            [
+                confirm_btn,
+                {"text": "Отмена", "callback_data": cancel_target},
+            ]
+        ]
+    }
+    app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
+
+
+def _trigger_reboot(app, chat_id: int, message_id: int, callback_id: str, *, unlock: bool) -> None:
+    if not _is_pc_agent_online(app):
+        app.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
+        return
+    toast = "Перезагружаю с авторазблоком..." if unlock else "Перезагружаю..."
+    app.ui.answer_callback(callback_id, toast)
+    if app.mqtt.system_status == "online":
+        app.mqtt.publish_system_action("restart")
+    elif getattr(app.mqtt, "desktop_status", None) == "online":
+        app.mqtt.publish_desktop_action("restart")
+    if hasattr(app.mqtt, "publish_esp_action"):
+        app.mqtt.publish_esp_action("LED_OFF")
+    app.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=unlock)
+
+
 def route_power_callback(app, data: str, chat_id: int, message_id: int, callback_id: str) -> bool:
     """Handle power-related callback queries. Returns True if handled, False otherwise."""
     # 1. Power Menu Navigation
@@ -61,7 +95,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
         app.physical_btn.revoke_morse_eligibility()
         app.save_state()
         app.ui.answer_callback(callback_id, "Запускаю ПК...")
-        app.power_flow.start_power_on(chat_id)
+        app.power_flow.start_power_on(chat_id, message_id=message_id)
         return True
 
     # 3. Manual Actions (Lock / Unlock / Screen / Minimize)
@@ -98,58 +132,39 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
 
     if data == "stealth_on":
         app.ui.answer_callback(callback_id, "Включаю режим скрытности...")
-        app.mqtt.publish_desktop_action("stealth_mode", {"state": "on"})
-        msg = app.ui.send_message(
-            chat_id,
-            "<b>🕶️ Режим скрытности активирован</b>\n\n"
-            "• Мониторы переведены в сон\n"
-            "• Поглощение 100% кликов и клавиш («Черная дыра»)\n"
-            "• Системный звук заглушен\n\n"
-            "<i>Для отключения отправь /stealth off или нажми кнопку ниже.\n"
-            "Локальный выход: <code>Win+W+1</code></i>",
-            reply_markup=app.ui.stealth_menu_markup(active=True),
-        )
-        if isinstance(msg, dict) and msg.get("message_id"):
-            app.active_stealth_card = (chat_id, msg["message_id"])
-        elif message_id:
-            app.active_stealth_card = (chat_id, message_id)
+        try:
+            from vds_bot.action_helpers import apply_stealth_state
+        except ImportError:
+            from action_helpers import apply_stealth_state
+        apply_stealth_state(app, chat_id, "on", message_id=message_id, is_command=False)
         return True
 
     if data == "stealth_off":
         app.ui.answer_callback(callback_id, "Отключаю режим скрытности...")
-        app.mqtt.publish_desktop_action("stealth_mode", {"state": "off"})
-        app.active_stealth_card = None
-        app.ui.send_message(
-            chat_id,
-            "<b>🔓 Режим скрытности отключен</b>\n\n"
-            "• Дисплеи разбужены\n"
-            "• Поглощение ввода снято\n"
-            "• Звук восстановлен",
-            reply_markup=app.ui.stealth_menu_markup(active=False),
-            message_id=message_id,
-        )
+        try:
+            from vds_bot.action_helpers import apply_stealth_state
+        except ImportError:
+            from action_helpers import apply_stealth_state
+        apply_stealth_state(app, chat_id, "off", message_id=message_id, is_command=False)
         return True
 
     # 5. Sleep & Hibernate
     if data == "sleep_pc":
         app.ui.answer_callback(callback_id)
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Да, перевести в сон", "style": "primary", "callback_data": "sleep_confirm"},
-                    {"text": "✖ Отмена", "callback_data": "menu"},
-                ]
-            ]
-        }
-        app.ui.send_message(
+        _send_confirm_card(
+            app,
             chat_id,
+            message_id,
             "<b>💤 Перевод ПК в спящий режим</b>\n\nВы уверены?",
-            reply_markup=markup,
-            message_id=message_id,
+            confirm_btn={"text": "Да, перевести в сон", "style": "primary", "callback_data": "sleep_confirm"},
+            cancel_target="power_menu",
         )
         return True
 
     if data == "sleep_confirm":
+        if not _is_pc_agent_online(app):
+            app.ui.answer_callback(callback_id, "ПК не в сети. Перевод в сон невозможен.", alert=True)
+            return True
         app.ui.answer_callback(callback_id, "Отправляю в сон...")
         if app.mqtt.system_status == "online":
             app.mqtt.publish_system_action("sleep")
@@ -157,6 +172,12 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             app.mqtt.publish_desktop_action("sleep")
         if hasattr(app.mqtt, "publish_esp_action"):
             app.mqtt.publish_esp_action("LED_OFF")
+        app.ui.send_message(
+            chat_id,
+            "<b>💤 Команда сна отправлена.</b>\n\nПК переходит в спящий режим…",
+            reply_markup={"inline_keyboard": [app.ui.back_button("power_menu")]},
+            message_id=message_id,
+        )
         return True
 
     # 6. Reboot
@@ -173,32 +194,37 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
         )
         return True
 
-    if data == "reboot_unlock":
-        if app.mqtt.system_status != "online" and getattr(app.mqtt, "desktop_status", None) != "online":
+    if data in ("reboot_ask:unlock", "reboot_ask:plain"):
+        if not _is_pc_agent_online(app):
             app.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
             return True
-        app.ui.answer_callback(callback_id, "Перезагружаю с авторазблоком...")
-        if app.mqtt.system_status == "online":
-            app.mqtt.publish_system_action("restart")
-        elif getattr(app.mqtt, "desktop_status", None) == "online":
-            app.mqtt.publish_desktop_action("restart")
-        if hasattr(app.mqtt, "publish_esp_action"):
-            app.mqtt.publish_esp_action("LED_OFF")
-        app.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=True)
+        app.ui.answer_callback(callback_id)
+        if data == "reboot_ask:unlock":
+            _send_confirm_card(
+                app,
+                chat_id,
+                message_id,
+                "<b>🔄 Перезагрузка + Разблок</b>\n\nПК перезагрузится и автоматически введёт пароль на экране входа.\n\nВы уверены?",
+                confirm_btn={"text": "Да, перезагрузить + разблок", "style": "success", "callback_data": "reboot_unlock"},
+                cancel_target="reboot_pc",
+            )
+        else:
+            _send_confirm_card(
+                app,
+                chat_id,
+                message_id,
+                "<b>🔄 Перезагрузка ПК</b>\n\nВы уверены, что хотите перезагрузить компьютер?",
+                confirm_btn={"text": "Да, перезагрузить", "style": "primary", "callback_data": "reboot_confirm"},
+                cancel_target="reboot_pc",
+            )
+        return True
+
+    if data == "reboot_unlock":
+        _trigger_reboot(app, chat_id, message_id, callback_id, unlock=True)
         return True
 
     if data == "reboot_confirm":
-        if app.mqtt.system_status != "online" and getattr(app.mqtt, "desktop_status", None) != "online":
-            app.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
-            return True
-        app.ui.answer_callback(callback_id, "Перезагружаю...")
-        if app.mqtt.system_status == "online":
-            app.mqtt.publish_system_action("restart")
-        elif getattr(app.mqtt, "desktop_status", None) == "online":
-            app.mqtt.publish_desktop_action("restart")
-        if hasattr(app.mqtt, "publish_esp_action"):
-            app.mqtt.publish_esp_action("LED_OFF")
-        app.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=False)
+        _trigger_reboot(app, chat_id, message_id, callback_id, unlock=False)
         return True
 
     if data == "flow_reboot_cancel":
@@ -225,9 +251,21 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
         )
         return True
 
+    if data == "shutdown_now":
+        app.ui.answer_callback(callback_id)
+        _send_confirm_card(
+            app,
+            chat_id,
+            message_id,
+            "<b>🛑 Выключение ПК</b>\n\nВы уверены, что хотите выключить компьютер прямо сейчас?",
+            confirm_btn={"text": "Да, выключить", "style": "danger", "callback_data": "shutdown_now_confirm"},
+            cancel_target="shutdown_pc",
+        )
+        return True
+
     if data == "shutdown_now_confirm":
         app.ui.answer_callback(callback_id)
-        app._request_shutdown(chat_id, source="manual")
+        app._request_shutdown(chat_id, source="manual", message_id=message_id)
         return True
 
     if data == "shutdown_at_time":
@@ -293,7 +331,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             else {
                 "inline_keyboard": [
                     [{"text": "⚡ Да, выключить принудительно", "style": "danger", "callback_data": "emergency_power_off_confirm"}],
-                    [{"text": "✖ Отмена", "callback_data": "power_menu"}],
+                    [{"text": "Отмена", "callback_data": "power_menu"}],
                 ]
             }
         )

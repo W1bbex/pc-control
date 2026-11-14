@@ -20,53 +20,64 @@ def route_player_callback(app, data: str, chat_id: int, message_id: int, callbac
             app.ui.answer_callback(callback_id)
 
         # Optimistic state update for instant UI button feedback (<50ms)
-        media_state = dict(getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {}) or {})
+        with app.player_edit_lock:
+            media_state = dict(getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {}) or {})
+        is_active = bool(media_state.get("active"))
         optimistic_changed = False
+        sent_ok = True
 
         if action == "toggle_play":
-            app.mqtt.send_media_command("toggle_play")
-            if media_state:
+            sent_ok = bool(app.mqtt.send_media_command("toggle_play"))
+            if sent_ok and is_active:
                 media_state["is_playing"] = not media_state.get("is_playing", False)
                 optimistic_changed = True
         elif action == "seek_fwd_10":
-            app.mqtt.send_media_command("seek", delta=10)
-            if media_state:
+            sent_ok = bool(app.mqtt.send_media_command("seek", delta=10))
+            if sent_ok and is_active:
                 dur = float(media_state.get("duration") or 0.0)
                 cur_pos = float(media_state.get("position") or 0.0)
                 media_state["position"] = min(dur, cur_pos + 10.0) if dur > 0 else cur_pos + 10.0
                 optimistic_changed = True
         elif action == "seek_back_10":
-            app.mqtt.send_media_command("seek", delta=-10)
-            if media_state:
+            sent_ok = bool(app.mqtt.send_media_command("seek", delta=-10))
+            if sent_ok and is_active:
                 cur_pos = float(media_state.get("position") or 0.0)
                 media_state["position"] = max(0.0, cur_pos - 10.0)
                 optimistic_changed = True
         elif action == "next":
-            app.mqtt.send_media_command("next")
-            with app.player_edit_lock:
-                app.last_player_edit_time = 0.0
+            sent_ok = bool(app.mqtt.send_media_command("next"))
+            if sent_ok:
+                with app.player_edit_lock:
+                    app.last_player_edit_time = 0.0
         elif action == "prev":
-            app.mqtt.send_media_command("prev")
-            with app.player_edit_lock:
-                app.last_player_edit_time = 0.0
+            sent_ok = bool(app.mqtt.send_media_command("prev"))
+            if sent_ok:
+                with app.player_edit_lock:
+                    app.last_player_edit_time = 0.0
         elif action == "wave":
-            app.mqtt.send_media_command("wave")
-            with app.player_edit_lock:
-                app.last_player_edit_time = 0.0
+            sent_ok = bool(app.mqtt.send_media_command("wave"))
+            if sent_ok:
+                with app.player_edit_lock:
+                    app.last_player_edit_time = 0.0
         elif action == "toggle_like":
-            app.mqtt.send_media_command("toggle_like")
-            if media_state:
+            sent_ok = bool(app.mqtt.send_media_command("toggle_like"))
+            if sent_ok and is_active:
                 new_liked = not media_state.get("is_liked", False)
                 media_state["is_liked"] = new_liked
                 optimistic_changed = True
                 toast = "❤️ Добавлено в Мою волну / Любимые" if new_liked else "💔 Удалено из любимых"
                 app.ui.answer_callback(callback_id, text=toast)
+            elif not sent_ok:
+                app.ui.answer_callback(callback_id, text="❌ Команда не отправлена: MQTT недоступен", alert=True)
             else:
                 app.ui.answer_callback(callback_id)
 
+        if not sent_ok and action != "toggle_like":
+            app.ui.send_message(chat_id, "❌ Команда управления плеером не доставлена (MQTT/ПК недоступен).")
+
         if optimistic_changed and message_id:
-            app.latest_media_state = media_state
             with app.player_edit_lock:
+                app.latest_media_state = media_state
                 app.last_player_edit_time = time.time()
             app._render_and_send_player(chat_id, message_id, media_state)
         return True
@@ -97,7 +108,9 @@ def route_player_callback(app, data: str, chat_id: int, message_id: int, callbac
             app.ui.answer_callback(callback_id, "Неизвестный уровень громкости", alert=True)
             return True
         app.ui.answer_callback(callback_id, "Меняю громкость...")
-        app.mqtt.publish_desktop_action("volume", args)
+        cmd_id = app.mqtt.publish_desktop_action("volume", args)
+        if not cmd_id:
+            app.ui.send_message(chat_id, "❌ Не удалось изменить громкость: MQTT недоступен.")
         return True
 
     return False

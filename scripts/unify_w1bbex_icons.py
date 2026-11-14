@@ -23,7 +23,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-USER_ID = int(os.getenv("TELEGRAM_ALLOWED_USER_ID") or os.getenv("TELEGRAM_USER_ID") or 123456789)
+USER_ID = int(os.getenv("TELEGRAM_ALLOWED_USER_ID") or os.getenv("TELEGRAM_USER_ID") or 0)
+if not TOKEN or not USER_ID:
+    raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID must be set in .env")
 PACK_NAME = "pc_icons_pack"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
 
@@ -192,7 +194,7 @@ def main():
     print(f"Total current stickers in pack: {len(stickers)}")
 
     # 1. Replace first 17 stickers with our thin-line icons
-    new_emoji_ids = {}
+    failed_icons = []
     for idx, name in enumerate(ORDER_INDEX):
         svg_code, emoji_char = REPLACEMENT_SVGS[name]
         old_sticker = stickers[idx]
@@ -212,6 +214,7 @@ def main():
 
         if not upload_resp.get("ok"):
             print(f"  [-] Failed to upload file for {name}: {upload_resp}")
+            failed_icons.append(name)
             continue
 
         new_file_id = upload_resp["result"]["file_id"]
@@ -235,9 +238,14 @@ def main():
 
         if not replace_resp.get("ok"):
             print(f"  [-] Failed to replace sticker for {name}: {replace_resp}")
+            failed_icons.append(name)
         else:
             print(f"  [+] Successfully replaced '{name}'")
         time.sleep(0.5)
+
+    if failed_icons:
+        print(f"\n[!] Aborting icons.json update because uploads/replacements failed for: {', '.join(failed_icons)}")
+        sys.exit(1)
 
     # 2. Delete duplicate lightning at index 18 if present
     # Re-fetch set to find duplicate lightning
@@ -282,11 +290,13 @@ def main():
     # Also make sure app_dolphin is preserved
     icons_data["app_dolphin"] = "5278321743709124204"
 
-    # Save to both paths
+    # Save atomically to both paths
     vds_icons_path = BASE_DIR / "vds_bot" / "resources" / "icons.json"
+    serialized = json.dumps(icons_data, indent=2, ensure_ascii=False)
     for p in (icons_path, vds_icons_path):
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(icons_data, f, indent=2, ensure_ascii=False)
+        tmp_p = p.with_name(f".{p.name}.tmp")
+        tmp_p.write_text(serialized, encoding="utf-8")
+        tmp_p.replace(p)
         print(f"Updated {p}")
 
     print("\n[SUCCESS] Sticker pack successfully modernized and icons.json synchronized!")

@@ -3,11 +3,18 @@ import json
 import platform
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import psutil
 
+from core.hardware_utils import (
+    compute_network_rates,
+    get_cpu_name as read_cpu_name,
+    get_local_ip as resolve_local_ip,
+    query_nvidia_gpu,
+)
 from system.constants import BASE_DIR, DATA_DIR, LOG, REAL_BOOT_TIME
 from system.session_manager import active_console_session
 
@@ -17,35 +24,28 @@ class HardwareMonitorMixin:
 
     @staticmethod
     def get_cpu_name():
-        try:
-            import winreg
-
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-            ) as key:
-                return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
-        except Exception:
-            return platform.processor() or "Unknown CPU"
+        return read_cpu_name()
 
     @staticmethod
     def get_local_ip():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.connect(("1.1.1.1", 53))
-                return sock.getsockname()[0]
-        except OSError:
-            return "unknown"
+        return resolve_local_ip()
 
     @staticmethod
     def _find_sensor_snapshot() -> Path:
-        for candidate in (
+        candidates = (
             DATA_DIR / "admin-sensors.json",
             BASE_DIR / "hardware" / "sensors" / "admin-sensors.json",
             BASE_DIR / "hardware" / "admin-sensors.json",
-        ):
-            if candidate.exists():
-                return candidate
+        )
+        existing = []
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    existing.append((candidate.stat().st_mtime, candidate))
+            except OSError:
+                continue
+        if existing:
+            return max(existing, key=lambda item: item[0])[1]
         return DATA_DIR / "admin-sensors.json"
 
     @classmethod
@@ -74,74 +74,21 @@ class HardwareMonitorMixin:
 
     @staticmethod
     def query_gpu():
-        command = [
-            "nvidia-smi",
-            "--query-gpu=name,temperature.gpu,utilization.gpu,"
-            "memory.used,memory.total,fan.speed,power.draw,"
-            "clocks.gr,clocks.mem",
-            "--format=csv,noheader,nounits",
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                check=True,
-            )
-            lines = [l for l in completed.stdout.splitlines() if l.strip()]
-            if not lines:
-                return None
-            values = [
-                item.strip()
-                for item in lines[0].split(",")
-            ]
+        return query_nvidia_gpu(
+            logger=LOG,
+            warn_on_error=True,
+            missing_flag_holder=HardwareMonitorMixin,
+        )
 
-            def optional_number(value):
-                if value.upper() in {"N/A", "[N/A]", "NOT SUPPORTED"}:
-                    return None
-                return float(value)
-
-            return {
-                "name": values[0],
-                "temp_c": optional_number(values[1]),
-                "load_percent": optional_number(values[2]),
-                "vram_used_mb": optional_number(values[3]),
-                "vram_total_mb": optional_number(values[4]),
-                "fan_percent": optional_number(values[5]),
-                "power_w": optional_number(values[6]),
-                "clock_mhz": optional_number(values[7]),
-                "memory_clock_mhz": optional_number(values[8]),
-            }
-        except Exception:
-            LOG.exception("Could not query NVIDIA GPU from system agent")
-            return None
+    def _get_net_state_lock(self):
+        lock = getattr(self, "_net_state_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._net_state_lock = lock
+        return lock
 
     def network_rates(self):
-        now = time.time()
-        current = psutil.net_io_counters()
-        if current is None or getattr(self, "previous_net", None) is None:
-            if current is not None:
-                self.previous_net = current
-                self.previous_net_time = now
-            return {
-                "download_mbps": 0.0,
-                "upload_mbps": 0.0,
-                "received_gb": 0.0,
-                "sent_gb": 0.0,
-            }
-        elapsed = max(0.1, now - getattr(self, "previous_net_time", now))
-        received = max(0, current.bytes_recv - self.previous_net.bytes_recv)
-        sent = max(0, current.bytes_sent - self.previous_net.bytes_sent)
-        self.previous_net = current
-        self.previous_net_time = now
-        return {
-            "download_mbps": round(received * 8 / elapsed / 1_000_000, 2),
-            "upload_mbps": round(sent * 8 / elapsed / 1_000_000, 2),
-            "received_gb": round(current.bytes_recv / 1_000_000_000, 2),
-            "sent_gb": round(current.bytes_sent / 1_000_000_000, 2),
-        }
+        return compute_network_rates(self, self._get_net_state_lock())
 
     def collect_telemetry(self):
         now = time.time()
