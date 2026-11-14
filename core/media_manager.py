@@ -50,6 +50,7 @@ _ym_cfg = _cfg.get("yandex_music", {})
 DEFAULT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or _tg_cfg.get("token") or _tg_cfg.get("bot_token") or ""
 _def_user_id = os.getenv("TELEGRAM_USER_ID") or _tg_cfg.get("user_id") or 0
 DEFAULT_USER_ID = int(_def_user_id) if _def_user_id else 0
+MAX_RESOLVE_CACHE_SIZE = 500
 
 def _load_canonical_icons():
     from pathlib import Path
@@ -426,17 +427,25 @@ class MediaManager:
             )
             res = (real_title, real_artist, tid, is_liked, cover_url)
             with lock:
-                if not hasattr(self, "_resolve_cache"):
-                    self._resolve_cache = {}
-                self._resolve_cache[cache_key] = res
+                self._store_resolve_cache(cache_key, res)
             return res
 
         res = (title, artist, None, False, None)
         with lock:
-            if not hasattr(self, "_resolve_cache"):
-                self._resolve_cache = {}
-            self._resolve_cache[cache_key] = res
+            self._store_resolve_cache(cache_key, res)
         return res
+
+    def _store_resolve_cache(self, cache_key: Tuple[str, str, float], res: Tuple[str, str, Optional[str], bool, Optional[str]]) -> None:
+        """Store track resolution in cache with bounded FIFO eviction to prevent memory leaks."""
+        if not hasattr(self, "_resolve_cache"):
+            self._resolve_cache = {}
+        if len(self._resolve_cache) >= MAX_RESOLVE_CACHE_SIZE and cache_key not in self._resolve_cache:
+            try:
+                oldest_key = next(iter(self._resolve_cache))
+                del self._resolve_cache[oldest_key]
+            except (StopIteration, KeyError):
+                pass
+        self._resolve_cache[cache_key] = res
 
     def _toggle_like(self) -> bool:
         lock = self._get_lock()

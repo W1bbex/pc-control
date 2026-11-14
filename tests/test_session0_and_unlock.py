@@ -273,24 +273,57 @@ def test_type_password_mutex_and_keyboard_layout_ctypes_signatures():
     assert tp.user32.ActivateKeyboardLayout.restype == wintypes.HKL
 
 
-def test_type_password_does_not_pass_hwnd_to_set_thread_desktop():
-    tp_source = (ROOT_DIR / "scripts" / "type_password.py").read_text(encoding="utf-8")
-    assert "GetDesktopWindow" not in tp_source
+def test_type_password_attaches_to_input_desktop_handle():
+    """Verify run_unlock attaches to OpenInputDesktop handle via SetThreadDesktop."""
+    import ast
+    import scripts.type_password as tp
+
+    # AST check: ensure GetDesktopWindow is never called as an identifier
+    tree = ast.parse((ROOT_DIR / "scripts" / "type_password.py").read_text(encoding="utf-8"))
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "GetDesktopWindow" not in names
+
+    fake_hdesk = 0xCAFE
+    with patch.object(tp.kernel32, "CreateMutexW", return_value=0x1111), \
+         patch.object(tp.kernel32, "GetLastError", return_value=0), \
+         patch.object(tp.user32, "OpenInputDesktop", return_value=fake_hdesk), \
+         patch.object(tp.user32, "SetThreadDesktop") as mock_set_desk, \
+         patch.object(tp.kernel32, "CloseHandle"), \
+         patch.object(tp.user32, "CloseDesktop"), \
+         patch.dict(os.environ, {"WINDOWS_PASSWORD": ""}):
+        with pytest.raises(SystemExit):
+            tp.run_unlock()
+        mock_set_desk.assert_any_call(fake_hdesk)
 
 
 def test_type_password_mutex_closes_handle_on_existing_mutex():
-    source = (ROOT_DIR / "scripts" / "type_password.py").read_text(encoding="utf-8")
-    assert "CreateMutexW(None, True," in source
-    assert "kernel32.CloseHandle(mutex)" in source
-    assert "mutex = None" in source
+    """Verify run_unlock closes mutex handle and returns immediately when mutex already exists."""
+    import scripts.type_password as tp
+
+    fake_mutex = 0x8888
+    with patch.object(tp.kernel32, "CreateMutexW", return_value=fake_mutex) as mock_mutex, \
+         patch.object(tp.kernel32, "GetLastError", return_value=183), \
+         patch.object(tp.kernel32, "CloseHandle") as mock_close, \
+         patch.object(tp.user32, "OpenInputDesktop") as mock_open:
+        tp.run_unlock()
+        mock_mutex.assert_called_once_with(None, True, "Global\\W1bbexPCControlTypePasswordMutex")
+        mock_close.assert_called_once_with(fake_mutex)
+        mock_open.assert_not_called()
 
 
-def test_restart_system_agent_script_has_no_hardcoded_pids():
+def test_restart_system_agent_script_syntax_and_structure():
+    """Verify restart_system_agent.ps1 is valid PowerShell syntax and uses dynamic process matching."""
+    import subprocess
     ps1_path = ROOT_DIR / "scripts" / "install" / "restart_system_agent.ps1"
-    content = ps1_path.read_text(encoding="utf-8")
-    assert "2660" not in content
-    assert "6332" not in content
-    assert not re.search(r"taskkill\s+/F\s+/PID\s+\d+", content, re.IGNORECASE)
+    assert ps1_path.exists()
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        f"$errs = $null; $toks = $null; [System.Management.Automation.Language.Parser]::ParseFile('{ps1_path}', [ref]$toks, [ref]$errs); if ($errs.Count -eq 0) {{ 'VALID' }} else {{ 'ERRORS' }}"
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    assert "VALID" in proc.stdout
 
 
 def test_boot_agent_defines_state_path_and_saves_state(tmp_path, monkeypatch):

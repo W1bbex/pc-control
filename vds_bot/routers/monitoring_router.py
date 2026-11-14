@@ -260,6 +260,8 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
                 app.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
             else:
                 app.ui.answer_callback(callback_id, "Неизвестный пресет", alert=True)
+        else:
+            app.ui.answer_callback(callback_id, "Неизвестное действие подсветки", alert=True)
         return True
 
     return False

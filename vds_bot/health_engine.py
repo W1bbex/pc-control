@@ -107,7 +107,7 @@ class ComponentState:
                     if status in ("online", "unlocked", "locked", "fresh"):
                         status = "stale"
                 elif age > self.stale_threshold:
-                    if status in ("online", "unlocked", "locked", "fresh"):
+                    if status in ("online", "unlocked", "locked", "fresh", "login_screen"):
                         status = "stale"
 
         self.status = status
@@ -118,7 +118,7 @@ class ComponentState:
         return True
 
     def check_stale(self):
-        if self.status in ("online", "unlocked", "locked", "fresh"):
+        if self.status in ("online", "unlocked", "locked", "fresh", "login_screen"):
             if time.time() - self.local_updated_at > self.stale_threshold:
                 self.status = "stale"
                 return True
@@ -258,9 +258,10 @@ class HealthEngine:
             )
 
         # 2. Check if SHUTDOWN_OBSERVED or GRACEFUL_SHUTDOWN is active within TTL
+        offline_statuses = ("offline", "unknown", "stale", "shutdown", "graceful_shutdown")
         is_both_offline = (
-            sys_status in ("offline", "unknown", "stale")
-            and desk_status in ("offline", "unknown", "stale")
+            sys_status in offline_statuses
+            and desk_status in offline_statuses
         )
         if is_both_offline:
             if now < self.shutdown_observed_until:

@@ -119,6 +119,9 @@ class PowerFlowManager:
                         self.on_unlock_failed(self.chat_id, "Разблокировка была прервана перезапуском бота.")
                     except Exception as e:
                         LOG.warning("Could not send unlock failed notification during startup: %s", e)
+            elif self.stage == PowerFlowStage.WORKSPACE_RUNNING:
+                LOG.warning("Bot restarted during WORKSPACE_RUNNING. Background thread was lost; resetting flow to IDLE.")
+                self.reset_flow()
 
             LOG.info("Loaded active flow_state: stage=%s, message_id=%s", self.stage, self.message_id)
         except Exception:
@@ -785,8 +788,11 @@ class PowerFlowManager:
                 if session == "unlocked":
                     action = "unlock_success"
                 elif session in {"login_screen", "locked"}:
-                    if not self.pending_unlock_command_id and self.unlock_attempts < 2:
-                        action = "check_unlock"
+                    if not self.pending_unlock_command_id:
+                        if self.unlock_attempts < 2:
+                            action = "check_unlock"
+                        else:
+                            action = "unlock_fail"
                 elif session in {"no_console", "unknown"}:
                     LOG.info("PC boot session '%s' reported, waiting for login_screen/locked...", session)
             elif self.stage == PowerFlowStage.UNLOCK_FAILED:
@@ -803,6 +809,8 @@ class PowerFlowManager:
             self.on_unlock_success(chat_id)
         elif action == "unlock_success_manual":
             self.on_unlock_success(chat_id, manual=True)
+        elif action == "unlock_fail":
+            self.on_unlock_failed(chat_id, "Не удалось разблокировать Windows за 2 попытки.")
         elif action == "check_unlock":
             self.check_and_trigger_unlock(chat_id)
         elif action == "reboot_unlock_wait":
@@ -942,7 +950,6 @@ class PowerFlowManager:
             if self.stage in (
                 PowerFlowStage.IDLE,
                 PowerFlowStage.WAITING_WORKSPACE_DECISION,
-                PowerFlowStage.WORKSPACE_RUNNING,
             ):
                 return False
 

@@ -213,4 +213,6 @@ def heal_antigravity(app, chat_id: int, message_id: Optional[int] = None) -> Non
         "├ Переключаю сервер INCY VPN на рабочую страну...\n"
         "├ Проверяю HTTPS-связь с серверами Google...\n"
         "└ Перезапускаю Antigravity IDE.",
+        reply_markup=back_markup,
+        message_id=message_id,
     )

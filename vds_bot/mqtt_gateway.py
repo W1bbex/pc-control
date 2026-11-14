@@ -8,7 +8,10 @@ import secrets
 import threading
 import paho.mqtt.client as mqtt
 
-from health_engine import HealthEngine
+try:
+    from .health_engine import HealthEngine
+except ImportError:
+    from health_engine import HealthEngine
 
 LOG = logging.getLogger("pc-control-bot.mqtt_gateway")
 

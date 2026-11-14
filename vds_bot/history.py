@@ -25,7 +25,7 @@ _CHART_LOCK = threading.Lock()
 
 class TelemetryHistory:
     def __init__(self, path: Path, retention_days: int = 90):
-        self.path = path
+        self.path = Path(path)
         self.retention_days = retention_days
         self.lock = threading.Lock()
         self.last_cleanup = 0
@@ -61,9 +61,6 @@ class TelemetryHistory:
                     )
                     """
                 )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS telemetry_ts ON telemetry(ts)"
-                )
         finally:
             conn.close()
 
@@ -77,11 +74,16 @@ class TelemetryHistory:
             return None
 
     def insert(self, payload):
-        cpu = payload.get("cpu") or {}
-        gpu = payload.get("gpu") or {}
-        memory = payload.get("memory") or {}
-        network = payload.get("network") or {}
-        disks = payload.get("disks") or []
+        def _get_dict(obj, key):
+            val = obj.get(key) if isinstance(obj, dict) else None
+            return val if isinstance(val, dict) else {}
+
+        cpu = _get_dict(payload, "cpu")
+        gpu = _get_dict(payload, "gpu")
+        memory = _get_dict(payload, "memory")
+        network = _get_dict(payload, "network")
+        disks_raw = payload.get("disks") if isinstance(payload, dict) else []
+        disks = [d for d in disks_raw if isinstance(d, dict)] if isinstance(disks_raw, list) else []
 
         disk_c = next(
             (
@@ -92,9 +94,17 @@ class TelemetryHistory:
             disks[0] if disks else {},
         )
 
+        raw_ts = payload.get("ts") if isinstance(payload, dict) else None
+        if raw_ts is None and isinstance(payload, dict):
+            raw_ts = payload.get("timestamp")
+        try:
+            ts_val = int(float(raw_ts)) if raw_ts is not None else int(time.time())
+        except (ValueError, TypeError):
+            ts_val = int(time.time())
+
         row = (
-            int(payload.get("ts") or payload.get("timestamp") or time.time()),
-            str(payload.get("host") or ""),
+            ts_val,
+            str((payload.get("host") if isinstance(payload, dict) else "") or ""),
             self._number(cpu.get("load_percent")),
             self._number(cpu.get("temp_c")),
             self._number(gpu.get("load_percent")),
@@ -104,8 +114,8 @@ class TelemetryHistory:
             self._number(disk_c.get("used_percent")),
             self._number(network.get("download_mbps")),
             self._number(network.get("upload_mbps")),
-            payload.get("idle_seconds"),
-            1 if payload.get("user_active") else 0,
+            payload.get("idle_seconds") if isinstance(payload, dict) else None,
+            1 if (isinstance(payload, dict) and payload.get("user_active")) else 0,
         )
 
         with self.lock:
@@ -234,7 +244,8 @@ class TelemetryHistory:
         bucket = self._bucket_size(period_seconds)
         row_by_time = {row[0]: row for row in rows}
         first_bucket = rows[0][0]
-        last_bucket = (int(time.time()) // bucket) * bucket
+        now_bucket = (int(time.time()) // bucket) * bucket
+        last_bucket = max(rows[-1][0], now_bucket)
         rows = [
             row_by_time.get(
                 timestamp,

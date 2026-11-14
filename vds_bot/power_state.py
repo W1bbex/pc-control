@@ -45,6 +45,7 @@ def load_persisted_flow_state(path: Path = FLOW_STATE_PATH) -> Optional[Dict[str
 
 def save_persisted_flow_state(data: Dict[str, Any], path: Path = FLOW_STATE_PATH) -> bool:
     """Atomically writes flow state dict to target path using PID/tid temp file."""
+    temp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
@@ -57,10 +58,11 @@ def save_persisted_flow_state(data: Dict[str, Any], path: Path = FLOW_STATE_PATH
         return True
     except Exception:
         LOG.exception("Could not atomically save flow state to %s", path)
-        try:
-            temp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if temp is not None:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
         return False
 
 

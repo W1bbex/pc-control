@@ -196,11 +196,19 @@ class PcControlBotApp(
         self.power_flow.app = self
         self.physical_btn = PhysicalButtonManager(self.ui, self.mqtt)
         self.monitoring = MonitoringManager(self.ui, self.mqtt)
-        self.monitoring.is_shutting_down = lambda: bool(
-            getattr(self, "pending_shutdown_cmd_id", None)
-            and getattr(self, "pending_shutdown_started_at", None)
-            and (time.time() - float(self.pending_shutdown_started_at) < 180)
-        )
+
+        def _is_shutting_down():
+            if not getattr(self, "pending_shutdown_cmd_id", None):
+                return False
+            started_at = getattr(self, "pending_shutdown_started_at", None)
+            if not started_at:
+                return False
+            try:
+                return (time.time() - float(started_at) < 180)
+            except (ValueError, TypeError):
+                return False
+
+        self.monitoring.is_shutting_down = _is_shutting_down
 
         self.state_lock = threading.RLock()
         self.offset = 0
@@ -267,7 +275,10 @@ class PcControlBotApp(
         system_online = (self.mqtt.system_status == "online")
 
         if session == "unlocked":
-            self.ui.send_message(chat_id, "ℹ️ <b>Windows уже разблокирована.</b>")
+            res = self.ui.send_message(chat_id, "ℹ️ <b>Windows уже разблокирована.</b>")
+            if res and isinstance(res, dict) and "message_id" in res:
+                self.last_unlock_gesture_msg_id = res["message_id"]
+                self.last_unlock_gesture_time = time.time()
             return
 
         if system_online and session in {"login_screen", "locked"}:
@@ -298,10 +309,16 @@ class PcControlBotApp(
                 self.ui.send_message(chat_id, "ℹ️ <b>Рабочий сетап уже запускается.</b>")
                 return
             ws_id = self.power_flow.start_direct_setup(chat_id, prefix="ws")
-            self.ui.send_message(
-                chat_id,
-                "🚀 <b>Жест 'Разблок + Сетап' принят!</b>\nWindows уже разблокирована — запускаю рабочий сетап...",
+            msg_text = (
+                "🚀 <b>Жест 'Разблок + Сетап' принят!</b>\n"
+                "Windows уже разблокирована — запускаю рабочий сетап..."
             )
+            prev_msg_id = getattr(self, "last_unlock_gesture_msg_id", None)
+            can_edit = prev_msg_id and (time.time() - getattr(self, "last_unlock_gesture_time", 0.0) < 5.0)
+            if can_edit:
+                self.ui.send_message(chat_id, msg_text, message_id=prev_msg_id)
+            else:
+                self.ui.send_message(chat_id, msg_text)
             self.start_async_workspace_setup(chat_id, workspace_id=ws_id)
             return
 

@@ -50,7 +50,8 @@ def is_pc_online_for_auto_led(app, sys_status, desk_status, session):
     if monitoring is not None and hasattr(monitoring, "telemetry_age"):
         telem_age = monitoring.telemetry_age()
         if isinstance(telem_age, (int, float)) and not isinstance(telem_age, bool) and telem_age > 45.0:
-            pc_online = False
+            if not (sys_status == "online" and session in ("login_screen", "locked")):
+                pc_online = False
     return pc_online, telem_age
 
 
@@ -365,6 +366,20 @@ class PowerSchedulerMixin:
             if now - pending["requested_at"] >= SCREENSHOT_TIMEOUT_SECONDS:
                 self.pending_screenshots.pop(cmd_id, None)
                 self.ui.send_message(pending["chat_id"], "❌ Скриншот не получен за 35 секунд. Попробуй ещё раз.")
+
+        for cmd_id, pending in list(getattr(self, "pending_console_cmds", {}).items()):
+            started_at = pending.get("started_at", now) if isinstance(pending, dict) else now
+            if now - started_at >= 60.0:
+                self.pending_console_cmds.pop(cmd_id, None)
+                msg_id = pending.get("message_id") if isinstance(pending, dict) else None
+                chat_id = pending.get("chat_id") if isinstance(pending, dict) else None
+                cmd_short = str(pending.get("command", "") if isinstance(pending, dict) else "")[:40]
+                fail_text = f"⏱ <b>Таймаут выполнения команды:</b>\n<code>{cmd_short}</code>\n\nАгент не прислал ответ за 60 секунд."
+                if chat_id:
+                    try:
+                        self.ui.send_message(chat_id, fail_text, message_id=msg_id)
+                    except Exception:
+                        pass
 
         # Evict stale pending_telemetry_cmd_ids and pending_antigravity_cmd_ids (timeout 60s)
         pending_telem = getattr(self, "pending_telemetry_cmd_ids", {})
