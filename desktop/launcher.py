@@ -295,9 +295,7 @@ class LauncherMixin:
                 )
 
                 # Opening Happ or INCY without connecting must not invoke VPN automation.
-                if app_key == "Happ" and not connect_vpn:
-                    is_vpn = False
-                if app_key == "INCY" and not connect_vpn:
+                if (app_key or "").lower() in ("happ", "incy") and not connect_vpn:
                     is_vpn = False
 
                 if is_vpn:

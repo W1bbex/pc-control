@@ -6,7 +6,6 @@ Handles dispatching PowerShell / CMD commands to Desktop and SYSTEM agents, and 
 
 import html
 import logging
-import secrets
 import threading
 import time
 
@@ -96,7 +95,9 @@ class ConsoleServiceMixin:
         started_at = pending_cmd.get("started_at", time.time())
         elapsed = max(0.0, time.time() - started_at)
 
-        ack_data = data.get("data") or {}
+        ack_data = data.get("data")
+        if not isinstance(ack_data, dict):
+            ack_data = {"stderr": str(ack_data)} if ack_data else {}
         exit_code = ack_data.get("exit_code")
         if exit_code is None:
             exit_code = 0 if data.get("result") == "executed" else 1

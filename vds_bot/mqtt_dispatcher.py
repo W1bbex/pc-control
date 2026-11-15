@@ -20,10 +20,8 @@ except Exception:
 
 try:
     from .power_scheduler import get_app_state_lock, is_pc_online_for_auto_led, sync_auto_led
-    from .telegram_ui import ICONS
 except ImportError:
     from power_scheduler import get_app_state_lock, is_pc_online_for_auto_led, sync_auto_led
-    from telegram_ui import ICONS
 
 LOG = logging.getLogger("pc-control-bot.mqtt_dispatcher")
 ALLOWED_USER_ID = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID") or 0)
@@ -57,7 +55,9 @@ class MqttDispatcherMixin:
             session = data.get("session") or data.get("system_session")
             LOG.info("_on_mqtt_event %s: system_session=%s (system_status=%s)", event_type, session, data.get("system_status"))
             self.power_flow.on_system_session_update(session, target_user)
-            self._check_shutdown_confirmation(time.time())
+            if self._check_shutdown_confirmation(time.time()):
+                if hasattr(self, "_notify_shutdown_confirmed"):
+                    self._notify_shutdown_confirmed(target_user)
 
             sys_status = data.get("system_status") or self.mqtt.system_status
             desk_status = data.get("desktop_status") or self.mqtt.desktop_status
@@ -224,11 +224,16 @@ class MqttDispatcherMixin:
                 if hasattr(self, "pending_console_cmds"):
                     pending_cmd = self.pending_console_cmds.pop(cmd_id, None)
                 if not pending_cmd:
-                    if not hasattr(self, "early_console_acks"):
-                        self.early_console_acks = {}
-                    if len(self.early_console_acks) > 100:
-                        self.early_console_acks.clear()
-                    self.early_console_acks[cmd_id] = data
+                    is_console_ack = (
+                        (cmd_id and cmd_id.startswith("console-"))
+                        or (isinstance(data, dict) and data.get("action") in ("cmd", "powershell", "execute_command"))
+                    )
+                    if is_console_ack:
+                        if not hasattr(self, "early_console_acks"):
+                            self.early_console_acks = {}
+                        while len(self.early_console_acks) >= 100:
+                            self.early_console_acks.pop(next(iter(self.early_console_acks)), None)
+                        self.early_console_acks[cmd_id] = data
             if pending_cmd:
                 self._handle_console_ack(pending_cmd, data)
 

@@ -98,8 +98,12 @@ def get_boot_info():
                 if name:
                     data[name] = el.text
 
-            if "BootType" in data:
-                boot_code = int(data["BootType"])
+            raw_boot = data.get("BootType")
+            if raw_boot:
+                try:
+                    boot_code = int(str(raw_boot).strip(), 0)
+                except (ValueError, TypeError):
+                    boot_code = None
                 if boot_code == 0:
                     boot_type = "cold_boot"
                     boot_label = "Холодный запуск"

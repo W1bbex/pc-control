@@ -356,11 +356,10 @@ class PhysicalButtonManager:
             with self._lock:
                 self.last_press_info = f"{kind.title()} ({duration} ms)"
                 cur_mode = self.mode
-                has_input_msg = bool(self.input_message_id)
                 active_msg_id = self.active_message_id
 
             # 1. Diagnostics mode
-            if cur_mode == "test" or has_input_msg:
+            if cur_mode == "test":
                 with self._lock:
                     self.input_entries.append(f"{kind.title()} {duration} ms")
                     self.input_entries = self.input_entries[-12:]

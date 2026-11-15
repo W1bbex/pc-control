@@ -204,3 +204,11 @@ class TestPhysicalButtonManager(unittest.TestCase):
         self.mgr.handle_ack({"id": None, "result": "executed"}, chat_id=123)
         self.assertEqual(self.mgr.saved_password, "EXISTING_PASSWORD")
         self.mock_ui.send_message.assert_not_called()
+
+    def test_physical_button_does_not_hijack_when_mode_is_none_even_if_input_msg_remains(self):
+        self.mgr.mode = None
+        self.mgr.input_message_id = 9999
+        self.mgr.input_entries = []
+
+        self.mgr.handle_event({"event": "press", "kind": "click", "duration_ms": 120}, 123456)
+        self.assertEqual(len(self.mgr.input_entries), 0)

@@ -184,14 +184,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         parts = data.split(":")
         game_key = parts[1] if len(parts) > 1 else "gta5"
         selected_vpn = parts[2] if len(parts) > 2 else "incy"
-        desk_status = getattr(app.mqtt, "desktop_status", None)
-        is_mock_desk = hasattr(desk_status, "_mock_return_value") or type(desk_status).__name__ in ("MagicMock", "Mock")
-        if not is_mock_desk and desk_status != "online":
-            app.ui.answer_callback(callback_id, "❌ Desktop-агент не в сети!", alert=True)
-            return True
         sess_status = getattr(app.mqtt, "system_session", None)
-        is_mock_sess = hasattr(sess_status, "_mock_return_value") or type(sess_status).__name__ in ("MagicMock", "Mock")
-        if not is_mock_sess and (sess_status in ("locked", "login_screen", "no_console") or not sess_status):
+        if not sess_status or sess_status in ("locked", "login_screen", "no_console"):
             app.ui.answer_callback(callback_id, "🔒 Windows заблокирована. Сначала разблокируйте ПК.", alert=True)
             return True
         if getattr(app.power_flow, "stage", None) == PowerFlowStage.WORKSPACE_RUNNING:
@@ -219,14 +213,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
 
     if data in {"workspace_vpn:incy", "workspace_vpn:happ"}:
         selected_vpn = data.split(":", 1)[1]
-        desk_status = getattr(app.mqtt, "desktop_status", None)
-        is_mock_desk = hasattr(desk_status, "_mock_return_value") or type(desk_status).__name__ in ("MagicMock", "Mock")
-        if not is_mock_desk and desk_status != "online":
-            app.ui.answer_callback(callback_id, "❌ Desktop-агент не в сети!", alert=True)
-            return True
         sess_status = getattr(app.mqtt, "system_session", None)
-        is_mock_sess = hasattr(sess_status, "_mock_return_value") or type(sess_status).__name__ in ("MagicMock", "Mock")
-        if not is_mock_sess and (sess_status in ("locked", "login_screen", "no_console") or not sess_status):
+        if not sess_status or sess_status in ("locked", "login_screen", "no_console"):
             app.ui.answer_callback(callback_id, "🔒 Windows заблокирована. Сначала разблокируйте ПК.", alert=True)
             return True
         if getattr(app.power_flow, "stage", None) == PowerFlowStage.WORKSPACE_RUNNING:

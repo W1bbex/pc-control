@@ -246,16 +246,22 @@ def route_message(app, message: dict) -> None:
         if getattr(app.mqtt, "esp_status", None) != "online":
             app.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
             return
-        apply_led_power(app, True)
-        app.ui.send_message(chat_id, "💡 Подсветка кулера включена")
+        cmd_id = apply_led_power(app, True)
+        if cmd_id:
+            app.ui.send_message(chat_id, "💡 Подсветка кулера включена")
+        else:
+            app.ui.send_message(chat_id, "❌ Не удалось отправить команду: MQTT недоступен.")
         return
 
     if lower_text in {"/led_off", "выключить подсветку"}:
         if getattr(app.mqtt, "esp_status", None) != "online":
             app.ui.send_message(chat_id, "❌ Модуль управления кулером (ESP8266) не в сети!")
             return
-        apply_led_power(app, False)
-        app.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
+        cmd_id = apply_led_power(app, False)
+        if cmd_id:
+            app.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
+        else:
+            app.ui.send_message(chat_id, "❌ Не удалось отправить команду: MQTT недоступен.")
         return
 
     # 10. Interactive terminal line input

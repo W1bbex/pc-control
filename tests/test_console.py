@@ -342,6 +342,25 @@ class TestConsoleApp(unittest.TestCase):
         args, _ = self.app.ui.send_message.call_args
         self.assertIn("Таймаут выполнения команды", args[1])
 
+    def test_handle_console_ack_string_data_graceful(self):
+        pending = {
+            "chat_id": ALLOWED_USER_ID,
+            "message_id": 105,
+            "command": "dir",
+            "target": "desktop",
+            "shell": "cmd",
+            "started_at": time.time(),
+        }
+        ack_data = {
+            "id": "cmd-str-1",
+            "result": "failed",
+            "data": "Process execution failed",
+        }
+        self.app._handle_console_ack(pending, ack_data)
+        self.app.ui.send_message.assert_called()
+        args, _ = self.app.ui.send_message.call_args
+        self.assertIn("Process execution failed", args[1])
+
 
 if __name__ == "__main__":
     unittest.main()

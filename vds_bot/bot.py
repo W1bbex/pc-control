@@ -133,7 +133,7 @@ def resolve_menu_view(data: str) -> Optional[str]:
         return "apps_menu"
     if data == "power_menu":
         return "power_menu"
-    if data == "shutdown_menu" or data.startswith("shutdown_after:"):
+    if data in ("shutdown_menu", "shutdown_pc") or data.startswith(("shutdown_after:", "shutdown_schedule")):
         return "shutdown_menu"
     if data == "reboot_menu":
         return "reboot_menu"
@@ -145,7 +145,7 @@ def resolve_menu_view(data: str) -> Optional[str]:
         return "settings_menu"
     if data == "monitoring_menu":
         return "monitoring_menu"
-    if data == "history_menu" or data.startswith("history_period:"):
+    if data == "history_menu" or data.startswith(("history_period:", "history:")):
         return "history_menu"
     if data in ("led_menu", "led_palette") or data.startswith("led_"):
         return "led_menu"
@@ -159,6 +159,10 @@ def resolve_menu_view(data: str) -> Optional[str]:
         return "game_menu"
     if data in ("workspace_start_direct", "flow_unlock_and_workspace") or data.startswith("workspace_vpn:"):
         return "workspace_menu"
+    if data in ("physical_button", "physical_test", "physical_record_begin") or data.startswith("physical_"):
+        return "physical_menu"
+    if data in ("player", "player_refresh") or data.startswith("player_"):
+        return "player_menu"
     return None
 
 
@@ -508,7 +512,7 @@ class PcControlBotApp(
         if chat_id is None:
             chat_id = from_user_id
         message_id = msg.get("message_id") if isinstance(msg, dict) else None
-        business_connection_id = msg.get("business_connection_id") if isinstance(msg, dict) else None
+        business_connection_id = callback.get("business_connection_id") or (msg.get("business_connection_id") if isinstance(msg, dict) else None)
         data = callback.get("data", "")
 
         target_user = self.allowed_user_id
@@ -536,10 +540,12 @@ class PcControlBotApp(
                     was_test = getattr(phys, "mode", None) == "test" and data != "physical_test"
                     if was_test:
                         phys.mode = None
+                        phys.input_message_id = None
             else:
                 was_test = getattr(phys, "mode", None) == "test" and data != "physical_test"
                 if was_test:
                     phys.mode = None
+                    phys.input_message_id = None
             if was_test and hasattr(self.mqtt, "publish_esp_action"):
                 self.mqtt.publish_esp_action("STOP_PHYSICAL_TEST")
 

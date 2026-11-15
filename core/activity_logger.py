@@ -321,9 +321,11 @@ class ActivityTracker:
                     foreground_signature = signature
                     last_foreground = foreground
                     last_heartbeat = time.monotonic()
-                    if self.on_foreground_change and foreground.get("exe") and foreground.get("process"):
+                    if self.on_foreground_change and (foreground.get("exe") or foreground.get("process")):
                         try:
-                            self.on_foreground_change(foreground["exe"], foreground["process"], foreground.get("title"))
+                            exe_val = foreground.get("exe") or foreground.get("process")
+                            proc_val = foreground.get("process") or foreground.get("exe")
+                            self.on_foreground_change(exe_val, proc_val, foreground.get("title"))
                         except Exception:
                             pass
 

@@ -234,7 +234,7 @@ class AntigravityAccountManager:
         # Candidates must have remaining quota to be eligible fallback
         def is_viable(acc: Dict[str, Any]) -> bool:
             if not acc.get("has_quota_data", True):
-                return False
+                return bool(acc.get("has_valid_token", True)) and acc.get("min_quota", 1) > 0
             quotas = acc.get("models_quota", {})
             if preferred_model and preferred_model in quotas:
                 return quotas[preferred_model].get("percentage", 0) > 0
@@ -372,7 +372,7 @@ class AntigravityAccountManager:
         token_obj = self.refresh_token_if_needed(account_row)
         access_token = token_obj.get("access_token")
         refresh_token = token_obj.get("refresh_token")
-        expiry = token_obj.get("expiry_timestamp") or int(time.time()) + 3600
+        expiry = int(token_obj.get("expiry_timestamp") or (time.time() + 3600))
         id_token = token_obj.get("id_token")
         if not access_token or not isinstance(access_token, str):
             raise ValueError(f"Refreshed OAuth payload missing valid access_token for {account_row.get('email')}")

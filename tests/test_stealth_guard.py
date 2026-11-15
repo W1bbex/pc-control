@@ -844,3 +844,24 @@ def test_desktop_stealth_skips_wake_displays_on_network_offline_exit():
     agent.check_stealth_process_exit()
     agent.wake_displays.assert_not_called()
 
+
+def test_stealth_guard_declares_setwindowpos_and_clipcursor_signatures():
+    import core.stealth_guard  # noqa: F401
+    from ctypes import wintypes
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    assert hasattr(user32.SetWindowPos, "argtypes")
+    assert user32.SetWindowPos.argtypes == [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    assert user32.SetWindowPos.restype == wintypes.BOOL
+    assert hasattr(user32.ClipCursor, "argtypes")
+    assert user32.ClipCursor.restype == wintypes.BOOL
+

@@ -287,7 +287,9 @@ class MqttGateway:
             if cmd_id in self.pending_commands:
                 if result == "progress":
                     entry = self.pending_commands[cmd_id]
-                    entry["expires"] = int(time.time()) + int(entry.get("timeout", 30))
+                    t_val = entry.get("timeout")
+                    timeout_sec = int(t_val) if t_val is not None else 30
+                    entry["expires"] = int(time.time()) + timeout_sec
                 else:
                     del self.pending_commands[cmd_id]
 
@@ -392,7 +394,8 @@ class MqttGateway:
         Payload schema: {"id": "...", "action": "...", "expires": <unix_ts>, "args": {...}}
         """
         action_id = command_id or f"sys-{int(time.time()*1000)}-{secrets.token_hex(3)}"
-        expires = int(time.time()) + timeout
+        timeout_sec = int(timeout) if timeout is not None else 30
+        expires = int(time.time()) + timeout_sec
         payload_data = {
             "id": action_id,
             "action": action.lower(),
@@ -401,7 +404,7 @@ class MqttGateway:
         }
         
         with self.pending_lock:
-            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": timeout, "target": "system"}
+            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": timeout_sec, "target": "system"}
             
         success = self.publish(TOPIC_SYSTEM_COMMAND, json.dumps(payload_data))
         if not success:
@@ -417,10 +420,11 @@ class MqttGateway:
         Actions: "launch_app", "cancel_workspace", "screen_off", "lock", "sleep", "restart", "shutdown", "volume"
         Payload schema: {"id": "...", "action": "...", "expires": <unix_ts>, "args": {...}}
         """
-        if action.lower() == "screenshot" and timeout == 30:
+        if action.lower() == "screenshot" and (timeout == 30 or timeout is None):
             timeout = 35
         action_id = command_id or f"desk-{int(time.time()*1000)}-{secrets.token_hex(3)}"
-        expires = int(time.time()) + timeout
+        timeout_sec = int(timeout) if timeout is not None else 30
+        expires = int(time.time()) + timeout_sec
         payload_data = {
             "id": action_id,
             "action": action.lower(),
@@ -429,7 +433,7 @@ class MqttGateway:
         }
         
         with self.pending_lock:
-            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": timeout, "target": "desktop"}
+            self.pending_commands[action_id] = {"action": action, "expires": expires, "timeout": timeout_sec, "target": "desktop"}
             
         success = self.publish(TOPIC_DESKTOP_COMMAND, json.dumps(payload_data))
         if not success:

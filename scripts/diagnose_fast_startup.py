@@ -35,14 +35,16 @@ def check_last_boot_event():
                 "/rd:true", "/c:1", "/f:RenderedXml",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if out.returncode != 0 or not out.stdout.strip():
+        stdout_text = (out.stdout or "").strip()
+        if out.returncode != 0 or not stdout_text:
             return None, "wevtutil returned no events"
 
-        root = ET.fromstring(out.stdout)
+        root = ET.fromstring(stdout_text)
         data = {}
         for el in root.iter("{http://schemas.microsoft.com/win/2004/08/events/event}Data"):
             name = el.attrib.get("Name")

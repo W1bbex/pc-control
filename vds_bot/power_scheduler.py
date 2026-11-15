@@ -142,14 +142,7 @@ class PowerSchedulerMixin:
             elif (now - float(s_offline)) >= 20.0:
                 LOG.info("Shutdown criteria sustained for >= 20s. Confirming SHUTDOWN_OBSERVED.")
                 self.mqtt.health.set_shutdown_observed(ttl=3600.0, now=now)
-                target_user = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
-                self.ui.send_message(
-                    target_user,
-                    "<b>✅ ПК перестал отвечать после принятой команды выключения.</b>",
-                    reply_markup=self._main_menu_markup(),
-                )
-                with app_lock:
-                    self._clear_pending_shutdown()
+                self._clear_pending_shutdown()
                 return True
         else:
             if self.shutdown_offline_detected_at is not None:
@@ -157,6 +150,17 @@ class PowerSchedulerMixin:
                 self.shutdown_offline_detected_at = None
 
         return False
+
+    def _notify_shutdown_confirmed(self, chat_id=None):
+        target_user = chat_id or getattr(self, "allowed_user_id", ALLOWED_USER_ID)
+        try:
+            self.ui.send_message(
+                target_user,
+                "<b>✅ ПК перестал отвечать после принятой команды выключения.</b>",
+                reply_markup=self._main_menu_markup(),
+            )
+        except Exception as e:
+            LOG.warning("Failed to send shutdown confirmation message: %s", e)
 
     def _show_shutdown_schedule_confirmation(self, chat_id, target, message_id=None):
         self.shutdown_candidate_ts = target.timestamp()
@@ -376,6 +380,7 @@ class PowerSchedulerMixin:
         timed_out_ag = []
         timed_out_activity = None
         shutdown_timeout_acknowledged = None
+        shutdown_confirmed_notify = False
         schedule_action = None
 
         app_lock = get_app_state_lock(self)
@@ -422,7 +427,9 @@ class PowerSchedulerMixin:
             p_started = getattr(self, "pending_shutdown_started_at", None)
             if p_cmd and p_started:
                 confirmed = self._check_shutdown_confirmation(now)
-                if not confirmed and (now - float(p_started) >= SHUTDOWN_CONFIRM_TIMEOUT_SECONDS):
+                if confirmed:
+                    shutdown_confirmed_notify = True
+                elif (now - float(p_started) >= SHUTDOWN_CONFIRM_TIMEOUT_SECONDS):
                     shutdown_timeout_acknowledged = getattr(self, "shutdown_acknowledged", False)
                     self._clear_pending_shutdown()
 
@@ -489,6 +496,9 @@ class PowerSchedulerMixin:
                 )
             except Exception:
                 LOG.exception("Failed to send activity timeout notification")
+
+        if shutdown_confirmed_notify:
+            self._notify_shutdown_confirmed()
 
         if shutdown_timeout_acknowledged is not None:
             emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}

@@ -73,6 +73,10 @@ try:
     user32.SetCursorPos.restype = wintypes.BOOL
     user32.ShowCursor.argtypes = [wintypes.BOOL]
     user32.ShowCursor.restype = ctypes.c_int
+    user32.ClipCursor.argtypes = [ctypes.POINTER(wintypes.RECT)]
+    user32.ClipCursor.restype = wintypes.BOOL
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.SetWindowPos.restype = wintypes.BOOL
 except Exception:
     pass
 
@@ -392,7 +396,8 @@ class StealthOverlay:
                 hwnd = self._root.winfo_id()
                 if hwnd:
                     # HWND_TOPMOST = -1, SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010
-                    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)
+                    hwnd_topmost = wintypes.HWND(-1)
+                    user32.SetWindowPos(wintypes.HWND(hwnd), hwnd_topmost, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)
             except Exception:
                 pass
 

@@ -55,6 +55,15 @@ class PremiumChecker:
         except Exception as e:
             LOG.warning("Failed to save premium cache to %s: %s", self.cache_path, e)
 
+    def record_user(self, user_obj: Optional[Dict[str, Any]]) -> bool:
+        """Record or update premium status from an incoming Telegram User dictionary."""
+        if not user_obj or not isinstance(user_obj, dict):
+            return False
+        user_id = user_obj.get("id")
+        if not user_id:
+            return False
+        return self.update_from_user_obj(int(user_id), user_obj)
+
     def update_from_user_obj(self, user_id: int, user_obj: Optional[Dict[str, Any]]) -> bool:
         """Update cache directly from an incoming Telegram User object (e.g. from update)."""
         if not user_obj:

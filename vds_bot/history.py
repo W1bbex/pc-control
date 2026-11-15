@@ -246,6 +246,14 @@ class TelemetryHistory:
         first_bucket = rows[0][0]
         now_bucket = (int(time.time()) // bucket) * bucket
         last_bucket = max(rows[-1][0], now_bucket)
+
+        # Protect against unbounded range expansion and MemoryError on skewed/negative timestamps
+        expected_min = now_bucket - max(int(period_seconds), bucket * 2)
+        first_bucket = max(first_bucket, expected_min)
+        total_buckets = (last_bucket - first_bucket) // bucket if bucket > 0 else 0
+        if total_buckets > 2500:
+            first_bucket = last_bucket - (2500 * bucket)
+
         rows = [
             row_by_time.get(
                 timestamp,

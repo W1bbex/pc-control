@@ -111,6 +111,7 @@ class MonitoringManager:
                         merged[key] = telemetry_data[key]
                 if telemetry_data.get("uptime_seconds"):
                     merged["uptime_seconds"] = telemetry_data["uptime_seconds"]
+                merged["ts"] = telemetry_data.get("ts") or int(now)
                 self.latest_telemetry = merged
             else:
                 self.latest_telemetry = telemetry_data
@@ -121,8 +122,10 @@ class MonitoringManager:
         return self.check_alerts(self.latest_telemetry)
 
     def check_alerts(self, telemetry):
-        cpu_temp = (telemetry.get("cpu") or {}).get("temp_c")
-        gpu_temp = (telemetry.get("gpu") or {}).get("temp_c")
+        cpu_obj = telemetry.get("cpu") if isinstance(telemetry, dict) else {}
+        gpu_obj = telemetry.get("gpu") if isinstance(telemetry, dict) else {}
+        cpu_temp = cpu_obj.get("temp_c") if isinstance(cpu_obj, dict) else None
+        gpu_temp = gpu_obj.get("temp_c") if isinstance(gpu_obj, dict) else None
         alerts_to_send = []
         now = time.time()
         for name, label, temp in (("cpu_temp", "ЦП", cpu_temp), ("gpu_temp", "GPU", gpu_temp)):
@@ -267,10 +270,10 @@ class MonitoringManager:
             )
 
         telemetry = self.latest_telemetry or {}
-        cpu = telemetry.get("cpu") or {}
-        gpu = telemetry.get("gpu") or {}
-        memory = telemetry.get("memory") or {}
-        disks = telemetry.get("disks") or []
+        cpu = telemetry.get("cpu") if isinstance(telemetry.get("cpu"), dict) else {}
+        gpu = telemetry.get("gpu") if isinstance(telemetry.get("gpu"), dict) else {}
+        memory = telemetry.get("memory") if isinstance(telemetry.get("memory"), dict) else {}
+        disks = telemetry.get("disks") if isinstance(telemetry.get("disks"), list) else []
         status_icon, session_duration = self._session_lines(telemetry)
         active_app_raw = telemetry.get("active_application")
         active_title = telemetry.get("active_window_title")
@@ -306,6 +309,8 @@ class MonitoringManager:
 
         disk_lines = []
         for disk in disks:
+            if not isinstance(disk, dict):
+                continue
             drive = html.escape(str(disk.get("drive") or "Диск"))
             disk_lines.append(
                 f" ├ [{drive}] {format_number(disk.get('used_percent'), '%', 1)}"

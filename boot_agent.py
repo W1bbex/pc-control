@@ -79,12 +79,12 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             LOG.error("Missing required 'mqtt.host' configuration")
             sys.exit(1)
         try:
-            mqtt_port = int(mqtt_cfg.get("port"))
+            mqtt_port = int(mqtt_cfg.get("port", 8883))
             if not (1 <= mqtt_port <= 65535):
                 raise ValueError("port out of range")
             mqtt_cfg["port"] = mqtt_port
         except (TypeError, ValueError):
-            LOG.error("Invalid or missing 'mqtt.port' configuration: %r", mqtt_cfg.get("port"))
+            LOG.error("Invalid 'mqtt.port' configuration: %r", mqtt_cfg.get("port"))
             sys.exit(1)
 
         self.stop_event = threading.Event()

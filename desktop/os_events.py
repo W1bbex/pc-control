@@ -17,7 +17,6 @@ import logging
 import os
 import sys
 import threading
-import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from PIL import ImageGrab
@@ -208,7 +207,10 @@ def get_window_title(hwnd: int) -> Optional[str]:
 
 def is_telegram_control_chat(exe_key: Optional[str], title: Optional[str]) -> bool:
     """Checks whether the foreground window is Telegram focused on the PC control bot chat."""
-    if not exe_key or not any(c in exe_key for c in TELEGRAM_CLIENTS):
+    if not exe_key:
+        return False
+    exe_lower = exe_key.lower()
+    if not any(c in exe_lower for c in TELEGRAM_CLIENTS):
         return False
     if not title:
         return False

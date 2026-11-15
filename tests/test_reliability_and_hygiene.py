@@ -1,6 +1,5 @@
 """
-Regression tests verifying reliability, edge-case and hygiene remediations.
-Covers P2 and P3 items from the audit report.
+Regression tests verifying reliability, edge-case resilience and state transitions.
 """
 
 import json
@@ -335,8 +334,12 @@ def test_extracted_power_ui_presentation():
 def test_extracted_desktop_os_events_helpers():
     from desktop.os_events import is_telegram_control_chat
     assert is_telegram_control_chat("telegram.exe", "pc control bot") is True
+    assert is_telegram_control_chat("Telegram.exe", "pc control bot") is True
+    assert is_telegram_control_chat(r"C:\Program Files\Telegram Desktop\Telegram.exe", "pc control") is True
     assert is_telegram_control_chat("telegram.exe", "Family Chat") is False
     assert is_telegram_control_chat("notepad.exe", "pc control") is False
+    assert is_telegram_control_chat(None, "pc control") is False
+    assert is_telegram_control_chat("telegram.exe", None) is False
 
 
 def test_power_flow_unlock_fails_immediately_when_two_attempts_exhausted():
@@ -1688,6 +1691,7 @@ def test_sensors_read_streams_survives_closure():
 
     sh._read_stdout()
     sh._read_stderr()
+    assert sh.latest == []
 
 
 def test_action_dispatcher_diagnose_codex_launch_safely_handles_non_string_chatgpt_config():

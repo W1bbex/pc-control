@@ -255,6 +255,16 @@ class VpnManagerMixin:
             return self._finalize_incy_connection(verify_google, already_connected=True)
 
         with self._get_incy_lock():
+            # If incy is running but tunnel is not active, stop it before mutating preferences
+            # so clean process shutdown cannot overwrite autoConnect=True, and relaunch fresh
+            is_running = any(
+                (p.info["name"] or "").lower() == "incy.exe"
+                for p in psutil.process_iter(["name"])
+            )
+            if is_running:
+                LOG.info("INCY process is running but disconnected; stopping to apply autoConnect on fresh launch")
+                self._stop_incy_processes()
+
             try:
                 pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
                 if pref_path.exists():
@@ -266,14 +276,9 @@ class VpnManagerMixin:
             except Exception as e:
                 LOG.warning("Could not update INCY preferences: %s", e)
 
-            is_running = any(
-                (p.info["name"] or "").lower() == "incy.exe"
-                for p in psutil.process_iter(["name"])
-            )
-            if not is_running:
-                incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
-                resolved_exe = os.path.expandvars(str(incy_cmd))
-                if Path(resolved_exe).exists():
+            incy_cmd = self.config.get("apps", {}).get("INCY", r"C:\Program Files\INCY\incy.exe")
+            resolved_exe = os.path.expandvars(str(incy_cmd))
+            if Path(resolved_exe).exists():
                     LOG.info("Launching INCY: %s", resolved_exe)
                     try:
                         subprocess.Popen(

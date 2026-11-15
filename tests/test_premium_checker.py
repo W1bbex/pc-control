@@ -75,3 +75,15 @@ def test_premium_checker_expiration(tmp_path):
     res = checker.is_user_premium(888, bot_api=api)
     assert api.called is True
     assert res is False
+
+
+def test_premium_checker_record_user(tmp_path):
+    cache_file = tmp_path / "premium_cache.json"
+    checker = PremiumChecker(cache_path=cache_file, ttl_seconds=10)
+
+    assert checker.record_user({"id": 555, "is_premium": True}) is True
+    assert checker.is_user_premium(555) is True
+
+    assert checker.record_user(None) is False
+    assert checker.record_user({}) is False
+    assert checker.record_user("not-a-dict") is False

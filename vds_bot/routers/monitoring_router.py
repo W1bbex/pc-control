@@ -199,10 +199,11 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
         cmd_id = app.mqtt.publish_desktop_action("telemetry")
         if cmd_id:
             app.ui.answer_callback(callback_id, "Обновляю состояние...")
-            app.pending_telemetry_cmd_ids[cmd_id] = (chat_id, message_id)
-            if not hasattr(app, "pending_cmd_timestamps"):
-                app.pending_cmd_timestamps = {}
-            app.pending_cmd_timestamps[cmd_id] = time.time()
+            with getattr(app, "state_lock", threading.RLock()):
+                app.pending_telemetry_cmd_ids[cmd_id] = (chat_id, message_id)
+                if not hasattr(app, "pending_cmd_timestamps"):
+                    app.pending_cmd_timestamps = {}
+                app.pending_cmd_timestamps[cmd_id] = time.time()
         else:
             app.ui.answer_callback(callback_id, "❌ Не удалось запросить телеметрию: сбой MQTT", alert=True)
         return True

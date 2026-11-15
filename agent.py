@@ -411,8 +411,13 @@ class PCControlAgent(
                         res = []
                     resp_payload = json.dumps({"req": req, "result": res}, ensure_ascii=False)
                     self.mqtt.publish(TOPIC_ACTIVITY_RESPONSE, payload=resp_payload, qos=1)
-                except Exception:
+                except Exception as e:
                     LOG.exception("Failed handling activity query")
+                    try:
+                        err_payload = json.dumps({"req": locals().get("req", {}), "result": [], "error": str(e)}, ensure_ascii=False)
+                        self.mqtt.publish(TOPIC_ACTIVITY_RESPONSE, payload=err_payload, qos=1)
+                    except Exception:
+                        pass
 
             threading.Thread(target=_run_activity_query, name="mqtt-activity-query", daemon=True).start()
             return
@@ -747,7 +752,7 @@ class PCControlAgent(
             self.sensor_helper.stop()
             if self.activity_tracker:
                 self.activity_tracker.stop()
-            fast_watcher = getattr(self, "_fast_watcher_thread", None)
+            fast_watcher = getattr(self, "fast_watcher_thread", None)
             if fast_watcher is not None and hasattr(fast_watcher, "is_alive") and fast_watcher.is_alive():
                 try:
                     fast_watcher.join(timeout=1.0)

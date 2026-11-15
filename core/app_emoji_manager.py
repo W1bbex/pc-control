@@ -1,4 +1,3 @@
-import io
 import json
 import logging
 import os
@@ -29,7 +28,10 @@ except Exception:
 
 DEFAULT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _def_tg_uid = os.getenv("TELEGRAM_USER_ID", "0")
-DEFAULT_USER_ID = int(_def_tg_uid) if _def_tg_uid else 0
+try:
+    DEFAULT_USER_ID = int(_def_tg_uid) if _def_tg_uid else 0
+except (ValueError, TypeError):
+    DEFAULT_USER_ID = 0
 DEFAULT_PACK_NAME = "pc_apps_pack"
 
 IGNORED_PROCESSES = {

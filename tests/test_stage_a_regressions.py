@@ -1,6 +1,5 @@
 """
-Regression tests verifying all Stage A defect remediations.
-Covers Quick P1 (items 1-8) and Medium P1 (items 9-19) from the critique audit.
+Regression tests verifying core process management, network fault tolerance and IPC contracts.
 """
 
 import asyncio
@@ -127,7 +126,7 @@ def test_shell_execute_runas_success_and_failure(monkeypatch):
 
 
 def test_workspace_router_blocks_when_status_is_none():
-    """Verify workspace router rejects launch when agent status is None."""
+    """Verify workspace router rejects launch when session status is None or locked."""
     app = MagicMock()
     app.mqtt.desktop_status = None
     app.mqtt.system_session = None
@@ -136,10 +135,10 @@ def test_workspace_router_blocks_when_status_is_none():
     assert handled is True
     assert app.ui.answer_callback.called
     toast_msg = app.ui.answer_callback.call_args[0][1]
-    assert "не в сети" in toast_msg
+    assert "заблокирована" in toast_msg
 
     app.mqtt.desktop_status = "online"
-    app.mqtt.system_session = None
+    app.mqtt.system_session = "locked"
     handled_locked = route_workspace_callback(app, "workspace_vpn:incy", chat_id=1, message_id=10, callback_id="cb2")
     assert handled_locked is True
     toast_locked = app.ui.answer_callback.call_args[0][1]

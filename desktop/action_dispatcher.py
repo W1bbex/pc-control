@@ -161,7 +161,8 @@ class ActionDispatcherMixin:
                     hotkey=args.get("hotkey"),
                     timeout=args.get("timeout"),
                 )
-                self.acknowledge(command_id, "executed", res)
+                ack_status = "failed" if isinstance(res, dict) and res.get("stealth") == "failed" else "executed"
+                self.acknowledge(command_id, ack_status, res)
                 return
 
             if action == "kill_process":
@@ -194,7 +195,8 @@ class ActionDispatcherMixin:
                     mute=args.get("mute"),
                     toggle=bool(args.get("toggle", False)),
                 )
-                self.acknowledge(command_id, "executed", data)
+                ack_status = "executed" if data is not None else "failed"
+                self.acknowledge(command_id, ack_status, data or {"error": "set_volume_failed"})
                 return
 
             if action in {"press_esc", "send_key_esc", "send_key"}:

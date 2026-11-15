@@ -136,13 +136,13 @@ class HardwareMonitorMixin:
             for sensor in sensors
             if (
                 sensor.get("type") in ("Temperature", "Fan", "Power")
-                and _safe_sensor_val(sensor) != 0
+                and (sensor.get("type") == "Fan" or _safe_sensor_val(sensor) != 0)
             )
         ][:60]
         cpu_temperature = next(
             (
                 _safe_sensor_val(sensor)
-                for sensor in useful_sensors
+                for sensor in sensors
                 if (
                     sensor.get("hardware_type") == "Cpu"
                     and sensor.get("type") == "Temperature"

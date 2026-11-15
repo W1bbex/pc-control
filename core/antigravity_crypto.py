@@ -58,7 +58,8 @@ def _dpapi_decrypt(data: bytes) -> bytes:
     if sys.platform != "win32":
         raise RuntimeError("Windows DPAPI is only supported on win32")
 
-    blob_in = _DATA_BLOB(len(data), ctypes.create_string_buffer(data, len(data)))
+    in_buffer = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DATA_BLOB(len(data), in_buffer)
     blob_out = _DATA_BLOB()
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
@@ -67,9 +68,11 @@ def _dpapi_decrypt(data: bytes) -> bytes:
         err = ctypes.GetLastError()
         raise RuntimeError(f"CryptUnprotectData failed with error {err}")
 
-    result = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-    kernel32.LocalFree(blob_out.pbData)
-    return result
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        if blob_out.pbData:
+            kernel32.LocalFree(blob_out.pbData)
 
 
 class AntigravityCrypto:
@@ -148,16 +151,21 @@ class AntigravityCrypto:
 
         parts = enc_str[len(ENC_PREFIX):].split(":")
         if len(parts) != 3:
-            raise ValueError(f"Malformed encrypted payload structure: {enc_str[:25]}")
+            LOG.warning("Malformed encrypted payload structure: %s", enc_str[:25])
+            return None
 
-        iv = bytes.fromhex(parts[0])
-        tag = bytes.fromhex(parts[1])
-        ct = bytes.fromhex(parts[2])
+        try:
+            iv = bytes.fromhex(parts[0])
+            tag = bytes.fromhex(parts[1])
+            ct = bytes.fromhex(parts[2])
 
-        key = self.get_master_key()
-        aesgcm = AESGCM(key)
-        decrypted_bytes = aesgcm.decrypt(iv, ct + tag, None)
-        return json.loads(decrypted_bytes.decode("utf-8"))
+            key = self.get_master_key()
+            aesgcm = AESGCM(key)
+            decrypted_bytes = aesgcm.decrypt(iv, ct + tag, None)
+            return json.loads(decrypted_bytes.decode("utf-8"))
+        except Exception as e:
+            LOG.warning("Failed to decrypt or decode payload: %s", e)
+            return None
 
     def encrypt_payload(self, data: Dict[str, Any]) -> str:
         """Encrypt dict into agm_enc_v1:{iv}:{tag}:{ct}."""
@@ -181,6 +189,7 @@ class ProtobufHelper:
 
     @staticmethod
     def encode_varint(value: int) -> bytes:
+        value = int(value)
         out = bytearray()
         while value >= 0x80:
             out.append((value & 0x7F) | 0x80)

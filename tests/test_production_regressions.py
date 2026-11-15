@@ -204,7 +204,7 @@ def test_workspace_router_enforces_online_unlocked_and_escapes_html():
     app.power_flow.stage = PowerFlowStage.IDLE
 
     route_workspace_callback(app, "direct_game_vpn:custom:happ", 123, 44, "cb1")
-    assert "не в сети" in app.ui.answer_callback.call_args[0][1]
+    assert "заблокирована" in app.ui.answer_callback.call_args[0][1].lower()
 
     app.mqtt.desktop_status = "online"
     route_workspace_callback(app, "workspace_vpn:incy", 123, 44, "cb2")

@@ -421,7 +421,7 @@ def service_status():
 
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else "check"
-    manifest = compute_manifest()
+    manifest = compute_manifest() if action in ("check", "stage", "deploy", "diff") else {}
 
     if action == "check":
         print("Release Manifest (local):")

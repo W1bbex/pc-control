@@ -81,9 +81,13 @@ class NetworkDiagnostics {
       replayRetryCount = 0;
       return;
     }
-    if (bytesRead > 476) {
+    if (bytesRead >= sizeof(lineBuf) - 4) {
       Serial.println("DIAG replay skip oversized line");
       replayRetryCount = 0;
+      while (replayFile.available()) {
+        int c = replayFile.read();
+        if (c == '\n' || c == -1) break;
+      }
       return;
     }
     if (!client.publish("pc/main/esp/status", lineBuf)) {

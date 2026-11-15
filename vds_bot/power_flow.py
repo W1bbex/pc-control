@@ -1003,7 +1003,7 @@ class PowerFlowManager:
         )
         self.reset_flow()
 
-        if chat_id and msg_id:
+        if chat_id:
             try:
                 if stage_at_timeout == PowerFlowStage.REBOOTING:
                     text = (
