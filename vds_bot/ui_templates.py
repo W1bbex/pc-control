@@ -141,7 +141,9 @@ class UiTemplatesMixin(UiMarkupsMixin):
             rem_m = m % 60
             time_str = f"{h}ч {rem_m}м" if h > 0 else f"{rem_m}м"
             lines.append(f"{i}. {emoji_tag}<b>{html.escape(app)}</b> — {time_str}")
-        return "\n".join(lines)[:4096]
+        while len(lines) > 2 and sum(len(ln) + 1 for ln in lines) > 4000:
+            lines.pop()
+        return "\n".join(lines)
 
     def console_card_text(self, target="desktop", shell="powershell", last_cmd=None, is_executing=False):
         shell_name = "PowerShell" if (shell or "").lower() == "powershell" else "CMD"
@@ -210,7 +212,7 @@ class UiTemplatesMixin(UiMarkupsMixin):
             sess_ru = f"{sess_icon}Неизвестно"
         else:
             sess_icon = f'<tg-emoji emoji-id="{red_pulse}">🔴</tg-emoji> '
-            sess_ru = f"{sess_icon}{sess_str.capitalize()}"
+            sess_ru = f"{sess_icon}{html.escape(sess_str.capitalize())}"
 
         desk_str = str(desktop_status or "").lower().strip()
         if desk_str == "online":
@@ -533,9 +535,8 @@ class UiTemplatesMixin(UiMarkupsMixin):
             lines.append("")
 
         footer = "<i>⚡ Выберите аккаунт ниже для мгновенного переключения:</i>"
-        if sum(len(ln) + 1 for ln in lines) + len(footer) > 4096:
-            while len(lines) > 6 and sum(len(ln) + 1 for ln in lines) + len(footer) > 4060:
-                lines.pop()
+        while len(lines) > 2 and (sum(len(ln) + 1 for ln in lines) + len(footer) > 4000):
+            lines.pop()
         lines.append(footer)
-        return "\n".join(lines)[:4096]
+        return "\n".join(lines)
 

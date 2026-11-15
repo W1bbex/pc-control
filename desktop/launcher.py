@@ -248,7 +248,7 @@ class LauncherMixin:
                     continue
                 executable = cmd[0]
 
-                if step_id == "chatgpt" or app_key == "ChatGPT":
+                if step_id.lower() in ("chatgpt", "codex") or (app_key == "ChatGPT" and len(normalized_steps) == 1):
                     if progress_callback:
                         progress_callback({"step_id": step_id, "app": label, "state": "starting"})
                     try:
@@ -492,11 +492,22 @@ class LauncherMixin:
                             process_verified = target_running
                         else:
                             process_verified = target_running or (process is not None and process.poll() is None)
-                        if process_verified or time.time() >= ver_deadline:
-                            break
                         if cancel_event and cancel_event.is_set():
                             break
+                        if process_verified or time.time() >= ver_deadline:
+                            break
                         time.sleep(0.5)
+                    if cancel_event and cancel_event.is_set():
+                        LOG.info("Launch cancelled during verification of step %s", step_id)
+                        return {
+                            "app": app_key,
+                            "launched": launched,
+                            "verified_steps": verified_steps,
+                            "failed_step": None,
+                            "success": False,
+                            "reason": "cancelled",
+                            "desktop_minimized": False,
+                        }
                     if process_verified:
                         verified_steps.append(step_id)
                         if progress_callback:

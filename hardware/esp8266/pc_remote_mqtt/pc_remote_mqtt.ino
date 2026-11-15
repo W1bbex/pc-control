@@ -573,7 +573,13 @@ bool parseCommand(
 
   action = payload.substring(0, first);
   id = payload.substring(first + 1, second);
-  expiresAt = static_cast<time_t>(payload.substring(second + 1, third < 0 ? payload.length() : third).toInt());
+  const String expStr = payload.substring(second + 1, third < 0 ? payload.length() : third);
+  char* endptr = nullptr;
+  const unsigned long expVal = strtoul(expStr.c_str(), &endptr, 10);
+  if (endptr == expStr.c_str() || *endptr != '\0') {
+    return false;
+  }
+  expiresAt = static_cast<time_t>(expVal);
   value = third < 0 ? "" : payload.substring(third + 1);
 
   if (id.length() < 1 || id.length() > 64 || expiresAt <= 0) {
@@ -598,8 +604,11 @@ void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
   Serial.println(payload);
 
   String action;
+  action.reserve(32);
   String id;
+  id.reserve(64);
   String value;
+  value.reserve(64);
   time_t expiresAt = 0;
 
   if (!parseCommand(payload, action, id, expiresAt, value)) {
@@ -889,7 +898,7 @@ void setup() {
   syncClock();
 
   secureClient.setTrustAnchors(&trustAnchor);
-  secureClient.setBufferSizes(1024, 512);
+  secureClient.setBufferSizes(2048, 512);
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqttMessage);

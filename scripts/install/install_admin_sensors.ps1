@@ -3,6 +3,10 @@ $ErrorActionPreference = "Stop"
 $installDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $hardwareDir = Join-Path $installDir "hardware"
 $collector = if (Test-Path "$hardwareDir\sensors\AdminSensorCollector.exe") { "$hardwareDir\sensors\AdminSensorCollector.exe" } else { "$hardwareDir\AdminSensorCollector.exe" }
+if (-not (Test-Path -LiteralPath $collector)) {
+    Write-Error "AdminSensorCollector executable not found at '$collector'. Build or place the executable first."
+    exit 1
+}
 $snapshot = Join-Path $installDir "data\admin-sensors.json"
 $snapshotDir = Split-Path -Parent $snapshot
 if (-not (Test-Path -LiteralPath $snapshotDir)) {

@@ -20,7 +20,9 @@ class ActionDispatcherMixin:
             if action == "diagnose_codex_launch":
                 variant = str(args.get("variant", ""))
                 try:
-                    result = diagnose_codex_launch(variant, self.config.get("apps", {}).get("ChatGPT", ""), self._has_visible_window)
+                    raw_chatgpt = self.config.get("apps", {}).get("ChatGPT", "")
+                    chatgpt_path = raw_chatgpt if isinstance(raw_chatgpt, str) else (raw_chatgpt[0] if isinstance(raw_chatgpt, list) and raw_chatgpt else str(raw_chatgpt or ""))
+                    result = diagnose_codex_launch(variant, chatgpt_path, self._has_visible_window)
                 except (OSError, ValueError) as error:
                     LOG.exception("Codex diagnostic variant %s failed", variant)
                     result = {"codex_diagnostic": True, "variant": variant, "state": "error", "error": str(error)}
@@ -319,7 +321,10 @@ class ActionDispatcherMixin:
         if not isinstance(command, dict):
             LOG.warning("Ignoring non-object command payload")
             return
-        command_id = str(command.get("id", ""))
+        command_id = str(command.get("id", "")).strip()
+        if not command_id or len(command_id) > 80:
+            LOG.warning("Ignoring command with invalid or missing id: %r", command_id)
+            return
         action = str(command.get("action", ""))
         try:
             expires = int(command.get("expires", 0))

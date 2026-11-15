@@ -192,7 +192,8 @@ def heal_antigravity(app, chat_id: int, message_id: Optional[int] = None) -> Non
     if not hasattr(app, "pending_antigravity_cmd_ids"):
         app.pending_antigravity_cmd_ids = {}
 
-    back_markup = {"inline_keyboard": [app.ui.back_button("antigravity_menu" if message_id else "menu")]}
+    back_target = "apps_menu" if getattr(app, "current_menu_view", None) == "apps_menu" else ("antigravity_menu" if message_id else "menu")
+    back_markup = {"inline_keyboard": [app.ui.back_button(back_target)]}
 
     if getattr(app.mqtt, "desktop_status", None) != "online":
         app.ui.send_message(chat_id, "❌ Desktop-агент не в сети. Лечение недоступно при выключенном ПК.", reply_markup=back_markup, message_id=message_id)

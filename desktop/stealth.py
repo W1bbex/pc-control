@@ -158,8 +158,9 @@ class StealthMixin:
             try:
                 if self.stealth_mgr.mute_audio:
                     try:
-                        vol = self.get_volume()
-                        prev_mute = vol.get("muted") if isinstance(vol, dict) else False
+                        if prev_mute is None:
+                            vol = self.get_volume()
+                            prev_mute = vol.get("muted") if isinstance(vol, dict) else False
                         self.set_volume(mute=True)
                         muted_here = True
                     except Exception as err:
@@ -282,14 +283,17 @@ class StealthMixin:
 
             is_offline = not getattr(self, "mqtt_online", False)
             if is_offline:
+                offline_timeout_min = int(self.config.get("stealth_mode", {}).get("offline_timeout_minutes", 10))
+                if offline_timeout_min <= 0:
+                    self._stealth_offline_since = None
+                    return
                 now = time.time()
                 if getattr(self, "_stealth_offline_since", None) is None:
                     self._stealth_offline_since = now
                     LOG.warning("Stealth mode: network/MQTT offline detected. Starting emergency offline watchdog.")
                 else:
                     elapsed = now - self._stealth_offline_since
-                    offline_timeout_min = self.config.get("stealth_mode", {}).get("offline_timeout_minutes", 10)
-                    offline_timeout_sec = max(60, int(offline_timeout_min) * 60)
+                    offline_timeout_sec = max(60, offline_timeout_min * 60)
                     if elapsed >= offline_timeout_sec:
                         LOG.warning(
                             "Stealth mode offline watchdog triggered (%.1f minutes continuously offline). "

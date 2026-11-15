@@ -146,11 +146,43 @@ class HealthEngine:
         if component in self.components:
             comp = self.components[component]
             old_boot_id = comp.boot_id
-            accepted = comp.update(status, boot_id, ts, is_retained)
+
             # Only live, accepted PC lifecycle components with valid timestamps may clear shutdown flags.
             # Auxiliary 24/7 components (esp, mqtt_broker, telegram) stay online while the PC is off.
             parsed_ts = _parse_ts(ts)
             invalid_ts = ts is not None and parsed_ts is None
+
+            if (
+                component in PC_LIFECYCLE_COMPONENTS
+                and not invalid_ts
+                and status in ("online", "unlocked", "locked", "fresh")
+            ):
+                msg_ts = parsed_ts if (parsed_ts is not None and parsed_ts > 0) else (
+                    comp.last_ts if comp.last_ts > 0 else time.time()
+                )
+                reboot_detected = bool(
+                    boot_id and (
+                        (old_boot_id and boot_id != old_boot_id)
+                        or (old_boot_id is None and not is_retained)
+                    )
+                )
+                if not reboot_detected:
+                    if self.graceful_shutdown_at > 0 and msg_ts <= self.graceful_shutdown_at:
+                        LOG.info(
+                            "Ignored pre-shutdown heartbeat from %s (ts=%.2f <= shutdown_ts)",
+                            component,
+                            msg_ts,
+                        )
+                        return False
+                    if self.shutdown_observed_at > 0 and msg_ts <= self.shutdown_observed_at:
+                        LOG.info(
+                            "Ignored pre-shutdown heartbeat from %s (ts=%.2f <= shutdown_observed_at)",
+                            component,
+                            msg_ts,
+                        )
+                        return False
+
+            accepted = comp.update(status, boot_id, ts, is_retained)
             future_skew = getattr(comp, "_last_future_skew", False)
             if (
                 component in PC_LIFECYCLE_COMPONENTS
@@ -172,12 +204,8 @@ class HealthEngine:
                     self.clear_shutdown_observed()
                 if reboot_detected or msg_ts > self.graceful_shutdown_at:
                     self.clear_graceful_shutdown()
-                else:
-                    LOG.info(
-                        "Ignored pre-shutdown heartbeat from %s (ts=%.2f <= shutdown_ts)",
-                        component,
-                        msg_ts,
-                    )
+            return accepted
+        return False
             
     def get_status(self, component):
         return self.components[component].status if component in self.components else "unknown"

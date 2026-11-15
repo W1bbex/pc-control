@@ -37,7 +37,6 @@ while ($true) {
             if (-not $desktopProcess) {
                 throw "Start-Process returned null for $agent"
             }
-            $backoff = 5
         }
     } catch {
         Add-Content -Path $logFile -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ERROR: $_" -Encoding utf8

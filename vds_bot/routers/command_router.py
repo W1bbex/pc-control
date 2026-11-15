@@ -3,6 +3,7 @@
 
 from datetime import datetime, timedelta
 import logging
+import time
 
 try:
     from zoneinfo import ZoneInfo
@@ -112,7 +113,10 @@ def route_message(app, message: dict) -> None:
         if app.console_active_chat_id == chat_id:
             app.console_active_chat_id = None
             app.current_menu_view = "main"
-            app.ui.send_message(chat_id, "🚪 <b>Консоль закрыта.</b>", reply_markup=app._main_menu_markup())
+            res = app.ui.send_message(chat_id, "🚪 <b>Консоль закрыта.</b>", reply_markup=app._main_menu_markup())
+            if res and isinstance(res, dict) and "message_id" in res:
+                app.active_main_menu_message_id = res["message_id"]
+            app.save_state()
             return
 
     # 3. Direct CMD & PowerShell execution
@@ -196,11 +200,6 @@ def route_message(app, message: dict) -> None:
         app._show_shutdown_schedule_confirmation(chat_id, target)
         return
 
-    # 7. Interactive terminal line input
-    if getattr(app, "console_active_chat_id", None) == chat_id and not text.startswith("/"):
-        app.execute_console_command(chat_id, text, target=app.console_target, shell=app.console_shell)
-        return
-
     # 7. Media player
     if lower_text.startswith("/player") or lower_text == "плеер":
         _handle_player_command(app, chat_id, message.get("message_id"))
@@ -208,10 +207,26 @@ def route_message(app, message: dict) -> None:
 
     # 8. Activity summary
     if lower_text.startswith("/activity") or lower_text == "активность":
+        if getattr(app.mqtt, "desktop_status", None) != "online":
+            app.ui.send_message(
+                chat_id,
+                "⚠️ <b>Desktop-агент не в сети</b>\nСтатистика активности недоступна при выключенном ПК.",
+            )
+            return
         today_str = datetime.now(MOSCOW).strftime("%Y-%m-%d")
         app.pending_activity_chat_id = chat_id
-        app.mqtt.query_activity("summary", today_str)
-        app.ui.send_message(chat_id, f"📊 Запрашиваю статистику за {today_str}...")
+        app.pending_activity_requested_at = time.time()
+        sent = app.mqtt.query_activity("summary", today_str)
+        if not sent:
+            app.pending_activity_chat_id = None
+            app.pending_activity_requested_at = None
+            app.ui.send_message(chat_id, "❌ <b>Не удалось запросить активность:</b> MQTT недоступен.")
+            return
+        res = app.ui.send_message(chat_id, f"📊 Запрашиваю статистику за {today_str}...")
+        if res and isinstance(res, dict) and "message_id" in res:
+            app.pending_activity_msg_id = res["message_id"]
+        else:
+            app.pending_activity_msg_id = None
         return
 
     # 9. Legacy LED commands (backward compatibility)
@@ -241,4 +256,9 @@ def route_message(app, message: dict) -> None:
             return
         apply_led_power(app, False)
         app.ui.send_message(chat_id, "🌑 Подсветка кулера выключена")
+        return
+
+    # 10. Interactive terminal line input
+    if getattr(app, "console_active_chat_id", None) == chat_id and not text.startswith("/"):
+        app.execute_console_command(chat_id, text, target=app.console_target, shell=app.console_shell)
         return

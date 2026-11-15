@@ -91,11 +91,18 @@ except ImportError:
         route_antigravity_callback,
     )
 
-from mqtt_gateway import MqttGateway
-from power_flow import PowerFlowManager, PowerFlowStage
-from physical_button import PhysicalButtonManager
-from monitoring import MonitoringManager
-from health_engine import PCState
+try:
+    from .mqtt_gateway import MqttGateway
+    from .power_flow import PowerFlowManager, PowerFlowStage
+    from .physical_button import PhysicalButtonManager
+    from .monitoring import MonitoringManager
+    from .health_engine import PCState
+except ImportError:
+    from mqtt_gateway import MqttGateway
+    from power_flow import PowerFlowManager, PowerFlowStage
+    from physical_button import PhysicalButtonManager
+    from monitoring import MonitoringManager
+    from health_engine import PCState
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -140,7 +147,7 @@ def resolve_menu_view(data: str) -> Optional[str]:
         return "monitoring_menu"
     if data == "history_menu" or data.startswith("history_period:"):
         return "history_menu"
-    if data == "led_menu" or data.startswith("led_"):
+    if data in ("led_menu", "led_palette") or data.startswith("led_"):
         return "led_menu"
     if data == "console_close":
         return "main"
@@ -196,6 +203,11 @@ class PcControlBotApp(
         self.power_flow.app = self
         self.physical_btn = PhysicalButtonManager(self.ui, self.mqtt)
         self.monitoring = MonitoringManager(self.ui, self.mqtt)
+        try:
+            from core.premium_checker import PremiumChecker
+            self.premium_checker = PremiumChecker()
+        except Exception:
+            self.premium_checker = None
 
         def _is_shutting_down():
             if not getattr(self, "pending_shutdown_cmd_id", None):
@@ -322,26 +334,32 @@ class PcControlBotApp(
             self.start_async_workspace_setup(chat_id, workspace_id=ws_id)
             return
 
-        self.power_flow.set_auto_launch_workspace(True)
-
         prev_msg_id = getattr(self, "last_unlock_gesture_msg_id", None)
         can_edit = prev_msg_id and (time.time() - getattr(self, "last_unlock_gesture_time", 0.0) < 5.0)
 
         if system_online and session in {"login_screen", "locked"}:
             msg_text = "🚀 <b>Жест 'Разблок + Сетап' принят!</b>\nРазблокирую Windows и сразу запускаю рабочий сетап..."
             if can_edit:
-                self.ui.send_message(chat_id, msg_text, message_id=prev_msg_id)
+                res = self.ui.send_message(chat_id, msg_text, message_id=prev_msg_id)
             else:
-                self.ui.send_message(chat_id, msg_text)
+                res = self.ui.send_message(chat_id, msg_text)
+            if res and isinstance(res, dict) and "message_id" in res:
+                self.last_unlock_gesture_msg_id = res["message_id"]
+                self.last_unlock_gesture_time = time.time()
             if self.power_flow.stage != PowerFlowStage.UNLOCKING:
                 self.power_flow.start_manual_unlock(chat_id, auto_launch_workspace=True)
+            else:
+                self.power_flow.set_auto_launch_workspace(True, chat_id=chat_id)
         else:
             self.power_flow.prepare_unlock_waiting(chat_id, auto_launch_workspace=True)
             msg_text = "🚀 <b>Жест 'Разблок + Сетап' принят!</b>\n⏳ ПК загружается — после разблокировки автоматически запустится рабочий сетап."
             if can_edit:
-                self.ui.send_message(chat_id, msg_text, message_id=prev_msg_id)
+                res = self.ui.send_message(chat_id, msg_text, message_id=prev_msg_id)
             else:
-                self.ui.send_message(chat_id, msg_text)
+                res = self.ui.send_message(chat_id, msg_text)
+            if res and isinstance(res, dict) and "message_id" in res:
+                self.last_unlock_gesture_msg_id = res["message_id"]
+                self.last_unlock_gesture_time = time.time()
 
     def load_state(self):
         with getattr(self, "state_lock", threading.RLock()):
@@ -477,6 +495,11 @@ class PcControlBotApp(
         )
 
     def handle_callback(self, callback):
+        if getattr(self, "premium_checker", None) and callback.get("from"):
+            try:
+                self.premium_checker.record_user(callback["from"])
+            except Exception:
+                pass
         callback_id = callback["id"]
         msg = callback.get("message") or {}
         chat_id = msg.get("chat", {}).get("id") if isinstance(msg, dict) else None
@@ -538,6 +561,11 @@ class PcControlBotApp(
         self.ui.answer_callback(callback_id)
 
     def handle_message(self, message):
+        if getattr(self, "premium_checker", None) and isinstance(message, dict) and message.get("from"):
+            try:
+                self.premium_checker.record_user(message["from"])
+            except Exception:
+                pass
         route_message(self, message)
 
     def handle_business_message(self, message):
@@ -697,6 +725,9 @@ class PcControlBotApp(
             LOG.warning("Could not release single-instance lock: %s", e)
 
     def stop(self):
+        if getattr(self, "_stopped", False):
+            return
+        self._stopped = True
         LOG.info("Stopping PC Control Bot...")
         self.running = False
         try:
@@ -761,9 +792,13 @@ class PcControlBotApp(
 
     def run(self):
         self._acquire_lock()
+        def _sig_handler(signum, frame):
+            LOG.info("Received termination signal %s, initiating graceful shutdown...", signum)
+            self.running = False
+
         try:
-            signal.signal(signal.SIGINT, lambda s, f: self.stop())
-            signal.signal(signal.SIGTERM, lambda s, f: self.stop())
+            signal.signal(signal.SIGINT, _sig_handler)
+            signal.signal(signal.SIGTERM, _sig_handler)
         except Exception as e:
             LOG.warning("Could not register signal handlers: %s", e)
 

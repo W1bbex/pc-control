@@ -6,7 +6,6 @@ Thin modular coordinator delegating to desktop mixins and services.
 
 import ctypes
 from ctypes import wintypes
-import io
 import json
 import logging
 import logging.handlers
@@ -197,6 +196,8 @@ class PCControlAgent(
             )
         self.command_queue = queue.Queue()
         self.state_lock = threading.Lock()
+        self._incy_lock = threading.RLock()
+        self._net_state_lock = threading.Lock()
         self.mqtt_online = False
         self.last_status_publish = 0
         self.last_telemetry = {}
@@ -547,8 +548,8 @@ class PCControlAgent(
                                 self.publish_active_app_update(target_app, emoji_id, title)
                             except Exception:
                                 pass
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.warning("Error in foreground watcher loop: %s", e)
 
             self.stop_event.wait(0.5)
 
@@ -677,17 +678,25 @@ class PCControlAgent(
                     LOG.exception("Desktop agent loop iteration failed")
                     self.stop_event.wait(2)
         finally:
-            if self.current_session_app and self.current_session_start:
+            self.stop_event.set()
+            with self.state_lock:
+                app_name = self.current_session_app
+                start_time = self.current_session_start
+                win_title = self.current_session_title
+                exe_p = self.current_session_exe
+                emoji_id = self.current_session_emoji_id
+
+            if app_name and start_time:
                 try:
                     from core.activity_db import get_activity_db
 
                     get_activity_db().record_session(
-                        app_name=self.current_session_app,
-                        window_title=self.current_session_title,
-                        exe_path=self.current_session_exe,
-                        started_at=self.current_session_start,
+                        app_name=app_name,
+                        window_title=win_title,
+                        exe_path=exe_p,
+                        started_at=start_time,
                         ended_at=time.time(),
-                        emoji_id=self.current_session_emoji_id,
+                        emoji_id=emoji_id,
                     )
                 except Exception:
                     pass
@@ -738,6 +747,12 @@ class PCControlAgent(
             self.sensor_helper.stop()
             if self.activity_tracker:
                 self.activity_tracker.stop()
+            fast_watcher = getattr(self, "_fast_watcher_thread", None)
+            if fast_watcher is not None and hasattr(fast_watcher, "is_alive") and fast_watcher.is_alive():
+                try:
+                    fast_watcher.join(timeout=1.0)
+                except Exception:
+                    pass
             try:
                 from core.activity_db import _GLOBAL_DB
                 if _GLOBAL_DB is not None:

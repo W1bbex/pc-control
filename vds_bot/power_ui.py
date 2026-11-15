@@ -9,6 +9,7 @@ Pure presentation layer conforming to User Rule 3:
 
 from __future__ import annotations
 
+import html
 from typing import Any, Dict, Optional, Tuple
 
 try:
@@ -90,9 +91,10 @@ def get_unlock_success_markup(manual: bool = False) -> Tuple[str, Dict[str, Any]
 
 def get_unlock_failed_markup(reason: str) -> Tuple[str, Dict[str, Any]]:
     """Builds message text and markup for failed unlock."""
+    safe_reason = html.escape(str(reason))
     text = (
         f"<b>Ошибка разблокировки Windows</b>\n\n"
-        f"{reason}\n\n"
+        f"{safe_reason}\n\n"
         "Пароль отклонён или экран входа недоступен."
     )
     retry_btn = build_flow_btn("Попробовать снова", "success", "flow_unlock_retry", ICONS.get("refresh"))

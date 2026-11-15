@@ -3,7 +3,6 @@
 import ctypes
 from ctypes import wintypes
 import json
-import logging
 import os
 import queue
 import signal
@@ -12,7 +11,6 @@ import ssl
 import sys
 import threading
 import time
-from pathlib import Path
 
 import certifi
 import paho.mqtt.client as mqtt

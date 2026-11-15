@@ -29,6 +29,15 @@ user32.SetThreadDesktop.restype = wintypes.BOOL
 user32.CloseDesktop.argtypes = [wintypes.HANDLE]
 user32.CloseDesktop.restype = wintypes.BOOL
 
+user32.GetUserObjectInformationW.argtypes = [
+    wintypes.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD),
+]
+user32.GetUserObjectInformationW.restype = wintypes.BOOL
+
 user32.GetKeyState.argtypes = [ctypes.c_int]
 user32.GetKeyState.restype = ctypes.c_short
 
@@ -46,6 +55,12 @@ user32.ActivateKeyboardLayout.restype = wintypes.HKL
 
 user32.GetForegroundWindow.argtypes = []
 user32.GetForegroundWindow.restype = wintypes.HWND
+
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+user32.GetKeyboardLayout.restype = wintypes.HKL
 
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
@@ -91,17 +106,28 @@ def _switch_layout_us_english():
                 thread_id = user32.GetWindowThreadProcessId(fg_hwnd, None)
                 if thread_id:
                     curr_hkl = user32.GetKeyboardLayout(thread_id)
-                    if (curr_hkl & 0xFFFF) != 0x0409:
+                    hkl_val = 0
+                    if curr_hkl:
+                        if isinstance(curr_hkl, int):
+                            hkl_val = curr_hkl
+                        elif hasattr(curr_hkl, "value"):
+                            hkl_val = int(curr_hkl.value or 0)
+                        else:
+                            try:
+                                hkl_val = int(ctypes.cast(curr_hkl, ctypes.c_void_p).value or 0)
+                            except Exception:
+                                hkl_val = 0
+                    if (hkl_val & 0xFFFF) != 0x0409:
                         VK_MENU = 0x12
                         VK_SHIFT = 0x10
-                        user32.keybd_event(VK_MENU, user32.MapVirtualKeyW(VK_MENU, 0), 0, 0)
-                        user32.keybd_event(VK_SHIFT, user32.MapVirtualKeyW(VK_SHIFT, 0), 0, 0)
+                        user32.keybd_event(VK_MENU, user32.MapVirtualKeyW(VK_MENU, 0), 0, None)
+                        user32.keybd_event(VK_SHIFT, user32.MapVirtualKeyW(VK_SHIFT, 0), 0, None)
                         time.sleep(0.03)
-                        user32.keybd_event(VK_SHIFT, user32.MapVirtualKeyW(VK_SHIFT, 0), 2, 0)
-                        user32.keybd_event(VK_MENU, user32.MapVirtualKeyW(VK_MENU, 0), 2, 0)
+                        user32.keybd_event(VK_SHIFT, user32.MapVirtualKeyW(VK_SHIFT, 0), 2, None)
+                        user32.keybd_event(VK_MENU, user32.MapVirtualKeyW(VK_MENU, 0), 2, None)
                         time.sleep(0.05)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f"Failed querying/switching keyboard layout: {e}")
     return hkl
 
 
@@ -128,7 +154,7 @@ def _send_vk_with_modifiers(vk: int, mod_mask: int, hold_delay: float = 0.06):
 
 def type_character(ch: str, hkl=None):
     """Map and type a single password character using the target keyboard layout."""
-    if ch.isdigit():
+    if '0' <= ch <= '9':
         _send_vk_with_modifiers(0x30 + int(ch), 0)
         return
 
@@ -209,7 +235,8 @@ def run_unlock():
             if hdesk:
                 try:
                     name_buf = ctypes.create_unicode_buffer(256)
-                    if user32.GetUserObjectInformationW(hdesk, 2, name_buf, 256, None):
+                    needed = wintypes.DWORD()
+                    if user32.GetUserObjectInformationW(hdesk, 2, name_buf, ctypes.sizeof(name_buf), ctypes.byref(needed)):
                         desk_name = name_buf.value
                 finally:
                     user32.CloseDesktop(hdesk)

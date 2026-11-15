@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -368,10 +369,17 @@ class PowerFlowManager:
         if choice == "flow_unlock_no":
             with self._lock:
                 mid = self.message_id or message_id
-            text = (
-                "<b>ПК запускается</b>\n\n"
-                "Разблокировка Windows пропущена."
-            )
+                stage = self.stage
+            if stage == PowerFlowStage.POWERING_ON:
+                text = (
+                    "<b>ПК запускается</b>\n\n"
+                    "Разблокировка Windows пропущена."
+                )
+            else:
+                text = (
+                    "<b>Разблокировка Windows пропущена</b>\n\n"
+                    "Запуск сценария отменён."
+                )
             markup = {"inline_keyboard": [self.ui.back_button("menu")]}
             self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
             self.reset_flow()
@@ -434,6 +442,7 @@ class PowerFlowManager:
     def set_auto_launch_workspace(self, enable=True, vpn="incy", chat_id=None, message_id=None):
         cid = None
         now = time.time()
+        already_unlocking = False
         with self._lock:
             self.auto_launch_workspace = bool(enable)
             if enable:
@@ -441,12 +450,14 @@ class PowerFlowManager:
                 if not self.created_at:
                     self.created_at = now
                 self.expires_at = now + FLOW_TTL_SECONDS
-                self.unlock_attempts = 0
+                already_unlocking = (self.stage == PowerFlowStage.UNLOCKING)
+                if not already_unlocking:
+                    self.unlock_attempts = 0
+                    self.pending_unlock_command_id = None
                 self.workspace_cancelled = False
                 self.auto_launch_game = False
                 self.target_workspace_vpn = str(vpn)
                 self.stage = PowerFlowStage.UNLOCKING
-                self.pending_unlock_command_id = None
                 if chat_id:
                     self.chat_id = chat_id
                 if message_id is not None:
@@ -455,23 +466,28 @@ class PowerFlowManager:
         self.save_state()
         if enable and cid:
             self._update_launch_card(force=True, chat_id=cid)
-            self.check_and_trigger_unlock(cid)
+            if not already_unlocking:
+                self.check_and_trigger_unlock(cid)
 
     def set_auto_launch_game(self, game="gta5", vpn="incy", chat_id=None, message_id=None):
+        cid = None
         now = time.time()
+        already_unlocking = False
         with self._lock:
             self.flow_id = self.flow_id or str(uuid.uuid4())
             if not self.created_at:
                 self.created_at = now
             self.expires_at = now + FLOW_TTL_SECONDS
-            self.unlock_attempts = 0
+            already_unlocking = (self.stage == PowerFlowStage.UNLOCKING)
+            if not already_unlocking:
+                self.unlock_attempts = 0
+                self.pending_unlock_command_id = None
             self.workspace_cancelled = False
             self.auto_launch_game = True
             self.auto_launch_workspace = False
             self.target_game = str(game)
             self.target_game_vpn = str(vpn)
             self.stage = PowerFlowStage.UNLOCKING
-            self.pending_unlock_command_id = None
             if chat_id:
                 self.chat_id = chat_id
             if message_id is not None:
@@ -481,7 +497,8 @@ class PowerFlowManager:
 
         if cid:
             self._update_launch_card(force=True, chat_id=cid)
-            self.check_and_trigger_unlock(cid)
+            if not already_unlocking:
+                self.check_and_trigger_unlock(cid)
 
     def prepare_unlock_waiting(self, chat_id, auto_launch_workspace=False):
         now = time.time()
@@ -663,6 +680,11 @@ class PowerFlowManager:
                     return
             # Send unlock command to boot_agent.py
             cmd_id = self.mqtt.publish_system_action("unlock")
+            if not cmd_id:
+                LOG.warning("Failed to publish unlock action (MQTT offline or publish error)")
+                with self._lock:
+                    self.unlock_attempts = max(0, self.unlock_attempts - 1)
+                return
             LOG.info("Sent unlock action to boot_agent.py (cmd_id=%s)", cmd_id)
             with self._lock:
                 self.pending_unlock_command_id = cmd_id
@@ -929,7 +951,7 @@ class PowerFlowManager:
         with self._lock:
             self.workspace_cancelled = True
             ws_id = self.active_workspace_id
-            mid = self.message_id
+            mid = self.message_id or getattr(self, "workspace_card_msg_id", None)
         if ws_id:
             # Publish real cancel_workspace command with workspace_id to desktop agent
             self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})

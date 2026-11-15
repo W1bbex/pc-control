@@ -89,6 +89,9 @@ class UiMarkupsMixin:
                 ],
                 [
                     {"text": "Подсветка (ARGB)", "style": "primary", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_menu"},
+                    {"text": "Профили Antigravity", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"), "callback_data": "antigravity_menu"},
+                ],
+                [
                     {"text": "Консоль", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
                 ],
                 self.back_button("menu"),
@@ -99,9 +102,28 @@ class UiMarkupsMixin:
         return {
             "inline_keyboard": [
                 [
+                    {"text": "Включить", "style": "success", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_action:on"},
+                    {"text": "Выключить", "style": "danger", "callback_data": "led_action:off"},
+                ],
+                [
                     {"text": "Для глаз (Идеал)", "style": "success", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_action:preset:eye"},
                     {"text": "Для фото (Камера)", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "led_action:preset:photo"},
                 ],
+                [
+                    {"text": "30%", "style": "primary", "callback_data": "led_action:bright:80"},
+                    {"text": "60%", "style": "primary", "callback_data": "led_action:bright:160"},
+                    {"text": "100%", "style": "primary", "callback_data": "led_action:bright:255"},
+                ],
+                [
+                    {"text": "Все оттенки (1..12)", "style": "primary", "callback_data": "led_palette"},
+                ],
+                self.back_button("settings_menu"),
+            ]
+        }
+
+    def led_palette_markup(self):
+        return {
+            "inline_keyboard": [
                 [
                     {"text": "1", "style": "primary", "callback_data": "led_action:preset:1"},
                     {"text": "2", "style": "primary", "callback_data": "led_action:preset:2"},
@@ -122,16 +144,7 @@ class UiMarkupsMixin:
                     {"text": "11", "style": "primary", "callback_data": "led_action:preset:11"},
                     {"text": "12", "style": "primary", "callback_data": "led_action:preset:12"},
                 ],
-                [
-                    {"text": "Включить", "style": "success", "icon_custom_emoji_id": ICONS.get("light"), "callback_data": "led_action:on"},
-                    {"text": "Выключить", "style": "danger", "callback_data": "led_action:off"},
-                ],
-                [
-                    {"text": "30%", "style": "primary", "callback_data": "led_action:bright:80"},
-                    {"text": "60%", "style": "primary", "callback_data": "led_action:bright:160"},
-                    {"text": "100%", "style": "primary", "callback_data": "led_action:bright:255"},
-                ],
-                self.back_button("settings_menu"),
+                self.back_button("led_menu"),
             ]
         }
 
@@ -306,11 +319,13 @@ class UiMarkupsMixin:
                 [
                     {"text": "Antigravity", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_antigravity") or ICONS.get("terminal"), "callback_data": "app:Antigravity"},
                     {"text": "Codex", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chatgpt") or ICONS.get("bot"), "callback_data": "app:ChatGPT"},
-                    {"text": "Консоль (Терминал)", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
                 ],
-                [{"text": "Codex: варианты запуска", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chatgpt") or ICONS.get("bot"), "callback_data": "codex_diagnostics"}],
                 [
+                    {"text": "Консоль (Терминал)", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "console_open"},
                     {"text": "Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
+                ],
+                [
+                    {"text": "Codex: варианты запуска", "style": "primary", "icon_custom_emoji_id": ICONS.get("app_chatgpt") or ICONS.get("bot"), "callback_data": "codex_diagnostics"},
                     {"text": "Лечение AG & VPN", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh") or ICONS.get("terminal"), "callback_data": "ag_heal"},
                 ],
                 self.back_button("menu"),

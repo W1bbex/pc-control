@@ -93,9 +93,10 @@ class ConsoleServiceMixin:
         status_badge = "✅" if exit_code == 0 else f"❌ ({exit_code})"
         shell_badge = "PowerShell" if shell == "powershell" else "CMD"
         target_badge = "Desktop" if target == "desktop" else "SYSTEM"
+        safe_cmd = cmd_text if len(cmd_text) <= 250 else cmd_text[:247] + "..."
         header = (
             f"💻 <b>Консоль [{target_badge} | {shell_badge}]</b>\n"
-            f"Команда: <code>{html.escape(cmd_text)}</code>\n"
+            f"Команда: <code>{html.escape(safe_cmd)}</code>\n"
             f"Статус: {status_badge} | Время: <code>{elapsed:.2f}s</code>\n"
         )
 

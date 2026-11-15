@@ -37,12 +37,16 @@ def _trigger_reboot(app, chat_id: int, message_id: int, callback_id: str, *, unl
     if not _is_pc_agent_online(app):
         app.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
         return
+    cmd_id = None
+    if app.mqtt.system_status == "online":
+        cmd_id = app.mqtt.publish_system_action("restart")
+    elif getattr(app.mqtt, "desktop_status", None) == "online":
+        cmd_id = app.mqtt.publish_desktop_action("restart")
+    if not cmd_id:
+        app.ui.send_message(chat_id, "❌ Не удалось отправить команду перезагрузки: сбой MQTT.", message_id=message_id)
+        return
     toast = "Перезагружаю с авторазблоком..." if unlock else "Перезагружаю..."
     app.ui.answer_callback(callback_id, toast)
-    if app.mqtt.system_status == "online":
-        app.mqtt.publish_system_action("restart")
-    elif getattr(app.mqtt, "desktop_status", None) == "online":
-        app.mqtt.publish_desktop_action("restart")
     if hasattr(app.mqtt, "publish_esp_action"):
         app.mqtt.publish_esp_action("LED_OFF")
     app.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=unlock)
@@ -109,25 +113,37 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
         return True
 
     if data == "lock_windows":
-        app.ui.answer_callback(callback_id, "Блокирую...")
-        app.mqtt.publish_desktop_action("lock")
-        app.mqtt.publish_system_action("lock")
+        d_cmd = app.mqtt.publish_desktop_action("lock")
+        s_cmd = app.mqtt.publish_system_action("lock")
+        if d_cmd or s_cmd:
+            app.ui.answer_callback(callback_id, "Блокирую...")
+        else:
+            app.ui.answer_callback(callback_id, "❌ Не удалось отправить команду блокировки: MQTT недоступен", alert=True)
         return True
 
     if data == "toggle_screen":
-        app.ui.answer_callback(callback_id, "Переключаю экран...")
-        app.mqtt.publish_desktop_action("screen_off")
+        cmd_id = app.mqtt.publish_desktop_action("screen_off")
+        if cmd_id:
+            app.ui.answer_callback(callback_id, "Переключаю экран...")
+        else:
+            app.ui.answer_callback(callback_id, "❌ Не удалось отправить команду: MQTT недоступен", alert=True)
         return True
 
     if data == "minimize_windows":
-        app.ui.answer_callback(callback_id, "Сворачиваю окна...")
-        app.mqtt.publish_desktop_action("minimize_all")
+        cmd_id = app.mqtt.publish_desktop_action("minimize_all")
+        if cmd_id:
+            app.ui.answer_callback(callback_id, "Сворачиваю окна...")
+        else:
+            app.ui.answer_callback(callback_id, "❌ Не удалось отправить команду: MQTT недоступен", alert=True)
         return True
 
     # 4. Stealth Mode (Blackout)
     if data in ("toggle_stealth", "stealth_toggle"):
-        app.ui.answer_callback(callback_id, "Переключаю режим скрытности...")
-        app.mqtt.publish_desktop_action("stealth_mode", {"state": "toggle"})
+        cmd_id = app.mqtt.publish_desktop_action("stealth_mode", {"state": "toggle"})
+        if cmd_id:
+            app.ui.answer_callback(callback_id, "Переключаю режим скрытности...")
+        else:
+            app.ui.answer_callback(callback_id, "❌ Не удалось переключить скрытность: MQTT недоступен", alert=True)
         return True
 
     if data == "stealth_on":
@@ -343,11 +359,15 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             app.ui.answer_callback(callback_id, "❌ Модуль питания (ESP8266) не в сети!", alert=True)
             return True
 
-        app.ui.answer_callback(callback_id, "Выполняю аварийное выключение...")
         LOG.warning("Emergency power off triggered by chat_id=%s via ESP8266 FORCE_OFF", chat_id)
 
         # Send FORCE_OFF command (holds relay pin for 5000ms)
-        app.mqtt.publish_esp_action("FORCE_OFF")
+        cmd_id = app.mqtt.publish_esp_action("FORCE_OFF")
+        if not cmd_id:
+            app.ui.answer_callback(callback_id, "❌ Сбой отправки команды на ESP8266: MQTT недоступен", alert=True)
+            return True
+
+        app.ui.answer_callback(callback_id, "Выполняю аварийное выключение...")
         # Send LED_OFF to cut cooler power
         if hasattr(app.mqtt, "publish_esp_action"):
             app.mqtt.publish_esp_action("LED_OFF")

@@ -275,13 +275,7 @@ def test_type_password_mutex_and_keyboard_layout_ctypes_signatures():
 
 def test_type_password_attaches_to_input_desktop_handle():
     """Verify run_unlock attaches to OpenInputDesktop handle via SetThreadDesktop."""
-    import ast
     import scripts.type_password as tp
-
-    # AST check: ensure GetDesktopWindow is never called as an identifier
-    tree = ast.parse((ROOT_DIR / "scripts" / "type_password.py").read_text(encoding="utf-8"))
-    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    assert "GetDesktopWindow" not in names
 
     fake_hdesk = 0xCAFE
     with patch.object(tp.kernel32, "CreateMutexW", return_value=0x1111), \

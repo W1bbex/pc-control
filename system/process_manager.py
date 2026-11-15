@@ -1,9 +1,6 @@
 import os
 import subprocess
-import time
 from pathlib import Path
-
-import psutil
 
 from core.process_utils import (
     get_top_processes,
@@ -53,7 +50,8 @@ class ProcessManagerMixin:
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if completed.returncode != 0:
-            raise RuntimeError(completed.stdout or completed.stderr)
+            err = (completed.stderr or "").strip() or (completed.stdout or "").strip() or f"schtasks failed with code {completed.returncode}"
+            raise RuntimeError(err)
         return {"task": task_name}
 
     def _ensure_hosts_mapping(self):

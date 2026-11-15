@@ -211,11 +211,11 @@ def collect_vds_code_files(logger: logging.Logger) -> dict[str, bytes]:
     if not vds_files:
         for fn in VDS_MANIFEST_FILES:
             code, stdout, stderr = run_ssh_command(f"cat {REMOTE_VDS_DIR}/{fn} 2>/dev/null", timeout=10)
-            if code == 0 and stdout:
+            if code == 0 and stdout is not None:
                 vds_files[fn] = stdout.encode("utf-8")
                 logger.debug("Fetched remote %s (%d bytes)", fn, len(stdout))
             else:
-                logger.debug("Remote file %s not present or empty on VDS", fn)
+                logger.debug("Remote file %s not present on VDS", fn)
 
     logger.info("Fetched %d files from VDS production.", len(vds_files))
     return vds_files
@@ -346,13 +346,26 @@ def run_backup(force: bool = False, dry_run: bool = False, skip_vds: bool = Fals
 
     # 2. Collect VDS files
     vds_files: dict[str, bytes] = {}
+    vds_fetch_failed = False
     if not skip_vds:
         try:
             vds_files = collect_vds_code_files(logger)
+            if not vds_files:
+                vds_fetch_failed = True
+                logger.warning("VDS fetch returned 0 files. Treating as connection/sync failure.")
         except Exception as e:
-            logger.warning("VDS fetch encountered an error: %s. Continuing with local code.", e)
+            vds_fetch_failed = True
+            logger.warning("VDS fetch encountered an error: %s.", e)
     else:
         logger.info("VDS check skipped via --skip-vds flag.")
+
+    if vds_fetch_failed and not force:
+        logger.error(
+            "Refusing to generate partial backup without VDS files while VDS is enabled. "
+            "This protects full backup archives from being rotated out by degraded snapshots. "
+            "Use --skip-vds if you explicitly wish to back up local code only."
+        )
+        return 1
 
     # 3. Build current manifest
     current_manifest = build_manifest(local_files, vds_files, BASE_DIR)

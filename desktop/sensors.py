@@ -51,18 +51,24 @@ class SensorHelper:
             LOG.exception("Could not start hardware sensor helper")
 
     def _read_stdout(self):
-        for line in self.process.stdout:
-            try:
-                sensors = json.loads(line)
-                if isinstance(sensors, list):
-                    with self.lock:
-                        self.latest = sensors
-            except json.JSONDecodeError:
-                LOG.warning("Invalid sensor helper output")
+        try:
+            for line in self.process.stdout:
+                try:
+                    sensors = json.loads(line)
+                    if isinstance(sensors, list):
+                        with self.lock:
+                            self.latest = sensors
+                except json.JSONDecodeError:
+                    LOG.warning("Invalid sensor helper output")
+        except (ValueError, OSError):
+            pass
 
     def _read_stderr(self):
-        for line in self.process.stderr:
-            LOG.warning("Sensor helper: %s", line.rstrip())
+        try:
+            for line in self.process.stderr:
+                LOG.warning("Sensor helper: %s", line.rstrip())
+        except (ValueError, OSError):
+            pass
 
     def _find_admin_snapshot(self) -> Path:
         candidates = (
@@ -105,6 +111,8 @@ class SensorHelper:
                 break
 
         with self.lock:
+            if self.process and self.process.poll() is not None and not self.latest:
+                LOG.debug("SensorHelper process exited with code %s", self.process.poll())
             return list(self.latest)
 
     def stop(self):

@@ -103,21 +103,62 @@ def start_shutdown_watcher(on_shutdown_callback: Callable[[], None]) -> None:
     threading.Thread(target=_watcher, name="shutdown-watcher", daemon=True).start()
 
 
+_WIN32_SIGS_INITIALIZED = False
+_WIN32_INIT_LOCK = threading.Lock()
+
+
+def _ensure_win32_signatures():
+    global _WIN32_SIGS_INITIALIZED
+    if _WIN32_SIGS_INITIALIZED or sys.platform != "win32":
+        return
+    with _WIN32_INIT_LOCK:
+        if _WIN32_SIGS_INITIALIZED:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetForegroundWindow.argtypes = []
+
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+            user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetClassNameW.restype = ctypes.c_int
+
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+            user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetWindowTextW.restype = ctypes.c_int
+
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+            _WIN32_SIGS_INITIALIZED = True
+        except Exception as e:
+            LOG.debug("Could not initialize Win32 ctypes signatures: %s", e)
+
+
 def resolve_hwnd_app_info(hwnd: int) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Inspects a Windows HWND and returns (exe_path, exe_name, window_title)."""
     if not hwnd or sys.platform != "win32":
         return None, None, None
 
+    _ensure_win32_signatures()
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
-    pid = ctypes.c_ulong()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
     exe_path = None
     exe_name = None
 
@@ -126,7 +167,7 @@ def resolve_hwnd_app_info(hwnd: int) -> Tuple[Optional[str], Optional[str], Opti
         if hproc:
             try:
                 buf = ctypes.create_unicode_buffer(1024)
-                size = ctypes.c_ulong(1024)
+                size = wintypes.DWORD(1024)
                 if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
                     exe_path = buf.value
                     exe_name = os.path.basename(exe_path)
@@ -143,7 +184,7 @@ def resolve_hwnd_app_info(hwnd: int) -> Tuple[Optional[str], Optional[str], Opti
 
     if not exe_name or exe_name.lower() == "explorer.exe":
         cls_buf = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, cls_buf, 256)
+        user32.GetClassNameW(wintypes.HWND(hwnd), cls_buf, 256)
         if cls_buf.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
             exe_name = "explorer.exe"
 
@@ -155,11 +196,12 @@ def get_window_title(hwnd: int) -> Optional[str]:
     """Retrieves window title string for a Win32 HWND."""
     if not hwnd or sys.platform != "win32":
         return None
+    _ensure_win32_signatures()
     user32 = ctypes.windll.user32
-    tlen = user32.GetWindowTextLengthW(hwnd)
+    tlen = user32.GetWindowTextLengthW(wintypes.HWND(hwnd))
     if tlen:
         tbuf = ctypes.create_unicode_buffer(tlen + 1)
-        user32.GetWindowTextW(hwnd, tbuf, tlen + 1)
+        user32.GetWindowTextW(wintypes.HWND(hwnd), tbuf, tlen + 1)
         return tbuf.value or None
     return None
 

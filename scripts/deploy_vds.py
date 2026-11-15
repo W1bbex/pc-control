@@ -255,6 +255,7 @@ def rollback_to_previous():
     quoted_prev = shlex.quote(prev_release)
     stage_rb = f"{REMOTE_BASE}/.stage_rollback_{int(time.time())}"
     restore_cmd = (
+        f"set -e && "
         f"rm -rf {stage_rb} && mkdir -p {stage_rb} && "
         f"for f in {' '.join(MANIFEST_FILES)}; do "
         f"  if [ -f {prev_dir}/$f ]; then "

@@ -232,16 +232,8 @@ def active_console_session(ttl=0.5):
     hdesk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
     err_desk = kernel32.GetLastError() if hasattr(kernel32, "GetLastError") else 0
     input_desktop_accessible = bool(hdesk)
-    input_desk_name = ""
     if hdesk:
-        try:
-            name_buf = ctypes.create_unicode_buffer(256)
-            if user32.GetUserObjectInformationW(hdesk, 2, name_buf, 256, None):
-                input_desk_name = name_buf.value
-        except Exception:
-            pass
-        finally:
-            user32.CloseDesktop(hdesk)
+        user32.CloseDesktop(hdesk)
 
     # Conflict / error check
     if not user_query_ok:

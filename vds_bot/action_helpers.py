@@ -36,16 +36,21 @@ def led_brightness_percent(level: int) -> int:
 def apply_led_power(app, turn_on: bool):
     """Apply LED on/off state and publish corresponding ESP MQTT command."""
     state = "on" if turn_on else "off"
+    if turn_on:
+        color = getattr(app, "user_led_color", None)
+        cmd_id = app.mqtt.publish_esp_action("LED_COLOR", value=color) if color else app.mqtt.publish_esp_action("LED_ON")
+    else:
+        cmd_id = app.mqtt.publish_esp_action("LED_OFF")
+
+    if not cmd_id:
+        LOG.warning("Failed to publish LED action to ESP via MQTT")
+        return None
+
     app.user_led_state = state
     app.last_auto_led_state = state
     if hasattr(app, "save_state"):
         app.save_state()
-    if turn_on:
-        color = getattr(app, "user_led_color", None)
-        if color:
-            return app.mqtt.publish_esp_action("LED_COLOR", value=color)
-        return app.mqtt.publish_esp_action("LED_ON")
-    return app.mqtt.publish_esp_action("LED_OFF")
+    return cmd_id
 
 
 def apply_led_preset(app, preset_id: str):
@@ -54,12 +59,16 @@ def apply_led_preset(app, preset_id: str):
     if not entry:
         return None
     rgb, name = entry
+    cmd_id = app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
+    if not cmd_id:
+        LOG.warning("Failed to publish LED_COLOR to ESP via MQTT")
+        return None
+
     app.user_led_state = "on"
     app.last_auto_led_state = "on"
     app.user_led_color = rgb
     if hasattr(app, "save_state"):
         app.save_state()
-    cmd_id = app.mqtt.publish_esp_action("LED_COLOR", value=rgb)
     return rgb, name, cmd_id
 
 
@@ -81,7 +90,10 @@ def apply_stealth_state(app, chat_id: int, state: str, message_id=None, is_comma
             "• Системный звук заглушен\n\n"
             f"{hint}"
         )
-        msg = app.ui.send_message(chat_id, text, reply_markup=app.ui.stealth_menu_markup(active=True))
+        kwargs = {"reply_markup": app.ui.stealth_menu_markup(active=True)}
+        if message_id is not None:
+            kwargs["message_id"] = message_id
+        msg = app.ui.send_message(chat_id, text, **kwargs)
         if isinstance(msg, dict) and msg.get("message_id"):
             app.active_stealth_card = (chat_id, msg["message_id"])
         elif message_id:

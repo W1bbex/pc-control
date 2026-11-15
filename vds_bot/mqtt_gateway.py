@@ -161,7 +161,6 @@ class MqttGateway:
             return
 
         payload = message.payload.decode("utf-8", errors="replace").strip()
-        now = time.time()
 
         if topic == TOPIC_MEDIA_STATUS:
             try:
@@ -372,7 +371,7 @@ class MqttGateway:
         action_id = f"esp-{int(time.time()*1000)}-{secrets.token_hex(3)}"
         expires = int(time.time()) + 30
         payload = f"{action}|{action_id}|{expires}"
-        if value:
+        if value is not None:
             payload += f"|{value}"
             
         with self.pending_lock:

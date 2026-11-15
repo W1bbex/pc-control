@@ -4,6 +4,7 @@ Power Scheduling and Lifecycle Watchdog Service for PC Control Bot.
 Handles delayed power-off countdowns, SHUTDOWN_OBSERVED confirmation loops, auto-LED cooling watchdog, and dashboard auto-refresh.
 """
 
+import html
 import logging
 import os
 import threading
@@ -112,10 +113,16 @@ class PowerSchedulerMixin:
         # 4. Telemetry is absent or >= 20s old
         # 5. Sustained for >= 20s continuous
         telem_age = self.monitoring.telemetry_age()
+        app_lock = get_app_state_lock(self)
+        with app_lock:
+            p_started = getattr(self, "pending_shutdown_started_at", None)
+            s_offline = getattr(self, "shutdown_offline_detected_at", None)
+            ack = getattr(self, "shutdown_acknowledged", False)
+
         telem_absent = (
             telem_age is None
             or telem_age >= 20.0
-            or (self.pending_shutdown_started_at and self.monitoring.latest_received_at < self.pending_shutdown_started_at)
+            or (p_started is not None and self.monitoring.latest_received_at < p_started)
         )
         both_offline = (
             self.mqtt.system_status in ("offline", "stale", "unknown")
@@ -123,15 +130,16 @@ class PowerSchedulerMixin:
         )
 
         if (
-            getattr(self, "shutdown_acknowledged", False)
+            ack
             and getattr(self.mqtt, "mqtt_online", False)
             and both_offline
             and telem_absent
         ):
-            if self.shutdown_offline_detected_at is None:
-                self.shutdown_offline_detected_at = now
+            if s_offline is None:
+                with app_lock:
+                    self.shutdown_offline_detected_at = now
                 LOG.info("Shutdown criteria met, starting sustain window (20s) at %s", now)
-            elif now - self.shutdown_offline_detected_at >= 20.0:
+            elif (now - float(s_offline)) >= 20.0:
                 LOG.info("Shutdown criteria sustained for >= 20s. Confirming SHUTDOWN_OBSERVED.")
                 self.mqtt.health.set_shutdown_observed(ttl=3600.0, now=now)
                 target_user = getattr(self, "allowed_user_id", ALLOWED_USER_ID)
@@ -140,7 +148,8 @@ class PowerSchedulerMixin:
                     "<b>✅ ПК перестал отвечать после принятой команды выключения.</b>",
                     reply_markup=self._main_menu_markup(),
                 )
-                self._clear_pending_shutdown()
+                with app_lock:
+                    self._clear_pending_shutdown()
                 return True
         else:
             if self.shutdown_offline_detected_at is not None:
@@ -362,18 +371,85 @@ class PowerSchedulerMixin:
             detail=f"telem_age={telem_age}",
         )
 
-        for cmd_id, pending in list(getattr(self, "pending_screenshots", {}).items()):
-            if now - pending["requested_at"] >= SCREENSHOT_TIMEOUT_SECONDS:
-                self.pending_screenshots.pop(cmd_id, None)
-                self.ui.send_message(pending["chat_id"], "❌ Скриншот не получен за 35 секунд. Попробуй ещё раз.")
+        timed_out_screenshots = []
+        timed_out_console_cmds = []
+        timed_out_ag = []
+        timed_out_activity = None
+        shutdown_timeout_acknowledged = None
+        schedule_action = None
 
-        for cmd_id, pending in list(getattr(self, "pending_console_cmds", {}).items()):
-            started_at = pending.get("started_at", now) if isinstance(pending, dict) else now
-            if now - started_at >= 60.0:
-                self.pending_console_cmds.pop(cmd_id, None)
-                msg_id = pending.get("message_id") if isinstance(pending, dict) else None
-                chat_id = pending.get("chat_id") if isinstance(pending, dict) else None
-                cmd_short = str(pending.get("command", "") if isinstance(pending, dict) else "")[:40]
+        app_lock = get_app_state_lock(self)
+        with app_lock:
+            for cmd_id, pending in list(getattr(self, "pending_screenshots", {}).items()):
+                if now - pending.get("requested_at", 0) >= SCREENSHOT_TIMEOUT_SECONDS:
+                    self.pending_screenshots.pop(cmd_id, None)
+                    timed_out_screenshots.append(pending)
+
+            for cmd_id, pending in list(getattr(self, "pending_console_cmds", {}).items()):
+                started_at = pending.get("started_at", now) if isinstance(pending, dict) else now
+                if now - started_at >= 60.0:
+                    self.pending_console_cmds.pop(cmd_id, None)
+                    timed_out_console_cmds.append(pending)
+
+            # Evict stale pending_telemetry_cmd_ids and pending_antigravity_cmd_ids (timeout 60s)
+            pending_telem = getattr(self, "pending_telemetry_cmd_ids", {})
+            pending_ag = getattr(self, "pending_antigravity_cmd_ids", {})
+            cmd_timestamps = getattr(self, "pending_cmd_timestamps", {})
+
+            if None in pending_telem:
+                pending_telem.pop(None, None)
+            if None in pending_ag:
+                pending_ag.pop(None, None)
+
+            for cmd_id, ts in list(cmd_timestamps.items()):
+                if now - float(ts) >= 60.0:
+                    cmd_timestamps.pop(cmd_id, None)
+                    pending_telem.pop(cmd_id, None)
+                    ag_pending = pending_ag.pop(cmd_id, None)
+                    if ag_pending:
+                        timed_out_ag.append(ag_pending)
+
+            act_chat = getattr(self, "pending_activity_chat_id", None)
+            act_ts = getattr(self, "pending_activity_requested_at", None)
+            if act_chat and act_ts is not None and (now - float(act_ts) >= 15.0):
+                act_msg = getattr(self, "pending_activity_msg_id", None)
+                self.pending_activity_chat_id = None
+                self.pending_activity_msg_id = None
+                self.pending_activity_requested_at = None
+                timed_out_activity = (act_chat, act_msg)
+
+            p_cmd = getattr(self, "pending_shutdown_cmd_id", None)
+            p_started = getattr(self, "pending_shutdown_started_at", None)
+            if p_cmd and p_started:
+                confirmed = self._check_shutdown_confirmation(now)
+                if not confirmed and (now - float(p_started) >= SHUTDOWN_CONFIRM_TIMEOUT_SECONDS):
+                    shutdown_timeout_acknowledged = getattr(self, "shutdown_acknowledged", False)
+                    self._clear_pending_shutdown()
+
+            sched_ts = getattr(self, "scheduled_shutdown_ts", None)
+            last_attempt = getattr(self, "last_schedule_attempt_at", 0.0)
+            if sched_ts and now >= sched_ts:
+                if now - sched_ts > 600.0:
+                    LOG.info("Discarding stale scheduled shutdown (scheduled_at=%s, now=%s)", sched_ts, now)
+                    self.scheduled_shutdown_ts = None
+                    schedule_action = "save_stale"
+                elif now - last_attempt >= 15:
+                    self.last_schedule_attempt_at = now
+                    schedule_action = "evaluate"
+
+        for pending in timed_out_screenshots:
+            chat_id = pending.get("chat_id") if isinstance(pending, dict) else None
+            if chat_id:
+                try:
+                    self.ui.send_message(chat_id, "❌ Скриншот не получен за 35 секунд. Попробуй ещё раз.")
+                except Exception:
+                    pass
+
+        for pending in timed_out_console_cmds:
+            if isinstance(pending, dict):
+                msg_id = pending.get("message_id")
+                chat_id = pending.get("chat_id")
+                cmd_short = html.escape(str(pending.get("command", ""))[:40])
                 fail_text = f"⏱ <b>Таймаут выполнения команды:</b>\n<code>{cmd_short}</code>\n\nАгент не прислал ответ за 60 секунд."
                 if chat_id:
                     try:
@@ -381,29 +457,29 @@ class PowerSchedulerMixin:
                     except Exception:
                         pass
 
-        # Evict stale pending_telemetry_cmd_ids and pending_antigravity_cmd_ids (timeout 60s)
-        pending_telem = getattr(self, "pending_telemetry_cmd_ids", {})
-        pending_ag = getattr(self, "pending_antigravity_cmd_ids", {})
-        cmd_timestamps = getattr(self, "pending_cmd_timestamps", {})
+        for ag_item in timed_out_ag:
+            if isinstance(ag_item, tuple) and len(ag_item) >= 3:
+                c_id, m_id, act = ag_item
+                action_name = {
+                    "list": "запрос списка профилей",
+                    "switch": "переключение профиля",
+                    "restart": "перезапуск IDE",
+                    "heal": "лечение Antigravity & VPN",
+                    "export": "экспорт аккаунтов",
+                }.get(act, "операция с Antigravity")
+                try:
+                    back_target = "antigravity_menu" if m_id else "menu"
+                    self.ui.send_message(
+                        c_id,
+                        f"⏱ <b>Таймаут: {action_name}</b>\n\nDesktop-агент не прислал ответ за 60 секунд.",
+                        reply_markup={"inline_keyboard": [self.ui.back_button(back_target)]},
+                        message_id=m_id,
+                    )
+                except Exception:
+                    pass
 
-        if None in pending_telem:
-            pending_telem.pop(None, None)
-        if None in pending_ag:
-            pending_ag.pop(None, None)
-
-        for cmd_id, ts in list(cmd_timestamps.items()):
-            if now - float(ts) >= 60.0:
-                cmd_timestamps.pop(cmd_id, None)
-                pending_telem.pop(cmd_id, None)
-                pending_ag.pop(cmd_id, None)
-
-        act_chat = getattr(self, "pending_activity_chat_id", None)
-        act_ts = getattr(self, "pending_activity_requested_at", None)
-        if act_chat and act_ts is not None and (now - float(act_ts) >= 15.0):
-            act_msg = getattr(self, "pending_activity_msg_id", None)
-            self.pending_activity_chat_id = None
-            self.pending_activity_msg_id = None
-            self.pending_activity_requested_at = None
+        if timed_out_activity:
+            act_chat, act_msg = timed_out_activity
             try:
                 self.ui.send_message(
                     act_chat,
@@ -414,54 +490,47 @@ class PowerSchedulerMixin:
             except Exception:
                 LOG.exception("Failed to send activity timeout notification")
 
-        if getattr(self, "pending_shutdown_cmd_id", None) and getattr(self, "pending_shutdown_started_at", None):
-            confirmed = self._check_shutdown_confirmation(now)
-            if not confirmed and (now - float(self.pending_shutdown_started_at) >= SHUTDOWN_CONFIRM_TIMEOUT_SECONDS):
-                emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
-                if ICONS.get("power"):
-                    emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
-                timeout_markup = {
-                    "inline_keyboard": [
-                        [emerg_btn],
-                        self.ui.back_button("power_menu"),
-                    ]
-                }
-                if getattr(self, "shutdown_acknowledged", False):
-                    self.ui.send_message(
-                        target_user,
-                        "<b>⚠️ Связь потеряна, состояние ПК неизвестно.</b>\n\nКоманда выключения была принята Windows, но подтверждение завершения работы не получено за 2 минуты.",
-                        reply_markup=timeout_markup,
-                    )
-                else:
-                    self.ui.send_message(
-                        target_user,
-                        "<b>❌ Выключение не подтверждено.</b>\n\nWindows не ответила на команду выключения за 2 минуты.",
-                        reply_markup=timeout_markup,
-                    )
-                self._clear_pending_shutdown()
+        if shutdown_timeout_acknowledged is not None:
+            emerg_btn = {"text": "⚡ Аварийное выключение (ESP)", "style": "danger", "callback_data": "emergency_power_off"}
+            if ICONS.get("power"):
+                emerg_btn["icon_custom_emoji_id"] = ICONS.get("power")
+            timeout_markup = {
+                "inline_keyboard": [
+                    [emerg_btn],
+                    self.ui.back_button("power_menu"),
+                ]
+            }
+            if shutdown_timeout_acknowledged:
+                self.ui.send_message(
+                    target_user,
+                    "<b>⚠️ Связь потеряна, состояние ПК неизвестно.</b>\n\nКоманда выключения была принята Windows, но подтверждение завершения работы не получено за 2 минуты.",
+                    reply_markup=timeout_markup,
+                )
+            else:
+                self.ui.send_message(
+                    target_user,
+                    "<b>❌ Выключение не подтверждено.</b>\n\nWindows не ответила на команду выключения за 2 минуты.",
+                    reply_markup=timeout_markup,
+                )
 
-        if not getattr(self, "scheduled_shutdown_ts", None) or now < self.scheduled_shutdown_ts:
-            return
-        if now - self.scheduled_shutdown_ts > 600.0:
-            LOG.info("Discarding stale scheduled shutdown (scheduled_at=%s, now=%s)", self.scheduled_shutdown_ts, now)
-            self.scheduled_shutdown_ts = None
+        if schedule_action == "save_stale":
             self.save_state()
             return
-        if now - getattr(self, "last_schedule_attempt_at", 0.0) < 15:
-            return
-        self.last_schedule_attempt_at = now
 
-        pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age(), now=now)
-        if pc_state.state == "SHUTDOWN_OBSERVED":
-            self.scheduled_shutdown_ts = None
-            self.save_state()
-            self.ui.send_message(target_user, "ℹ️ Таймер сработал, но ПК уже был выключен (наблюдается).")
-            return
-        if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
-            return
-        if self._request_shutdown(target_user, source="schedule", now=now):
-            self.scheduled_shutdown_ts = None
-            self.save_state()
+        if schedule_action == "evaluate":
+            pc_state = self.mqtt.health.evaluate_pc_state(self.monitoring.telemetry_age(), now=now)
+            if pc_state.state == "SHUTDOWN_OBSERVED":
+                with app_lock:
+                    self.scheduled_shutdown_ts = None
+                self.save_state()
+                self.ui.send_message(target_user, "ℹ️ Таймер сработал, но ПК уже был выключен (наблюдается).")
+                return
+            if self.mqtt.system_status != "online" and getattr(self.mqtt, "desktop_status", None) != "online":
+                return
+            if self._request_shutdown(target_user, source="schedule", now=now):
+                with app_lock:
+                    self.scheduled_shutdown_ts = None
+                self.save_state()
 
     def scheduler_loop(self):
         while getattr(self, "running", True):

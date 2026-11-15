@@ -204,11 +204,12 @@ class WorkspaceRunnerMixin:
         if not msg_id:
             return
 
+        title = getattr(self, "current_scenario_title", None) or "Запуск рабочего сетапа..."
         lines = [
             format_workspace_step_line(step, getattr(self, "app_statuses", {}).get(step["id"], "⏳ В очереди"))
             for step in getattr(self, "current_workspace_steps", WORKSPACE_STEPS)
         ]
-        text = "<b>Запуск рабочего сетапа...</b>\n\n" + "\n".join(lines)
+        text = f"<b>{title}</b>\n\n" + "\n".join(lines)
 
         cancel_btn = {"text": "Отменить запуск", "style": "danger", "callback_data": "flow_workspace_cancel"}
         if ICONS.get("cross"):
@@ -286,6 +287,7 @@ class WorkspaceRunnerMixin:
         self.workspace_execution_result = None
         self.workspace_execution_data = {}
         self.minimize_ack_result = None
+        self.current_scenario_title = "Запуск рабочего сетапа..."
 
         def render_checklist():
             lines = [
@@ -302,143 +304,133 @@ class WorkspaceRunnerMixin:
         res = self.ui.send_message(chat_id, render_checklist(), reply_markup=markup, message_id=card_message_id)
         msg_id = res["message_id"] if res and res.get("message_id") else card_message_id
         self.workspace_card_msg_id = msg_id
+        if hasattr(self, "power_flow") and self.power_flow:
+            with getattr(self.power_flow, "_lock", threading.Lock()):
+                if not getattr(self.power_flow, "message_id", None):
+                    self.power_flow.message_id = msg_id
+            self.power_flow.workspace_card_msg_id = msg_id
 
-        # 0. Wait up to 15s for desktop agent to be online if needed
-        if self.mqtt.desktop_status != "online":
-            LOG.info("Desktop agent not online yet, waiting up to 15s...")
-            for _ in range(30):
-                if self.workspace_cancel_event.is_set():
-                    self.power_flow.reset_flow()
-                    return
-                if self.mqtt.desktop_status == "online":
-                    break
-                time.sleep(0.5)
+        try:
+            # 0. Wait up to 15s for desktop agent to be online if needed
+            if self.mqtt.desktop_status != "online":
+                LOG.info("Desktop agent not online yet, waiting up to 15s...")
+                for _ in range(30):
+                    if self.workspace_cancel_event.is_set():
+                        self.power_flow.reset_flow()
+                        return
+                    if self.mqtt.desktop_status == "online":
+                        break
+                    time.sleep(0.5)
 
-        if self.mqtt.desktop_status != "online":
-            LOG.warning("Desktop agent still not online after 15s wait.")
-            error_text = render_checklist() + "\n\n<b>Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
-            error_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
-                    [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
-                ]
-            }
-            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # Issue launch_app command to agent.py
-        ws_id = workspace_id or f"desk-ws-{int(time.time())}"
-        cmd_id = self.mqtt.publish_desktop_action(
-            "launch_app",
-            {"app": "Рабочий сетап", "workspace_id": ws_id, "vpn": active_vpn},
-            timeout=120,
-        )
-        self.active_workspace_cmd_id = cmd_id
-
-        # 1. Wait for Happ / INCY VPN readiness (up to 55 seconds)
-        vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
-        vpn_ready = self._wait_event_or_cancel(vpn_event, 55.0) if vpn_event else True
-
-        if self.workspace_cancel_event.is_set():
-            LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.power_flow.reset_flow()
-            return
-
-        vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
-        vpn_name = "INCY" if active_vpn == "incy" else "Happ"
-
-        if (not vpn_ready and (vpn_event and not vpn_event.is_set())) or self.app_statuses.get(vpn_step_id) in ("❌", "❌ Ошибка VPN"):
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
-            error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
-            error_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
-                    [
-                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                    ],
-                ]
-            }
-            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # 2. Wait for full workspace scenario execution ACK from agent.py (up to 65 seconds)
-        ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 65.0)
-
-        if self.workspace_cancel_event.is_set():
-            LOG.info("Runner thread detected cancellation during workspace execution wait. Halting.")
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.power_flow.reset_flow()
-            return
-
-        if getattr(self, "workspace_execution_result", None) == "cancelled":
-            LOG.info("Desktop agent reported workspace execution cancelled.")
-            cancel_text = render_checklist() + "\n\n<b>Запуск рабочего сетапа отменён.</b>"
-            cancel_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
-                    [{"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"}],
-                ]
-            }
-            self.ui.send_message(chat_id, cancel_text, reply_markup=cancel_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        if not ws_executed or self.workspace_execution_result != "executed":
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            error_text = render_checklist() + "\n\n<b>Ошибка выполнения рабочего сетапа.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
-            error_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
-                    [
-                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                    ],
-                ]
-            }
-            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # 3. Strict verification check: every step must be strictly verified
-        unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
-        if unverified:
-            notice_text = render_checklist() + f"\n\n<b>Рабочий сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
-            notice_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
-                    [
-                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                    ],
-                ]
-            }
-            self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # 4. Standalone minimize_all and wait for ACK (only if not already minimized by agent)
-        already_minimized = self.workspace_execution_data.get("desktop_minimized") is True
-        if not already_minimized:
-            min_cmd_id = self.mqtt.publish_desktop_action("minimize_all")
-            self.pending_minimize_cmd_id = min_cmd_id
-            min_ack_received = self._wait_event_or_cancel(self.minimize_ack_event, 10.0)
-
-            if self.workspace_cancel_event.is_set():
-                LOG.info("Runner thread detected cancellation during minimize_all wait. Halting.")
+            if self.mqtt.desktop_status != "online":
+                LOG.warning("Desktop agent still not online after 15s wait.")
+                error_text = render_checklist() + "\n\n<b>Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                        [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
                 self.power_flow.reset_flow()
                 return
 
-            # Check min_ack_received and minimize_ack_result strictly
-            if not min_ack_received or self.minimize_ack_result != "executed":
-                notice_text = render_checklist() + "\n\n<b>Рабочий сетап запущен, но не удалось свернуть окна.</b>"
+            # Issue launch_app command to agent.py
+            ws_id = workspace_id or f"desk-ws-{int(time.time())}"
+            cmd_id = self.mqtt.publish_desktop_action(
+                "launch_app",
+                {"app": "Рабочий сетап", "workspace_id": ws_id, "vpn": active_vpn},
+                timeout=120,
+            )
+            self.active_workspace_cmd_id = cmd_id
+            if not cmd_id:
+                LOG.error("Failed to publish launch_app action to MQTT broker")
+                error_text = render_checklist() + "\n\n<b>Не удалось отправить команду запуска в MQTT.</b>\nПроверь статус соединения с брокером."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                        [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 1. Wait for Happ / INCY VPN readiness (up to 55 seconds)
+            vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
+            vpn_ready = self._wait_event_or_cancel(vpn_event, 55.0) if vpn_event else True
+
+            if self.workspace_cancel_event.is_set():
+                LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                self.power_flow.reset_flow()
+                return
+
+            vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
+            vpn_name = "INCY" if active_vpn == "incy" else "Happ"
+
+            if (not vpn_ready and (vpn_event and not vpn_event.is_set())) or self.app_statuses.get(vpn_step_id) in ("❌", "❌ Ошибка VPN"):
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
+                error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск зависимых приложений отменён в целях безопасности."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                        [
+                            {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                            {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                        ],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 2. Wait for full workspace scenario execution ACK from agent.py (up to 65 seconds)
+            ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 65.0)
+
+            if self.workspace_cancel_event.is_set():
+                LOG.info("Runner thread detected cancellation during workspace execution wait. Halting.")
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                self.power_flow.reset_flow()
+                return
+
+            if getattr(self, "workspace_execution_result", None) == "cancelled":
+                LOG.info("Desktop agent reported workspace execution cancelled.")
+                cancel_text = render_checklist() + "\n\n<b>Запуск рабочего сетапа отменён.</b>"
+                cancel_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                        [{"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"}],
+                    ]
+                }
+                self.ui.send_message(chat_id, cancel_text, reply_markup=cancel_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            if not ws_executed or self.workspace_execution_result != "executed":
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                error_text = render_checklist() + "\n\n<b>Ошибка выполнения рабочего сетапа.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
+                        [
+                            {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                            {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                        ],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 3. Strict verification check: every step must be strictly verified
+            unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
+            if unverified:
+                notice_text = render_checklist() + f"\n\n<b>Рабочий сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
                 notice_markup = {
                     "inline_keyboard": [
-                        [{"text": "Свернуть окна", "style": "primary", "icon_custom_emoji_id": ICONS.get("screen"), "callback_data": "minimize_windows"}],
+                        [{"text": "Повторить сетап", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": "workspace_start_direct"}],
                         [
                             {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
                             {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
@@ -449,18 +441,49 @@ class WorkspaceRunnerMixin:
                 self.power_flow.reset_flow()
                 return
 
-        # 5. Final Success (Only when minimize_all ACK executed!)
-        final_text = render_checklist() + "\n\n<b>✅ Рабочий сетап успешно запущен!</b>\nВсе приложения открыты, VPN активен, окна свернуты."
-        final_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                    {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                ],
-            ]
-        }
-        self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)
-        self.power_flow.reset_flow()
+            # 4. Standalone minimize_all and wait for ACK (only if not already minimized by agent)
+            already_minimized = self.workspace_execution_data.get("desktop_minimized") is True
+            if not already_minimized:
+                min_cmd_id = self.mqtt.publish_desktop_action("minimize_all")
+                self.pending_minimize_cmd_id = min_cmd_id
+                min_ack_received = self._wait_event_or_cancel(self.minimize_ack_event, 10.0) if min_cmd_id else False
+
+                if self.workspace_cancel_event.is_set():
+                    LOG.info("Runner thread detected cancellation during minimize_all wait. Halting.")
+                    self.power_flow.reset_flow()
+                    return
+
+                # Check min_ack_received and minimize_ack_result strictly
+                if not min_ack_received or self.minimize_ack_result != "executed":
+                    notice_text = render_checklist() + "\n\n<b>Рабочий сетап запущен, но не удалось свернуть окна.</b>"
+                    notice_markup = {
+                        "inline_keyboard": [
+                            [{"text": "Свернуть окна", "style": "primary", "icon_custom_emoji_id": ICONS.get("screen"), "callback_data": "minimize_windows"}],
+                            [
+                                {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                                {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                            ],
+                        ]
+                    }
+                    self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
+                    self.power_flow.reset_flow()
+                    return
+
+            # 5. Final Success (Only when minimize_all ACK executed!)
+            final_text = render_checklist() + "\n\n<b>✅ Рабочий сетап успешно запущен!</b>\nВсе приложения открыты, VPN активен, окна свернуты."
+            final_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                    ],
+                ]
+            }
+            self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)
+            self.power_flow.reset_flow()
+        finally:
+            self.active_workspace_cmd_id = None
+            self.pending_minimize_cmd_id = None
 
     def start_async_game_setup(self, chat_id, card_message_id=None, game="gta5", vpn=None, workspace_id=None):
         if not hasattr(self, "_workspace_start_lock"):
@@ -514,6 +537,7 @@ class WorkspaceRunnerMixin:
         self.workspace_executed_event.clear()
         self.workspace_execution_result = None
         self.workspace_execution_data = {}
+        self.current_scenario_title = f"{scenario_name}..."
 
         def render_checklist():
             lines = [
@@ -530,141 +554,162 @@ class WorkspaceRunnerMixin:
         res = self.ui.send_message(chat_id, render_checklist(), reply_markup=markup, message_id=card_message_id)
         msg_id = res["message_id"] if res and res.get("message_id") else card_message_id
         self.workspace_card_msg_id = msg_id
+        if hasattr(self, "power_flow") and self.power_flow:
+            with getattr(self.power_flow, "_lock", threading.Lock()):
+                if not getattr(self.power_flow, "message_id", None):
+                    self.power_flow.message_id = msg_id
+            self.power_flow.workspace_card_msg_id = msg_id
 
-        # 0. Wait up to 15s for desktop agent to be online
-        if self.mqtt.desktop_status != "online":
-            LOG.info("Desktop agent not online yet, waiting up to 15s...")
-            for _ in range(30):
-                if self.workspace_cancel_event.is_set():
-                    self.power_flow.reset_flow()
-                    return
-                if self.mqtt.desktop_status == "online":
-                    break
-                time.sleep(0.5)
+        try:
+            # 0. Wait up to 15s for desktop agent to be online
+            if self.mqtt.desktop_status != "online":
+                LOG.info("Desktop agent not online yet, waiting up to 15s...")
+                for _ in range(30):
+                    if self.workspace_cancel_event.is_set():
+                        self.power_flow.reset_flow()
+                        return
+                    if self.mqtt.desktop_status == "online":
+                        break
+                    time.sleep(0.5)
 
-        if self.mqtt.desktop_status != "online":
-            LOG.warning("Desktop agent still not online after 15s wait.")
-            error_text = render_checklist() + "\n\n<b>Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
-            error_markup = {
+            if self.mqtt.desktop_status != "online":
+                LOG.warning("Desktop agent still not online after 15s wait.")
+                error_text = render_checklist() + "\n\n<b>Desktop-агент не в сети.</b>\nWindows загружается или desktop-агент ещё не подключился к брокеру."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                        [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 1. Issue launch_app command to agent.py
+            ws_id = workspace_id or f"game-ws-{int(time.time())}"
+            cmd_id = self.mqtt.publish_desktop_action(
+                "launch_app",
+                {"app": scenario_name, "workspace_id": ws_id, "vpn": active_vpn},
+                timeout=120,
+            )
+            self.active_workspace_cmd_id = cmd_id
+            if not cmd_id:
+                LOG.error("Failed to publish launch_app for game scenario to MQTT broker")
+                error_text = render_checklist() + "\n\n<b>Не удалось отправить команду запуска в MQTT.</b>\nПроверь статус соединения с брокером."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                        [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 2. Wait for Happ / INCY VPN readiness
+            vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
+            vpn_ready = self._wait_event_or_cancel(vpn_event, 55.0) if vpn_event else True
+
+            if self.workspace_cancel_event.is_set():
+                LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                self.power_flow.reset_flow()
+                return
+
+            vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
+            vpn_name = "INCY" if active_vpn == "incy" else "Happ"
+
+            if (not vpn_ready and (vpn_event and not vpn_event.is_set())) or self.app_statuses.get(vpn_step_id) in ("❌", "❌ Ошибка VPN"):
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
+                error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск игры отменён в целях безопасности."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                        [
+                            {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                            {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                        ],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 3. Wait for full execution ACK from agent.py (up to 65 seconds)
+            ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 65.0)
+
+            if self.workspace_cancel_event.is_set():
+                LOG.info("Runner thread detected cancellation during game execution wait. Halting.")
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                self.power_flow.reset_flow()
+                return
+
+            if getattr(self, "workspace_execution_result", None) == "cancelled":
+                LOG.info("Desktop agent reported game execution cancelled.")
+                cancel_text = render_checklist() + f"\n\n<b>Запуск {game_name} отменён.</b>"
+                cancel_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                        [{"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"}],
+                    ]
+                }
+                self.ui.send_message(chat_id, cancel_text, reply_markup=cancel_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            if not ws_executed or self.workspace_execution_result != "executed":
+                self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
+                error_text = render_checklist() + f"\n\n<b>Ошибка запуска {game_name}.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
+                error_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                        [
+                            {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                            {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                        ],
+                    ]
+                }
+                self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 4. Strict verification check: every step must be strictly verified
+            unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
+            if unverified:
+                notice_text = render_checklist() + f"\n\n<b>Игровой сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
+                notice_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                        [
+                            {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
+                            {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
+                        ],
+                    ]
+                }
+                self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
+                self.power_flow.reset_flow()
+                return
+
+            # 5. Final Success!
+            final_text = (
+                render_checklist()
+                + f"\n\n<b>✅ Игровой сетап успешно запущен!</b>\n"
+                f"{vpn_name} VPN подключен, Antigravity активен, {game_name} запущена."
+            )
+            final_markup = {
                 "inline_keyboard": [
-                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
-                    [{"text": "Отмена", "style": "danger", "icon_custom_emoji_id": ICONS.get("cross"), "callback_data": "menu"}],
-                ]
-            }
-            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # 1. Issue launch_app command to agent.py
-        ws_id = workspace_id or f"game-ws-{int(time.time())}"
-        cmd_id = self.mqtt.publish_desktop_action(
-            "launch_app",
-            {"app": scenario_name, "workspace_id": ws_id, "vpn": active_vpn},
-            timeout=120,
-        )
-        self.active_workspace_cmd_id = cmd_id
-
-        # 2. Wait for Happ / INCY VPN readiness
-        vpn_event = getattr(self, "vpn_ready_event", None) or getattr(self, "happ_ready_event", None)
-        vpn_ready = self._wait_event_or_cancel(vpn_event, 55.0) if vpn_event else True
-
-        if self.workspace_cancel_event.is_set():
-            LOG.info("Runner thread detected cancellation during VPN wait. Halting.")
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.power_flow.reset_flow()
-            return
-
-        vpn_step_id = "incy_vpn" if active_vpn == "incy" else "happ_vpn"
-        vpn_name = "INCY" if active_vpn == "incy" else "Happ"
-
-        if (not vpn_ready and (vpn_event and not vpn_event.is_set())) or self.app_statuses.get(vpn_step_id) in ("❌", "❌ Ошибка VPN"):
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.app_statuses[vpn_step_id] = "❌ Ошибка VPN"
-            error_text = render_checklist() + f"\n\n<b>Не удалось подтвердить подключение {vpn_name} (VPN).</b>\nЗапуск игры отменён в целях безопасности."
-            error_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
+                    [
+                        {"text": "⚡ Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
+                    ],
                     [
                         {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
                         {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
                     ],
                 ]
             }
-            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
+            self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)
             self.power_flow.reset_flow()
-            return
-
-        # 3. Wait for full execution ACK from agent.py (up to 65 seconds)
-        ws_executed = self._wait_event_or_cancel(self.workspace_executed_event, 65.0)
-
-        if self.workspace_cancel_event.is_set():
-            LOG.info("Runner thread detected cancellation during game execution wait. Halting.")
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            self.power_flow.reset_flow()
-            return
-
-        if getattr(self, "workspace_execution_result", None) == "cancelled":
-            LOG.info("Desktop agent reported game execution cancelled.")
-            cancel_text = render_checklist() + f"\n\n<b>Запуск {game_name} отменён.</b>"
-            cancel_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
-                    [{"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"}],
-                ]
-            }
-            self.ui.send_message(chat_id, cancel_text, reply_markup=cancel_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        if not ws_executed or self.workspace_execution_result != "executed":
-            self.mqtt.publish_desktop_action("cancel_workspace", {"workspace_id": ws_id})
-            error_text = render_checklist() + f"\n\n<b>Ошибка запуска {game_name}.</b>\nDesktop-агент сообщил о сбое или запуск превысил таймаут."
-            error_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
-                    [
-                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                    ],
-                ]
-            }
-            self.ui.send_message(chat_id, error_text, reply_markup=error_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # 4. Strict verification check: every step must be strictly verified
-        unverified = [s["label"] for s in self.current_workspace_steps if self.app_statuses.get(s["id"]) != "✅"]
-        if unverified:
-            notice_text = render_checklist() + f"\n\n<b>Игровой сетап завершён с неполным подтверждением.</b>\nНе подтверждены: {', '.join(unverified)}"
-            notice_markup = {
-                "inline_keyboard": [
-                    [{"text": "Повторить запуск", "style": "primary", "icon_custom_emoji_id": ICONS.get("refresh"), "callback_data": f"direct_game_vpn:{game}:{active_vpn}"}],
-                    [
-                        {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                        {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                    ],
-                ]
-            }
-            self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
-            self.power_flow.reset_flow()
-            return
-
-        # 5. Final Success!
-        final_text = (
-            render_checklist()
-            + f"\n\n<b>✅ Игровой сетап успешно запущен!</b>\n"
-            f"{vpn_name} VPN подключен, Antigravity активен, {game_name} запущена."
-        )
-        final_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "⚡ Нажать ESC", "style": "primary", "icon_custom_emoji_id": ICONS.get("terminal"), "callback_data": "press_esc"},
-                ],
-                [
-                    {"text": "Скриншот", "style": "primary", "icon_custom_emoji_id": ICONS.get("screenshot"), "callback_data": "screenshot"},
-                    {"text": "Главное меню", "style": "primary", "icon_custom_emoji_id": ICONS.get("back"), "callback_data": "menu"},
-                ],
-            ]
-        }
-        self.ui.send_message(chat_id, final_text, reply_markup=final_markup, message_id=msg_id)
-        self.power_flow.reset_flow()
+        finally:
+            self.active_workspace_cmd_id = None
+            self.pending_minimize_cmd_id = None

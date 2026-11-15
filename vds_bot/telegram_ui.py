@@ -405,6 +405,7 @@ class TelegramBotApi(UiTemplatesMixin):
             return
         payload = {"callback_query_id": callback_id}
         if text:
-            payload["text"] = text
+            str_text = str(text)
+            payload["text"] = str_text if len(str_text) <= 200 else str_text[:197] + "..."
             payload["show_alert"] = alert
         self.call("answerCallbackQuery", payload, timeout=8)

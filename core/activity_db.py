@@ -5,7 +5,7 @@ Stores window foreground sessions, durations, and app timestamps with high-perfo
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import logging
 from pathlib import Path
 import sqlite3

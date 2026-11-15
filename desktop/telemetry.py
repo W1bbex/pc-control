@@ -177,9 +177,14 @@ class TelemetryMixin:
     def get_volume():
         import pythoncom
 
-        pythoncom.CoInitialize()
+        co_init = False
         endpoint = None
         try:
+            try:
+                pythoncom.CoInitialize()
+                co_init = True
+            except Exception:
+                pass
             from pycaw.pycaw import AudioUtilities
 
             endpoint = AudioUtilities.GetSpeakers().EndpointVolume
@@ -191,14 +196,23 @@ class TelemetryMixin:
             return None
         finally:
             endpoint = None
-            pythoncom.CoUninitialize()
+            if co_init:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
     def set_volume(self, percent=None, mute=None, toggle=False):
         import pythoncom
 
-        pythoncom.CoInitialize()
+        co_init = False
         endpoint = None
         try:
+            try:
+                pythoncom.CoInitialize()
+                co_init = True
+            except Exception:
+                pass
             from pycaw.pycaw import AudioUtilities
 
             endpoint = AudioUtilities.GetSpeakers().EndpointVolume
@@ -218,9 +232,15 @@ class TelemetryMixin:
                 ),
                 "muted": bool(endpoint.GetMute()),
             }
+        except Exception:
+            return None
         finally:
             endpoint = None
-            pythoncom.CoUninitialize()
+            if co_init:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
     def network_rates(self):
         return compute_network_rates(self, self._get_state_lock())
@@ -445,13 +465,15 @@ class TelemetryMixin:
                     )
                     if new_emoji_id:
                         should_publish = False
+                        current_title = title
                         with state_lock:
                             if self.current_session_app == exe_name:
                                 self.current_session_emoji_id = new_emoji_id
                                 if new_emoji_id != emoji_id:
                                     should_publish = True
+                                current_title = self.current_session_title or title
                         if should_publish:
-                            self.publish_active_app_update(exe_name, new_emoji_id, title)
+                            self.publish_active_app_update(exe_name, new_emoji_id, current_title)
                 except Exception:
                     LOG.exception("Error in _bg_notify")
 

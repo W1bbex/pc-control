@@ -46,6 +46,8 @@ WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
 
+MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
+
 HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 try:
@@ -55,6 +57,22 @@ try:
     user32.UnhookWindowsHookEx.restype = wintypes.BOOL
     user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
     user32.CallNextHookEx.restype = ctypes.c_ssize_t
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.GetShellWindow.argtypes = []
+    user32.GetShellWindow.restype = wintypes.HWND
+    user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+    user32.LoadCursorW.restype = wintypes.HANDLE
+    user32.SetCursor.argtypes = [wintypes.HANDLE]
+    user32.SetCursor.restype = wintypes.HANDLE
+    user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    user32.SetCursorPos.restype = wintypes.BOOL
+    user32.ShowCursor.argtypes = [wintypes.BOOL]
+    user32.ShowCursor.restype = ctypes.c_int
 except Exception:
     pass
 
@@ -327,26 +345,30 @@ class StealthOverlay:
 
             # 4. Check strict sequential match (e.g. Win held down, then W, then 1, within 1.5s per tap)
             if mods_ok and self.required_seq:
-                expected_vk = self.required_seq[self._seq_idx]
-                if norm_vk == expected_vk:
-                    if self._seq_idx == 0:
-                        self._seq_idx = 1
-                        self._last_seq_time = now
-                    else:
-                        if now - self._last_seq_time <= 1.5:
-                            self._seq_idx += 1
+                if norm_vk in MODIFIER_VKS:
+                    # Ignore modifier auto-repeats so holding Win/Ctrl/Alt does not reset sequence progress
+                    pass
+                else:
+                    expected_vk = self.required_seq[self._seq_idx]
+                    if norm_vk == expected_vk:
+                        if self._seq_idx == 0:
+                            self._seq_idx = 1
                             self._last_seq_time = now
                         else:
-                            self._seq_idx = 1 if norm_vk == self.required_seq[0] else 0
-                            self._last_seq_time = now
+                            if now - self._last_seq_time <= 1.5:
+                                self._seq_idx += 1
+                                self._last_seq_time = now
+                            else:
+                                self._seq_idx = 1 if norm_vk == self.required_seq[0] else 0
+                                self._last_seq_time = now
 
-                    if self._seq_idx >= len(self.required_seq):
-                        LOG.info("Secret unlock hotkey sequence completed (%s). Exiting stealth mode...", self.hotkey_str)
-                        self.stop(reason="local_hotkey")
-                        return 1
-                else:
-                    # Extraneous key breaks sequential matching!
-                    self._seq_idx = 0
+                        if self._seq_idx >= len(self.required_seq):
+                            LOG.info("Secret unlock hotkey sequence completed (%s). Exiting stealth mode...", self.hotkey_str)
+                            self.stop(reason="local_hotkey")
+                            return 1
+                    else:
+                        # Extraneous non-modifier key breaks sequential matching!
+                        self._seq_idx = 0
             else:
                 self._seq_idx = 0
 

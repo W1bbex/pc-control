@@ -207,12 +207,6 @@ class PhysicalButtonManager:
         keyboard.append(action_row)
         return {"inline_keyboard": keyboard}
 
-    def physical_builder_text(self):
-        return self.password_record_text()
-
-    def physical_builder_markup(self):
-        return self.password_record_markup()
-
     def unlock_builder_text(self):
         cur = self.format_password_display(self.saved_unlock_pattern or "CC")
         draft = self.format_password_display("".join(self.unlock_draft))
@@ -241,16 +235,16 @@ class PhysicalButtonManager:
         keyboard.append([{"text": "✖ Отмена", "callback_data": "physical_button"}])
         return {"inline_keyboard": keyboard}
 
-    def start_save_password(self, seq, chat_id):
+    def start_save_password(self, seq, chat_id, message_id=None):
         cmd_id = self.mqtt.publish_esp_action("SET_PHYSICAL_PASSWORD", value=seq)
         if not cmd_id:
-            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup())
+            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup(), message_id=message_id)
             return None
         with self._lock:
             self.pending_command_id = cmd_id
             self.pending_password_value = seq
             self.pending_action_kind = "save"
-        self.ui.send_message(chat_id, "⏳ Сохраняю пароль в ESP...")
+        self.ui.send_message(chat_id, "⏳ Сохраняю пароль в ESP...", message_id=message_id)
         return cmd_id
 
     def start_delete_password(self, chat_id, message_id=None):
@@ -265,16 +259,16 @@ class PhysicalButtonManager:
         self.ui.send_message(chat_id, "⏳ Удаляю пароль из ESP...", message_id=message_id)
         return cmd_id
 
-    def start_unlock_input(self, chat_id):
+    def start_unlock_input(self, chat_id, message_id=None):
         cmd_id = self.mqtt.publish_esp_action("UNLOCK_PHYSICAL_INPUT")
         if not cmd_id:
-            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup())
+            self.ui.send_message(chat_id, "❌ Не удалось отправить команду в ESP (MQTT недоступен).", reply_markup=self.physical_control_markup(), message_id=message_id)
             return None
         with self._lock:
             self.pending_command_id = cmd_id
             self.pending_password_value = None
             self.pending_action_kind = "unlock_input"
-        self.ui.send_message(chat_id, "⏳ Снимаю блокировку физической кнопки...")
+        self.ui.send_message(chat_id, "⏳ Снимаю блокировку физической кнопки...", message_id=message_id)
         return cmd_id
 
     def handle_ack(self, ack_data, chat_id, on_state_change_cb=None):

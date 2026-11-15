@@ -12,16 +12,24 @@ def route_player_callback(app, data: str, chat_id: int, message_id: int, callbac
     # 1. Player Controls
     if data.startswith("player_"):
         action = data.replace("player_", "")
-        app.active_player_message_id = message_id
-        app.active_player_chat_id = chat_id
-        app.active_player_business_connection_id = None if chat_id == app.allowed_user_id else business_connection_id
+        player_lock = getattr(app, "player_edit_lock", None)
+
+        if player_lock:
+            with player_lock:
+                app.active_player_message_id = message_id
+                app.active_player_chat_id = chat_id
+                app.active_player_business_connection_id = None if chat_id == app.allowed_user_id else business_connection_id
+                media_state = dict(getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {}) or {})
+        else:
+            app.active_player_message_id = message_id
+            app.active_player_chat_id = chat_id
+            app.active_player_business_connection_id = None if chat_id == app.allowed_user_id else business_connection_id
+            media_state = dict(getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {}) or {})
 
         if action != "toggle_like":
             app.ui.answer_callback(callback_id)
 
         # Optimistic state update for instant UI button feedback (<50ms)
-        with app.player_edit_lock:
-            media_state = dict(getattr(app, "latest_media_state", None) or getattr(app.mqtt, "last_media_state", {}) or {})
         is_active = bool(media_state.get("active"))
         optimistic_changed = False
         sent_ok = True
@@ -73,13 +81,28 @@ def route_player_callback(app, data: str, chat_id: int, message_id: int, callbac
                 app.ui.answer_callback(callback_id)
 
         if not sent_ok and action != "toggle_like":
-            app.ui.send_message(chat_id, "❌ Команда управления плеером не доставлена (MQTT/ПК недоступен).")
+            app.ui.send_message(
+                chat_id,
+                "❌ Команда управления плеером не доставлена (MQTT/ПК недоступен).",
+                business_connection_id=business_connection_id,
+            )
 
         if optimistic_changed and message_id:
-            with app.player_edit_lock:
-                app.latest_media_state = media_state
+            render_state = dict(media_state)
+            if player_lock:
+                with player_lock:
+                    current = dict(getattr(app, "latest_media_state", None) or {})
+                    current.update(media_state)
+                    app.latest_media_state = current
+                    app.last_player_edit_time = time.time()
+                    render_state = dict(current)
+            else:
+                current = dict(getattr(app, "latest_media_state", None) or {})
+                current.update(media_state)
+                app.latest_media_state = current
                 app.last_player_edit_time = time.time()
-            app._render_and_send_player(chat_id, message_id, media_state)
+                render_state = dict(current)
+            app._render_and_send_player(chat_id, message_id, render_state)
         return True
 
     # 3. Sound Menu Navigation

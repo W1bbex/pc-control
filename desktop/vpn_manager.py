@@ -38,11 +38,16 @@ if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "user32"):
 class VpnManagerMixin:
     """Provides methods to check and connect Happ and INCY VPN services."""
 
+    _init_lock = threading.Lock()
+
     def _get_incy_lock(self):
         lock = getattr(self, "_incy_lock", None)
         if lock is None:
-            lock = threading.RLock()
-            self._incy_lock = lock
+            with VpnManagerMixin._init_lock:
+                lock = getattr(self, "_incy_lock", None)
+                if lock is None:
+                    lock = threading.RLock()
+                    self._incy_lock = lock
         return lock
 
     @staticmethod
@@ -244,12 +249,12 @@ class VpnManagerMixin:
         Ensures autoConnect is set in preferences.json, launches incy.exe if not running,
         and polls up to timeout for network readiness and Google HTTPS accessibility.
         """
-        with self._get_incy_lock():
-            LOG.info("Verifying INCY VPN connection")
-            if self.check_incy_vpn_active():
-                LOG.info("INCY VPN is already active and verified")
-                return self._finalize_incy_connection(verify_google, already_connected=True)
+        LOG.info("Verifying INCY VPN connection")
+        if self.check_incy_vpn_active():
+            LOG.info("INCY VPN is already active and verified")
+            return self._finalize_incy_connection(verify_google, already_connected=True)
 
+        with self._get_incy_lock():
             try:
                 pref_path = Path(os.path.expandvars(r"%APPDATA%\incy\preferences.json"))
                 if pref_path.exists():
@@ -318,7 +323,9 @@ class VpnManagerMixin:
         try:
             conn = sqlite3.connect(str(db_path))
             cur = conn.cursor()
-            cur.execute("SELECT id, name, latency FROM servers WHERE name NOT LIKE '%Россия%'")
+            cur.execute(
+                "SELECT id, name, latency FROM servers WHERE name NOT LIKE '%Россия%'"
+            )
             rows = cur.fetchall()
             servers = []
             for s_id, s_name, s_lat in rows:
@@ -378,6 +385,8 @@ class VpnManagerMixin:
                 target = servers[next_idx]
 
             LOG.info("Switching INCY VPN server to: %s (%s, %dms)", target["name"], target["id"], target["latency"])
+            gen = getattr(self, "_incy_generation", 0) + 1
+            self._incy_generation = gen
 
             prefs["selectedServerId"] = target["id"]
             prefs["lastConnectedServerId"] = target["id"]
@@ -429,6 +438,14 @@ class VpnManagerMixin:
 
         deadline = time.monotonic() + 25.0
         while time.monotonic() < deadline:
+            if getattr(self, "_incy_generation", 0) != gen:
+                LOG.info("Another INCY server switch was requested, superseding switch to %s", target["name"])
+                return {
+                    "success": False,
+                    "error": "Superseded by a newer server switch request",
+                    "server": target["name"],
+                    "server_id": target["id"],
+                }
             if self.check_incy_vpn_active():
                 LOG.info("INCY VPN reconnected on server %s", target["name"])
                 return {

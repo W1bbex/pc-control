@@ -39,6 +39,7 @@ class NetworkDiagnostics {
       file.close();
       replayFile.close();
       replayRetryCount = 0;
+      replayPhase = 0;
       LittleFS.remove("/network.previous.jsonl");
       if (!LittleFS.rename("/network.jsonl", "/network.previous.jsonl")) {
         Serial.println("DIAG rotation failed");
@@ -70,18 +71,22 @@ class NetworkDiagnostics {
     }
     // One record per loop so relay release and physical input remain responsive.
     const size_t position = replayFile.position();
-    String line = replayFile.readStringUntil('\n');
-    line.trim();
-    if (!line.length()) {
+    char lineBuf[480];
+    size_t bytesRead = replayFile.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
+    lineBuf[bytesRead] = '\0';
+    while (bytesRead > 0 && (lineBuf[bytesRead - 1] == '\r' || lineBuf[bytesRead - 1] == ' ' || lineBuf[bytesRead - 1] == '\t')) {
+      lineBuf[--bytesRead] = '\0';
+    }
+    if (bytesRead == 0) {
       replayRetryCount = 0;
       return;
     }
-    if (line.length() > 476) {
+    if (bytesRead > 476) {
       Serial.println("DIAG replay skip oversized line");
       replayRetryCount = 0;
       return;
     }
-    if (!client.publish("pc/main/esp/status", line.c_str())) {
+    if (!client.publish("pc/main/esp/status", lineBuf)) {
       if (!client.connected()) {
         replayFile.seek(position);
         return;

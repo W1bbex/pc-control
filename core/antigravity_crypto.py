@@ -229,6 +229,7 @@ class ProtobufHelper:
         """Create OAuthTokenInfo protobuf payload."""
         if not access_token or not isinstance(access_token, str):
             raise ValueError("OAuth access_token must be a non-empty string")
+        _ = email  # Accepted for metadata parity, not stored in OAuthTokenInfo wire schema
         b_access = cls.encode_string(1, access_token)
         b_bearer = cls.encode_string(2, "Bearer")
         b_refresh = cls.encode_string(3, refresh_token) if refresh_token else b""
@@ -268,6 +269,8 @@ class ProtobufHelper:
             field_num = tag >> 3
             if wire_type == 2 and field_num == 1:
                 length, pos = cls.read_varint(existing_raw, pos)
+                if pos + length > len(existing_raw):
+                    break
                 entry_bytes = existing_raw[pos:pos + length]
                 end_pos = pos + length
                 pos = end_pos

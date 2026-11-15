@@ -39,6 +39,10 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
     # 1. Main Dashboard Menu Navigation
     if data == "menu":
         app.awaiting_shutdown_time_chat_id = None
+        app.console_active_chat_id = None
+        app.pending_activity_chat_id = None
+        app.pending_activity_msg_id = None
+        app.pending_activity_requested_at = None
         app.ui.answer_callback(callback_id)
         if hasattr(app, "power_flow") and getattr(app.power_flow, "stage", None) in (
             PowerFlowStage.WAITING_WORKSPACE_DECISION,
@@ -168,6 +172,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
                     chat_id,
                     "<b>📈 Графики</b>\n\nНедостаточно данных: подожди, пока агент соберёт хотя бы две точки телеметрии.",
                     reply_markup=app.ui.history_menu_markup(),
+                    message_id=message_id,
                 )
                 return
             except Exception:
@@ -176,9 +181,12 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
                     chat_id,
                     "<b>📈 Графики</b>\n\nНе удалось построить график. Состояние ПК продолжает работать.",
                     reply_markup=app.ui.history_menu_markup(),
+                    message_id=message_id,
                 )
                 return
-            app.ui.send_photo(chat_id, chart_bytes, filename="chart.png", caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
+            res = app.ui.send_photo(chat_id, chart_bytes, filename="chart.png", caption=f"<b>📈 Телеметрия за {title}</b>\nТочек: {count}")
+            if not res or not isinstance(res, dict) or not res.get("message_id"):
+                LOG.warning("Failed to deliver telemetry chart photo to chat_id=%s", chat_id)
 
         threading.Thread(target=_build_and_send_chart, daemon=True, name="chart-renderer").start()
         return True
@@ -188,13 +196,15 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
         if getattr(app.mqtt, "desktop_status", None) != "online":
             app.ui.answer_callback(callback_id, "Desktop-агент пока недоступен — свежую телеметрию получить нельзя.", alert=True)
             return True
-        app.ui.answer_callback(callback_id, "Обновляю состояние...")
         cmd_id = app.mqtt.publish_desktop_action("telemetry")
         if cmd_id:
+            app.ui.answer_callback(callback_id, "Обновляю состояние...")
             app.pending_telemetry_cmd_ids[cmd_id] = (chat_id, message_id)
             if not hasattr(app, "pending_cmd_timestamps"):
                 app.pending_cmd_timestamps = {}
             app.pending_cmd_timestamps[cmd_id] = time.time()
+        else:
+            app.ui.answer_callback(callback_id, "❌ Не удалось запросить телеметрию: сбой MQTT", alert=True)
         return True
 
     # 9. LED Menu
@@ -202,13 +212,24 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
         app.current_menu_view = "led_menu"
         app.ui.answer_callback(callback_id)
         text = (
-            "<b>💡 Калибровка белого цвета кулера</b>\n\n"
+            "<b>💡 Подсветка кулера</b>\n\n"
             "Кулер: <i>Ocypus Gamma A40 WH ARGB</i>\n"
             "Пин управления: <code>D2 (ESP8266)</code>\n\n"
             "<b>⚡ Быстрые режимы:</b>\n"
             "👁 <b>Для глаз:</b> <code>255, 150, 125</code> (Идеал вживую)\n"
-            "📸 <b>Для камеры:</b> <code>228, 245, 255</code> (Под сенсор камеры)\n\n"
-            "<b>🎨 Палитра оттенков (1..12):</b>\n"
+            "📸 <b>Для фото:</b> <code>228, 245, 255</code> (Под сенсор камеры)\n\n"
+            "<i>Для тонкой настройки оттенков нажмите «Все оттенки (1..12)».</i>"
+        )
+        app.ui.send_message(chat_id, text, reply_markup=app.ui.led_menu_markup(), message_id=message_id)
+        return True
+
+    # 10. LED Palette (All 1..12 shades)
+    if data == "led_palette":
+        app.current_menu_view = "led_palette"
+        app.ui.answer_callback(callback_id)
+        text = (
+            "<b>🎨 Все оттенки белого (1..12)</b>\n\n"
+            "Кулер: <i>Ocypus Gamma A40 WH ARGB</i> (Пин <code>D2</code>)\n\n"
             "1️⃣ <code>255, 150, 165</code> — Холодный снежный (зелень срезана)\n"
             "2️⃣ <code>255, 140, 160</code> — Арктический холодный (без циана)\n"
             "3️⃣ <code>255, 130, 155</code> — Ледяной кристалл\n"
@@ -223,7 +244,7 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             "1️⃣2️⃣ <code>255, 120, 75</code> — Тёплый ламповый\n\n"
             "<i>Нажимай кнопки 1..12 ниже — оттенок меняется мгновенно!</i>"
         )
-        app.ui.send_message(chat_id, text, reply_markup=app.ui.led_menu_markup(), message_id=message_id)
+        app.ui.send_message(chat_id, text, reply_markup=app.ui.led_palette_markup(), message_id=message_id)
         return True
 
     # 11. LED Actions
@@ -233,11 +254,17 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             return True
         action = data.split(":", 1)[1]
         if action == "on":
-            apply_led_power(app, True)
-            app.ui.answer_callback(callback_id, "💡 Подсветка включена")
+            cmd = apply_led_power(app, True)
+            if cmd:
+                app.ui.answer_callback(callback_id, "💡 Подсветка включена")
+            else:
+                app.ui.answer_callback(callback_id, "❌ Не удалось включить подсветку: сбой MQTT", alert=True)
         elif action == "off":
-            apply_led_power(app, False)
-            app.ui.answer_callback(callback_id, "🌑 Подсветка выключена")
+            cmd = apply_led_power(app, False)
+            if cmd:
+                app.ui.answer_callback(callback_id, "🌑 Подсветка выключена")
+            else:
+                app.ui.answer_callback(callback_id, "❌ Не удалось выключить подсветку: сбой MQTT", alert=True)
         elif action.startswith("bright:"):
             level_str = action.split(":", 1)[1].strip()
             try:
@@ -246,18 +273,24 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
                 app.ui.answer_callback(callback_id, "Некорректная яркость", alert=True)
                 return True
             level_int = max(0, min(255, level_int))
-            app.user_led_brightness = level_int
-            if hasattr(app, "save_state"):
-                app.save_state()
-            app.mqtt.publish_esp_action("LED_BRIGHTNESS", value=str(level_int))
-            pct = led_brightness_percent(level_int)
-            app.ui.answer_callback(callback_id, f"🔆 Яркость: {pct}%")
+            cmd_id = app.mqtt.publish_esp_action("LED_BRIGHTNESS", value=str(level_int))
+            if cmd_id:
+                app.user_led_brightness = level_int
+                if hasattr(app, "save_state"):
+                    app.save_state()
+                pct = led_brightness_percent(level_int)
+                app.ui.answer_callback(callback_id, f"🔆 Яркость: {pct}%")
+            else:
+                app.ui.answer_callback(callback_id, "❌ Не удалось изменить яркость: сбой MQTT", alert=True)
         elif action.startswith("preset:"):
             preset_id = action.split(":", 1)[1]
             applied = apply_led_preset(app, preset_id)
             if applied:
-                rgb, name, _ = applied
-                app.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
+                rgb, name, cmd_id = applied
+                if cmd_id:
+                    app.ui.answer_callback(callback_id, f"#{preset_id}: {name} ({rgb})")
+                else:
+                    app.ui.answer_callback(callback_id, "❌ Не удалось применить пресет: сбой MQTT", alert=True)
             else:
                 app.ui.answer_callback(callback_id, "Неизвестный пресет", alert=True)
         else:

@@ -107,6 +107,7 @@ class MediaManager:
         self.last_state: Dict[str, Any] = {}
         self._lock = threading.Lock()
         self._session_lock = threading.Lock()
+        self._async_poll_lock = None
         self._loop = None
         self._thread = None
         self._stop_event = threading.Event()
@@ -468,7 +469,7 @@ class MediaManager:
 
         if not track_id:
             LOG.warning("Cannot toggle like: track ID could not be resolved for '%s'", last_title)
-            return is_liked
+            return False
 
         try:
             headers = self._get_yandex_headers()
@@ -748,42 +749,53 @@ class MediaManager:
             return True
         return False
 
+    def _get_async_poll_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_async_poll_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._async_poll_lock = lock
+        return lock
+
     def trigger_poll(self) -> None:
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._poll_step(force=True), self._loop)
 
     async def _poll_step(self, force: bool = False) -> None:
-        state = await self.get_current_state()
-        changed = force
-        now = time.time()
-        with self._get_lock():
-            if not changed:
-                if not self.last_state:
-                    changed = True
-                elif (
-                    self.last_state.get("title") != state.get("title")
-                    or self.last_state.get("artist") != state.get("artist")
-                    or self.last_state.get("is_playing") != state.get("is_playing")
-                    or self.last_state.get("active") != state.get("active")
-                    or self.last_state.get("is_liked") != state.get("is_liked")
-                    or self.last_state.get("cover_url") != state.get("cover_url")
-                    or (
-                        state.get("is_playing")
-                        and (now - getattr(self, "_last_published_time", 0.0) >= 5.0)
-                    )
-                ):
-                    changed = True
+        poll_lock = self._get_async_poll_lock()
+        if poll_lock.locked():
+            return
+        async with poll_lock:
+            state = await self.get_current_state()
+            changed = force
+            now = time.time()
+            with self._get_lock():
+                if not changed:
+                    if not self.last_state:
+                        changed = True
+                    elif (
+                        self.last_state.get("title") != state.get("title")
+                        or self.last_state.get("artist") != state.get("artist")
+                        or self.last_state.get("is_playing") != state.get("is_playing")
+                        or self.last_state.get("active") != state.get("active")
+                        or self.last_state.get("is_liked") != state.get("is_liked")
+                        or self.last_state.get("cover_url") != state.get("cover_url")
+                        or (
+                            state.get("is_playing")
+                            and (now - getattr(self, "_last_published_time", 0.0) >= 5.0)
+                        )
+                    ):
+                        changed = True
 
-            if changed:
-                self._last_published_pos = state.get("position", 0.0)
-                self._last_published_time = now
-                self.last_state = state
+                if changed:
+                    self._last_published_pos = state.get("position", 0.0)
+                    self._last_published_time = now
+                    self.last_state = state
 
-        if changed and self.on_status_change:
-            try:
-                self.on_status_change(state)
-            except Exception as e:
-                LOG.error("Error in on_status_change callback: %s", e)
+            if changed and self.on_status_change:
+                try:
+                    self.on_status_change(state)
+                except Exception as e:
+                    LOG.error("Error in on_status_change callback: %s", e)
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():

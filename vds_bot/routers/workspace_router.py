@@ -310,8 +310,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
 
     if data == "flow_workspace_cancel":
         app.ui.answer_callback(callback_id, "Отменяю...")
-        app.power_flow.cancel_workspace(chat_id)
         app.workspace_cancel_event.set()
+        app.power_flow.cancel_workspace(chat_id)
         return True
 
     # 6. Single App Launch
@@ -354,8 +354,18 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
             app.ui.answer_callback(callback_id, "ПК заблокирован или выключен.", alert=True)
             return True
         connect = data == "happ_launch:connect"
-        app.ui.answer_callback(callback_id, "Запускаю Happ...")
-        app.mqtt.publish_desktop_action("launch_app", {"app": "Happ", "connect_vpn": connect})
+        cmd_id = app.mqtt.publish_desktop_action("launch_app", {"app": "Happ", "connect_vpn": connect})
+        if cmd_id:
+            app.ui.answer_callback(callback_id, "Запускаю Happ...")
+            status_text = "<b>Happ запускается...</b>\n\nКоманда отправлена на desktop-агент."
+            app.ui.send_message(
+                chat_id,
+                status_text,
+                reply_markup={"inline_keyboard": [app.ui.back_button("apps_menu")]},
+                message_id=message_id,
+            )
+        else:
+            app.ui.answer_callback(callback_id, "❌ Не удалось отправить команду: сбой MQTT", alert=True)
         return True
 
     if data.startswith("app:"):
@@ -367,8 +377,11 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
                 alert=True,
             )
             return True
-        app.ui.answer_callback(callback_id, f"Запускаю {app_name}...")
-        app.mqtt.publish_desktop_action("launch_app", {"app": app_name})
+        cmd_id = app.mqtt.publish_desktop_action("launch_app", {"app": app_name})
+        if cmd_id:
+            app.ui.answer_callback(callback_id, f"Запускаю {app_name}...")
+        else:
+            app.ui.answer_callback(callback_id, f"❌ Не удалось запустить {app_name}: сбой MQTT", alert=True)
         return True
 
     return False

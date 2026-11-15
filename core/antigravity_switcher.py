@@ -25,8 +25,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import urllib.parse
 import urllib.request
 
-import psutil
-
 from core.antigravity_crypto import AntigravityCrypto, ProtobufHelper, ENC_PREFIX
 from core.antigravity_process import (
     IDE_PROCESS_NAMES,

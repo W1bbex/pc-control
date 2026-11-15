@@ -174,8 +174,11 @@ class MqttDispatcherMixin:
             if getattr(self.physical_btn, "pending_command_id", None) and cmd_id == self.physical_btn.pending_command_id:
                 self.physical_btn.pending_command_id = None
                 self.ui.send_message(target_user, "❌ Таймаут ожидания ответа от ESP.")
-            if cmd_id in getattr(self, "pending_console_cmds", {}):
-                pending_cmd = self.pending_console_cmds.pop(cmd_id)
+            pending_cmd = None
+            if hasattr(self, "pending_console_cmds"):
+                with getattr(self, "state_lock", threading.RLock()):
+                    pending_cmd = self.pending_console_cmds.pop(cmd_id, None)
+            if pending_cmd:
                 c_chat_id = pending_cmd["chat_id"]
                 c_cmd = pending_cmd["command"]
                 c_target = pending_cmd["target"]
@@ -216,8 +219,11 @@ class MqttDispatcherMixin:
                     detail += f"\n<code>{html.escape(str(ack_data['error']))}</code>"
                 self.ui.send_message(target_user, f"<b>Codex · вариант {variant}</b>\n\n{detail}")
 
-            if cmd_id in getattr(self, "pending_console_cmds", {}):
-                pending_cmd = self.pending_console_cmds.pop(cmd_id)
+            pending_cmd = None
+            if hasattr(self, "pending_console_cmds"):
+                with getattr(self, "state_lock", threading.RLock()):
+                    pending_cmd = self.pending_console_cmds.pop(cmd_id, None)
+            if pending_cmd:
                 self._handle_console_ack(pending_cmd, data)
 
             pending_shutdown = getattr(self, "pending_shutdown_cmd_id", None)
@@ -353,7 +359,7 @@ class MqttDispatcherMixin:
 
                 elif action_kind == "switch":
                     if result == "executed" and isinstance(ack_data, dict):
-                        switched_email = ack_data.get("email", "—")
+                        switched_email = html.escape(str(ack_data.get("email", "—")))
                         restarted = ack_data.get("restarted_ide", False)
                         msg = f"✅ Профиль Antigravity переключен на <b>{switched_email}</b>!"
                         if restarted:
@@ -383,7 +389,7 @@ class MqttDispatcherMixin:
                         self.ui.send_message(req_chat_id, f"📦 <b>Экспорт выполнен успешно:</b> {cnt} аккаунтов сохранены в портативный формат.")
                 elif action_kind in ("heal", "fix"):
                     if result == "executed" and isinstance(ack_data, dict):
-                        srv = ack_data.get("server", "—")
+                        srv = html.escape(str(ack_data.get("server", "—")))
                         lat = ack_data.get("latency", 0)
                         lat_str = f" ({lat}ms)" if lat else ""
                         msg = (

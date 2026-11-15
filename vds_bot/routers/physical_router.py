@@ -47,8 +47,15 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
 
     # 3. Begin Password Recording
     if data == "physical_record_begin":
+        esp_status = getattr(app.mqtt, "esp_status", None)
+        if esp_status == "offline":
+            app.ui.answer_callback(callback_id, "❌ Контроллер ESP8266 не в сети!", alert=True)
+            return True
+        cmd_id = app.mqtt.publish_esp_action("START_PHYSICAL_RECORDING")
+        if not cmd_id:
+            app.ui.answer_callback(callback_id, "❌ Не удалось отправить команду в ESP: MQTT недоступен.", alert=True)
+            return True
         app.ui.answer_callback(callback_id)
-        app.mqtt.publish_esp_action("START_PHYSICAL_RECORDING")
         with pbtn._lock:
             pbtn.mode = "record_password"
             pbtn.password_draft = []
@@ -68,7 +75,7 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
         with pbtn._lock:
             pbtn.mode = None
             pbtn.active_message_id = None
-        pbtn.start_save_password(seq, chat_id)
+        pbtn.start_save_password(seq, chat_id, message_id=message_id)
         return True
 
     # 5. Add Symbol to Password Draft
@@ -122,12 +129,14 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
             pbtn.mode = None
             pbtn.active_message_id = None
             seq = "".join(pbtn.password_draft)
-        pbtn.start_save_password(seq, chat_id)
+        pbtn.start_save_password(seq, chat_id, message_id=message_id)
         return True
 
     # 9. Cancel Password Recording
     if data == "physical_cancel_record":
         app.ui.answer_callback(callback_id, "Отменено")
+        if getattr(app.mqtt, "esp_status", None) == "online":
+            app.mqtt.publish_esp_action("CANCEL_PHYSICAL_RECORDING")
         with pbtn._lock:
             pbtn.mode = None
             pbtn.active_message_id = None
@@ -172,7 +181,7 @@ def route_physical_callback(app, data: str, chat_id: int, message_id: int, callb
             app.ui.answer_callback(callback_id, "❌ Контроллер ESP8266 не в сети!", alert=True)
             return True
         app.ui.answer_callback(callback_id, "Разблокирую...")
-        pbtn.start_unlock_input(chat_id)
+        pbtn.start_unlock_input(chat_id, message_id=message_id)
         return True
 
     # 12. Begin Morse Unlock Pattern

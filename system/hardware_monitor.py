@@ -2,7 +2,6 @@ import ctypes
 import json
 import platform
 import socket
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -80,11 +79,16 @@ class HardwareMonitorMixin:
             missing_flag_holder=HardwareMonitorMixin,
         )
 
+    _init_lock = threading.Lock()
+
     def _get_net_state_lock(self):
         lock = getattr(self, "_net_state_lock", None)
         if lock is None:
-            lock = threading.Lock()
-            self._net_state_lock = lock
+            with HardwareMonitorMixin._init_lock:
+                lock = getattr(self, "_net_state_lock", None)
+                if lock is None:
+                    lock = threading.Lock()
+                    self._net_state_lock = lock
         return lock
 
     def network_rates(self):
