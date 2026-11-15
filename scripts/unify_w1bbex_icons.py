@@ -1,5 +1,5 @@
 """
-Unify and modernize W1bbex Icons sticker set (pc_icons_pack).
+Unify and modernize the UI Icons Telegram custom emoji sticker set.
 Replaces the first 17 thick/filled icons with pixel-perfect, thin outline Lucide-style vector icons (stroke-width: 1.8px).
 Deletes unused duplicate lightning stickers.
 Updates resources/icons.json and vds_bot/resources/icons.json.
@@ -26,7 +26,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 USER_ID = int(os.getenv("TELEGRAM_ALLOWED_USER_ID") or os.getenv("TELEGRAM_USER_ID") or 0)
 if not TOKEN or not USER_ID:
     raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID must be set in .env")
-PACK_NAME = "pc_icons_pack"
+PACK_NAME = os.getenv("TELEGRAM_ICONS_EMOJI_PACK", "pc_icons_pack")
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
 
 # 17 Modernized thin-stroke SVGs (stroke-width: 1.8px, fill: none, round corners)

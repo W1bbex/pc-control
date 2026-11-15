@@ -175,7 +175,7 @@ def test_is_user_in_telegram_on_pc():
     app.mqtt.system_session = "unlocked"
     app.monitoring.telemetry_age.return_value = 5.0
     app.monitoring.latest_telemetry = {
-        "active_application": "Telegram.exe",
+        "active_application": "AyuGram.exe",
         "idle_seconds": 10,
     }
     assert app._is_user_in_telegram_on_pc() is True
@@ -186,7 +186,7 @@ def test_is_user_in_telegram_on_pc():
     app.monitoring.latest_telemetry["active_application"] = "chrome.exe"
     assert app._is_user_in_telegram_on_pc() is False
 
-    app.monitoring.latest_telemetry["active_application"] = "Telegram.exe"
+    app.monitoring.latest_telemetry["active_application"] = "AyuGram.exe"
     app.mqtt.system_session = "locked"
     assert app._is_user_in_telegram_on_pc() is False
 
@@ -284,7 +284,7 @@ def test_dashboard_formats_telegram_chat_title():
 
     manager.process_telemetry({
         "agent_mode": "desktop",
-        "active_application": "Telegram.exe",
+        "active_application": "AyuGram.exe",
         "active_window_title": "(1) PC Control @ W1bbex! (2029400)",
         "active_application_emoji_id": "5251740431632344455",
     })

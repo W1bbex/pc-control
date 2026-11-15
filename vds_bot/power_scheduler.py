@@ -306,7 +306,8 @@ class PowerSchedulerMixin:
         in_pc_control = bool(telemetry.get("in_pc_control_chat") is True)
         if not in_pc_control:
             active_title = str(telemetry.get("active_window_title") or "").lower()
-            if "pc control" in active_title or "your_pc_bot" in active_title:
+            bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@").lower()
+            if "pc control" in active_title or (bool(bot_username) and bot_username in active_title):
                 in_pc_control = True
 
         refresh_interval = 5.0 if in_pc_control else 10.0

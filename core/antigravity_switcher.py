@@ -35,7 +35,7 @@ from core.antigravity_process import (
 
 LOG = logging.getLogger("pc-control.antigravity")
 
-# Google OAuth Constants (Antigravity Enterprise Client)
+# Google OAuth Constants
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 DEFAULT_CLIENT_ID = os.getenv("ANTIGRAVITY_CLIENT_ID", "")
 DEFAULT_CLIENT_SECRET = os.getenv("ANTIGRAVITY_CLIENT_SECRET", "")

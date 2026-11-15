@@ -215,4 +215,5 @@ def is_telegram_control_chat(exe_key: Optional[str], title: Optional[str]) -> bo
     if not title:
         return False
     title_lower = title.lower()
-    return "pc control" in title_lower or "your_pc_bot" in title_lower
+    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@").lower()
+    return "pc control" in title_lower or (bool(bot_username) and bot_username in title_lower)

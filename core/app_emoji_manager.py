@@ -32,7 +32,7 @@ try:
     DEFAULT_USER_ID = int(_def_tg_uid) if _def_tg_uid else 0
 except (ValueError, TypeError):
     DEFAULT_USER_ID = 0
-DEFAULT_PACK_NAME = "pc_apps_pack"
+DEFAULT_PACK_NAME = os.getenv("TELEGRAM_APPS_EMOJI_PACK", "pc_apps_pack")
 
 IGNORED_PROCESSES = {
     "idle",

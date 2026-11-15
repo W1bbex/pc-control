@@ -26,6 +26,7 @@ from desktop.constants import (
     REAL_BOOT_TIME,
     TOPIC_TELEMETRY,
 )
+from desktop.os_events import is_telegram_control_chat
 
 LOG = logging.getLogger("pc-control-agent")
 _STATE_LOCK_INIT_GUARD = threading.Lock()
@@ -306,13 +307,7 @@ class TelemetryMixin:
         idle_seconds = self.get_idle_seconds()
         active_app, active_emoji, active_title = self.get_active_application_info()
 
-        is_pc_control = False
-        if active_app:
-            app_lower = active_app.lower()
-            if any(client in app_lower for client in ("telegram", "ayugram", "kotatogram", "64gram", "unigram")):
-                title_lower = (active_title or "").lower()
-                if "pc control" in title_lower or "your_pc_bot" in title_lower:
-                    is_pc_control = True
+        is_pc_control = is_telegram_control_chat(active_app, active_title)
 
         telemetry = {
             "timestamp": int(now),
@@ -393,14 +388,7 @@ class TelemetryMixin:
                 self.last_telemetry["active_application_emoji_id"] = emoji_id
                 self.last_telemetry["active_window_title"] = title
 
-                is_pc_control = False
-                if proc_name:
-                    app_lower = proc_name.lower()
-                    telegram_clients = ("telegram", "ayugram", "kotatogram", "64gram", "unigram")
-                    if any(client in app_lower for client in telegram_clients):
-                        title_lower = (title or "").lower()
-                        if "pc control" in title_lower or "your_pc_bot" in title_lower:
-                            is_pc_control = True
+                is_pc_control = is_telegram_control_chat(proc_name, title)
                 self.last_telemetry["in_pc_control_chat"] = is_pc_control
                 self.in_pc_control_chat = is_pc_control
 

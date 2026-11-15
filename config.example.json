@@ -1,0 +1,101 @@
+{
+  "mqtt": {
+    "host": "mqtt.example.com",
+    "fallback_ip": "",
+    "port": 8883,
+    "username": "pc-agent",
+    "password": ""
+  },
+  "telemetry_interval_seconds": 15,
+  "activity_logging": {
+    "enabled": true,
+    "poll_seconds": 3,
+    "heartbeat_seconds": 60,
+    "network_poll_seconds": 5,
+    "idle_threshold_seconds": 300,
+    "retention_days": 30,
+    "include_window_titles": true,
+    "include_process_paths": true,
+    "record_existing_processes": true
+  },
+  "vpn_ready_delay_seconds": 45,
+  "happ_ready_delay_seconds": 35,
+  "default_vpn": "incy",
+  "unlock": {
+    "password": ""
+  },
+  "stealth_mode": {
+    "secret_hotkey": "Win+W+1",
+    "watchdog_timeout_minutes": 240,
+    "offline_timeout_minutes": 10,
+    "mute_audio": true,
+    "turn_off_displays": true
+  },
+  "apps": {
+    "steam": "C:\\Program Files (x86)\\Steam\\steam.exe",
+    "Telegram": "%APPDATA%\\Telegram Desktop\\Telegram.exe",
+    "Музыка": "%LOCALAPPDATA%\\Programs\\YandexMusic\\Яндекс Музыка.exe",
+    "Chrome": [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "--profile-directory=Default"
+    ],
+    "Happ": "C:\\Program Files\\FlyFrogLLC\\Happ\\Happ.exe",
+    "INCY": "C:\\Program Files\\INCY\\incy.exe",
+    "Antigravity": "%LOCALAPPDATA%\\Programs\\antigravity\\Antigravity.exe",
+    "Cursor": "%LOCALAPPDATA%\\Programs\\cursor\\Cursor.exe",
+    "ChatGPT": "%LOCALAPPDATA%\\Microsoft\\WindowsApps\\chatgpt-desktop.exe",
+    "Рабочий сетап": {
+      "steps": [
+        {
+          "id": "telegram",
+          "label": "💬 Telegram",
+          "command": ["%APPDATA%\\Telegram Desktop\\Telegram.exe"],
+          "required": true,
+          "verification": {
+            "type": "process_name",
+            "targets": ["telegram.exe"]
+          }
+        },
+        {
+          "id": "chrome",
+          "label": "🌐 Google Chrome",
+          "command": [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "--profile-directory=Default"
+          ],
+          "required": true,
+          "verification": {
+            "type": "process_name",
+            "targets": ["chrome.exe"]
+          }
+        },
+        {
+          "id": "antigravity",
+          "label": "🚀 Antigravity",
+          "command": ["%LOCALAPPDATA%\\Programs\\antigravity\\Antigravity.exe"],
+          "required": true,
+          "verification": {
+            "type": "process_name",
+            "targets": ["antigravity.exe"]
+          }
+        },
+        {
+          "id": "chatgpt",
+          "label": "🤖 ChatGPT",
+          "command": ["%LOCALAPPDATA%\\Microsoft\\WindowsApps\\chatgpt-desktop.exe"],
+          "required": true,
+          "verification": {
+            "type": "process_name",
+            "targets": ["chatgpt.exe", "chatgpt-desktop.exe"],
+            "timeout": 20.0
+          }
+        }
+      ],
+      "inter_app_delay_seconds": 1.5,
+      "minimize_after": true
+    },
+    "CMD": "C:\\Windows\\System32\\cmd.exe",
+    "PowerShell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  },
+  "services": {}
+}

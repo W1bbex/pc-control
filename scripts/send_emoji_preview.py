@@ -73,9 +73,10 @@ def send_preview():
     FALLBACK_CHARS["folder"] = "📁"
     FALLBACK_CHARS["sound_mute"] = "🔇"
 
+    pack_name = os.getenv("TELEGRAM_ICONS_EMOJI_PACK", "pc_icons_pack")
     lines = [
-        f'<tg-emoji emoji-id="{icons.get("pc")}">💻</tg-emoji> <b>W1bbex Icons — Обновленные векторные иконки</b>',
-        f'<i>Стикерпак: pc_icons_pack (needs_repainting: True)</i>\n',
+        f'<tg-emoji emoji-id="{icons.get("pc")}">💻</tg-emoji> <b>UI Icons — Обновленные векторные иконки</b>',
+        f'<i>Стикерпак: {pack_name} (needs_repainting: True)</i>\n',
         f'<b><tg-emoji emoji-id="{icons.get("user")}">👤</tg-emoji> Секция: Сессия</b>',
         f'<b><tg-emoji emoji-id="{icons.get("power")}">⚡</tg-emoji> Секция: Железо</b>',
         f'<b><tg-emoji emoji-id="{icons.get("folder")}">📁</tg-emoji> Секция: Накопители</b>\n',

@@ -2,6 +2,8 @@
 .env
 *.env
 !vds_bot/pc-control-bot.env.example
+.mcp.json
+config.json
 secrets.h
 hardware/esp8266/pc_remote_mqtt/secrets.h
 

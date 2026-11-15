@@ -28,7 +28,7 @@ def test_system_status_does_not_replace_vpn_selection():
 
 
 def test_chatgpt_alias_waits_for_delayed_real_process():
-    config = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8"))
+    config = json.loads((Path(__file__).resolve().parents[1] / "config.example.json").read_text(encoding="utf-8"))
     step = next(s for s in config["apps"]["Рабочий сетап"]["steps"] if s["id"] == "chatgpt")
     launcher = LauncherMixin()
     launcher.config = {"apps": {"test": {"steps": [step]}}}

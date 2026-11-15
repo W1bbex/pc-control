@@ -567,7 +567,7 @@ def test_antigravity_router_dispatches_fix_ag_command_and_callback():
 
 
 def test_codex_removed_from_apps_config_and_workspace_steps():
-    config_path = ROOT_DIR / "config.json"
+    config_path = ROOT_DIR / "config.example.json"
     cfg = json.loads(config_path.read_text(encoding="utf-8"))
     apps = cfg.get("apps", {})
     assert "Codex" not in apps
@@ -692,7 +692,7 @@ def test_launcher_relaunches_chrome_when_no_visible_window():
 
 
 def test_chatgpt_configured_in_apps_and_workspace_steps():
-    cfg = json.loads((ROOT_DIR / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((ROOT_DIR / "config.example.json").read_text(encoding="utf-8"))
     assert "ChatGPT" in cfg.get("apps", {})
     assert "%LOCALAPPDATA%" in cfg["apps"]["ChatGPT"] or "chatgpt" in cfg["apps"]["ChatGPT"].lower()
 
