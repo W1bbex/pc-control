@@ -678,6 +678,7 @@ class PowerFlowManager:
             with self._lock:
                 if self.stage != PowerFlowStage.UNLOCKING:
                     return
+                self._early_unlock_ack = None
             # Send unlock command to boot_agent.py
             cmd_id = self.mqtt.publish_system_action("unlock")
             if not cmd_id:
@@ -686,9 +687,16 @@ class PowerFlowManager:
                     self.unlock_attempts = max(0, self.unlock_attempts - 1)
                 return
             LOG.info("Sent unlock action to boot_agent.py (cmd_id=%s)", cmd_id)
+            early_ack = None
             with self._lock:
-                self.pending_unlock_command_id = cmd_id
-                self.pending_unlock_sent_at = now
+                if getattr(self, "_early_unlock_ack", None) and self._early_unlock_ack.get("id") == cmd_id:
+                    early_ack = self._early_unlock_ack
+                    self._early_unlock_ack = None
+                else:
+                    self.pending_unlock_command_id = cmd_id
+                    self.pending_unlock_sent_at = now
+            if early_ack:
+                self.handle_ack(early_ack)
         finally:
             with self._lock:
                 self._unlock_dispatch_in_flight = False
@@ -703,12 +711,16 @@ class PowerFlowManager:
         cid = 0
         mid = None
         with self._lock:
-            if self.stage == PowerFlowStage.UNLOCKING and cmd_id == self.pending_unlock_command_id:
-                self.pending_unlock_command_id = None
-                matched = True
-                attempts = self.unlock_attempts
-                cid = self.chat_id or 0
-                mid = self.message_id
+            if self.stage == PowerFlowStage.UNLOCKING:
+                if cmd_id and cmd_id == self.pending_unlock_command_id:
+                    self.pending_unlock_command_id = None
+                    matched = True
+                    attempts = self.unlock_attempts
+                    cid = self.chat_id or 0
+                    mid = self.message_id
+                elif getattr(self, "_unlock_dispatch_in_flight", False):
+                    self._early_unlock_ack = ack_data
+                    return
 
         if matched:
             sess = data.get("session") or self.mqtt.system_session

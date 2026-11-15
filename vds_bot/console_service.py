@@ -6,6 +6,8 @@ Handles dispatching PowerShell / CMD commands to Desktop and SYSTEM agents, and 
 
 import html
 import logging
+import secrets
+import threading
 import time
 
 LOG = logging.getLogger("pc-control-bot.console")
@@ -65,7 +67,7 @@ class ConsoleServiceMixin:
                 self.ui.send_message(chat_id, msg_fail)
             return
 
-        self.pending_console_cmds[cmd_id] = {
+        pending_info = {
             "chat_id": chat_id,
             "message_id": status_msg_id,
             "command": cmd_text,
@@ -73,6 +75,17 @@ class ConsoleServiceMixin:
             "shell": shell,
             "started_at": time.time(),
         }
+
+        early_ack_data = None
+        with getattr(self, "state_lock", threading.RLock()):
+            early_acks = getattr(self, "early_console_acks", None)
+            if early_acks is not None and cmd_id in early_acks:
+                early_ack_data = early_acks.pop(cmd_id)
+            else:
+                self.pending_console_cmds[cmd_id] = pending_info
+
+        if early_ack_data is not None:
+            self._handle_console_ack(pending_info, early_ack_data)
 
     def _handle_console_ack(self, pending_cmd, data):
         chat_id = pending_cmd["chat_id"]

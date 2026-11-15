@@ -220,9 +220,15 @@ class MqttDispatcherMixin:
                 self.ui.send_message(target_user, f"<b>Codex · вариант {variant}</b>\n\n{detail}")
 
             pending_cmd = None
-            if hasattr(self, "pending_console_cmds"):
-                with getattr(self, "state_lock", threading.RLock()):
+            with getattr(self, "state_lock", threading.RLock()):
+                if hasattr(self, "pending_console_cmds"):
                     pending_cmd = self.pending_console_cmds.pop(cmd_id, None)
+                if not pending_cmd:
+                    if not hasattr(self, "early_console_acks"):
+                        self.early_console_acks = {}
+                    if len(self.early_console_acks) > 100:
+                        self.early_console_acks.clear()
+                    self.early_console_acks[cmd_id] = data
             if pending_cmd:
                 self._handle_console_ack(pending_cmd, data)
 

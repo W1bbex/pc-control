@@ -50,24 +50,31 @@ class LauncherMixin:
         SCAN_ESCAPE = 0x01
         KEYEVENTF_KEYUP = 0x0002
 
+        success_count = 0
         for i in range(count):
+            sent = False
             try:
                 user32.keybd_event(VK_ESCAPE, SCAN_ESCAPE, 0, 0)
                 time.sleep(0.05)
                 user32.keybd_event(VK_ESCAPE, SCAN_ESCAPE, KEYEVENTF_KEYUP, 0)
+                sent = True
             except Exception as e:
                 LOG.warning("keybd_event failed: %s, falling back to pyautogui", e)
                 try:
                     import pyautogui
 
                     pyautogui.press("esc")
-                except Exception:
-                    pass
+                    sent = True
+                except Exception as pe:
+                    LOG.error("pyautogui fallback failed: %s", pe)
+            if sent:
+                success_count += 1
             if i < count - 1:
                 time.sleep(delay)
 
-        LOG.info("Simulated ESC key press (count=%d)", count)
-        return {"action": "press_esc", "count": count, "success": True}
+        overall_success = (success_count == count)
+        LOG.info("Simulated ESC key press (success=%s, count=%d/%d)", overall_success, success_count, count)
+        return {"action": "press_esc", "count": count, "success": overall_success, "sent": success_count}
 
     @staticmethod
     def _has_visible_window(target_names):

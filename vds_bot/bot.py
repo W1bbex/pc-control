@@ -273,6 +273,7 @@ class PcControlBotApp(
         self.console_target = "desktop"
         self.console_shell = "powershell"
         self.pending_console_cmds = {}
+        self.early_console_acks = {}
 
         self.physical_btn.on_trigger_unlock_cb = self.handle_physical_unlock_trigger
         self.physical_btn.on_trigger_unlock_and_workspace_cb = self.handle_physical_unlock_and_workspace_trigger
@@ -711,8 +712,11 @@ class PcControlBotApp(
 
             LOG.warning("Failed to exclusively create lockfile after retries; forcing lock write.")
             LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+        except SystemExit:
+            raise
         except Exception as e:
-            LOG.warning("Could not acquire single-instance lock: %s", e)
+            LOG.error("Fatal: Could not acquire single-instance lock at %s: %s", LOCK_PATH, e)
+            sys.exit(1)
 
     def _release_lock(self):
         try:
@@ -741,9 +745,17 @@ class PcControlBotApp(
             LOG.warning("Error stopping MQTT client: %s", e)
         if hasattr(self, "_executor"):
             try:
-                self._executor.shutdown(wait=False)
-            except Exception:
-                pass
+                self._executor.shutdown(wait=False, cancel_futures=True)
+                threads = list(getattr(self._executor, "_threads", []))
+                for t in threads:
+                    t.join(timeout=2.5)
+            except TypeError:
+                try:
+                    self._executor.shutdown(wait=False)
+                except Exception:
+                    pass
+            except Exception as e:
+                LOG.warning("Error shutting down executor: %s", e)
         timer = getattr(self, "_player_timer", None)
         if timer is not None and hasattr(timer, "cancel"):
             try:

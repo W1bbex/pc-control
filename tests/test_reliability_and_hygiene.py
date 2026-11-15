@@ -1865,6 +1865,107 @@ def test_monitoring_router_led_palette_callback():
     assert msg_call[1]["message_id"] == 99
 
 
+def test_console_command_resolves_fast_early_ack():
+    """Verify execute_console_command immediately processes an ACK that arrived early during dispatch."""
+    from vds_bot.console_service import ConsoleServiceMixin
+
+    app = ConsoleServiceMixin()
+    app.ui = MagicMock()
+    app.ui.send_message.return_value = {"message_id": 555}
+    app.mqtt = MagicMock()
+    app.mqtt.desktop_status = "online"
+    app.pending_console_cmds = {}
+    app.early_console_acks = {}
+    app.state_lock = threading.RLock()
+    app._handle_console_ack = MagicMock()
+
+    def mock_publish(action, args=None, timeout=60):
+        # Simulate fast ACK arriving on MQTT thread during publish
+        app.early_console_acks["cmd-fast-1"] = {"result": "executed", "data": {"stdout": "Fast result"}}
+        return "cmd-fast-1"
+
+    app.mqtt.publish_desktop_action.side_effect = mock_publish
+
+    app.execute_console_command(chat_id=123, cmd_text="Get-Process", target="desktop", shell="powershell")
+
+    # The early ACK must have been processed immediately without waiting in pending_console_cmds
+    app._handle_console_ack.assert_called_once()
+    assert "cmd-fast-1" not in app.pending_console_cmds
+    assert "cmd-fast-1" not in app.early_console_acks
+
+
+def test_console_command_cleans_up_when_mqtt_publish_fails():
+    """Verify execute_console_command does not register pending_console_cmds entry when MQTT returns None."""
+    from vds_bot.console_service import ConsoleServiceMixin
+
+    app = ConsoleServiceMixin()
+    app.ui = MagicMock()
+    app.ui.send_message.return_value = {"message_id": 555}
+    app.mqtt = MagicMock()
+    app.mqtt.desktop_status = "online"
+    app.mqtt.publish_desktop_action.return_value = None
+    app.pending_console_cmds = {}
+    app.early_console_acks = {}
+    app.state_lock = threading.RLock()
+
+    app.execute_console_command(chat_id=123, cmd_text="dir", target="desktop")
+
+    assert len(app.pending_console_cmds) == 0
+    from vds_bot.console_service import ConsoleServiceMixin
+
+    app = ConsoleServiceMixin()
+    app.ui = MagicMock()
+    app.ui.send_message.return_value = {"message_id": 555}
+    app.mqtt = MagicMock()
+    app.mqtt.desktop_status = "online"
+    app.mqtt.publish_desktop_action.return_value = None
+    app.pending_console_cmds = {}
+    app.state_lock = threading.RLock()
+
+    app.execute_console_command(chat_id=123, cmd_text="dir", target="desktop")
+
+    assert len(app.pending_console_cmds) == 0
+
+
+def test_acquire_lock_fails_fast_on_permission_error(tmp_path, monkeypatch):
+    """Verify _acquire_lock exits with error code 1 instead of continuing on PermissionError."""
+    import vds_bot.bot as bot_mod
+    from vds_bot.bot import PcControlBotApp
+
+    lock_file = tmp_path / "bot.lock"
+    monkeypatch.setattr(bot_mod, "LOCK_PATH", lock_file)
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+
+    with patch("os.open", side_effect=PermissionError("Permission denied: bot.lock")), \
+         pytest.raises(SystemExit) as exc_info:
+        app._acquire_lock()
+
+    assert exc_info.value.code == 1
+
+
+def test_send_key_esc_reports_false_when_both_methods_fail():
+    """Verify send_key_esc returns success=False when both Win32 keybd_event and fallback fail."""
+    from desktop.launcher import LauncherMixin
+
+    with patch("ctypes.windll.user32.keybd_event", side_effect=OSError("Access denied")), \
+         patch.dict("sys.modules", {"pyautogui": None}):
+        res = LauncherMixin.send_key_esc(count=1)
+        assert res["success"] is False
+        assert res["sent"] == 0
+
+
+def test_import_vds_bot_package_clean_resolution():
+    """Verify vds_bot and monitoring modules resolve internal imports cleanly when imported as a package."""
+    import vds_bot
+    import vds_bot.monitoring
+    import vds_bot.bot
+
+    assert hasattr(vds_bot.monitoring, "MonitoringManager")
+    assert hasattr(vds_bot.bot, "PcControlBotApp")
+
+
+
 
 
 

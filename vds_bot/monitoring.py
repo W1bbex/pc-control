@@ -8,7 +8,10 @@ import os
 import time
 from pathlib import Path
 
-from history import TelemetryHistory
+try:
+    from .history import TelemetryHistory
+except ImportError:
+    from history import TelemetryHistory
 
 HISTORY_DB_PATH = Path(os.environ.get("TELEMETRY_HISTORY_DB_PATH", "/var/lib/pc-control-bot/telemetry_history.db"))
 
