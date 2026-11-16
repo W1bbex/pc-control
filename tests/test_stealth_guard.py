@@ -725,14 +725,28 @@ def test_minimize_all_windows_initializes_and_uninitializes_com():
     with patch("pythoncom.CoInitialize") as mock_init, \
          patch("pythoncom.CoUninitialize") as mock_uninit, \
          patch("win32com.client.Dispatch") as mock_dispatch, \
-         patch("time.sleep"):
+         patch("time.sleep") as mock_sleep:
         mock_shell = MagicMock()
         mock_dispatch.return_value = mock_shell
 
         StealthMixin.minimize_all_windows()
         assert mock_init.called
         assert mock_uninit.called
-        assert mock_shell.MinimizeAll.call_count == 3
+        assert mock_shell.MinimizeAll.call_count == 1
+        mock_sleep.assert_not_called()
+
+
+def test_minimize_all_windows_win_m_fallback_runs_once():
+    from desktop.stealth import StealthMixin
+
+    mock_pag = MagicMock()
+    with patch("pythoncom.CoInitialize", side_effect=RuntimeError("COM unavailable")), \
+         patch.dict(sys.modules, {"pyautogui": mock_pag}), \
+         patch("time.sleep") as mock_sleep:
+        StealthMixin.minimize_all_windows()
+
+    mock_pag.hotkey.assert_called_once_with("win", "m")
+    mock_sleep.assert_not_called()
 
 
 def test_wake_displays_reports_unknown_and_logs_warnings_when_both_methods_fail(caplog):
@@ -864,4 +878,55 @@ def test_stealth_guard_declares_setwindowpos_and_clipcursor_signatures():
     assert user32.SetWindowPos.restype == wintypes.BOOL
     assert hasattr(user32.ClipCursor, "argtypes")
     assert user32.ClipCursor.restype == wintypes.BOOL
+
+
+def test_system_telemetry_without_stealth_field_does_not_trigger_telemetry_diff(tmp_path):
+    from vds_bot.monitoring import MonitoringManager
+    from vds_bot.mqtt_dispatcher import MqttDispatcherMixin
+
+    dispatcher = MqttDispatcherMixin()
+    dispatcher.ui = MagicMock()
+    dispatcher.allowed_user_id = 12345
+    dispatcher.active_stealth_card = (12345, 777)
+    dispatcher.last_stealth_exit_ts = 0.0
+    dispatcher._is_user_in_telegram_on_pc = MagicMock(return_value=False)
+
+    monitoring = MonitoringManager(dispatcher.ui, MagicMock(), history_db_path=tmp_path / "telemetry.db")
+    dispatcher.monitoring = monitoring
+
+    # Desktop telemetry sets stealth_mode=True
+    dispatcher._on_mqtt_event("telemetry", {"agent_mode": "desktop", "stealth_mode": True})
+    assert monitoring.latest_telemetry["stealth_mode"] is True
+    assert dispatcher.active_stealth_card == (12345, 777)
+    dispatcher.ui.send_message.assert_not_called()
+
+    # System telemetry lacks stealth_mode and must NOT fire telemetry_diff exit
+    dispatcher._on_mqtt_event("telemetry", {"agent_mode": "system", "uptime_seconds": 100})
+    assert dispatcher.active_stealth_card == (12345, 777)
+    assert monitoring.latest_telemetry["stealth_mode"] is True
+    dispatcher.ui.send_message.assert_not_called()
+
+
+def test_desktop_telemetry_stealth_false_still_triggers_telemetry_diff(tmp_path):
+    from vds_bot.monitoring import MonitoringManager
+    from vds_bot.mqtt_dispatcher import MqttDispatcherMixin
+
+    dispatcher = MqttDispatcherMixin()
+    dispatcher.ui = MagicMock()
+    dispatcher.allowed_user_id = 12345
+    dispatcher.active_stealth_card = (12345, 777)
+    dispatcher.last_stealth_exit_ts = 0.0
+    dispatcher._is_user_in_telegram_on_pc = MagicMock(return_value=False)
+
+    monitoring = MonitoringManager(dispatcher.ui, MagicMock(), history_db_path=tmp_path / "telemetry.db")
+    dispatcher.monitoring = monitoring
+
+    dispatcher._on_mqtt_event("telemetry", {"agent_mode": "desktop", "stealth_mode": True})
+    dispatcher._on_mqtt_event("telemetry", {"agent_mode": "desktop", "stealth_mode": False})
+
+    assert dispatcher.active_stealth_card is None
+    assert monitoring.latest_telemetry["stealth_mode"] is False
+    assert dispatcher.ui.send_message.call_count == 2
+    assert "telemetry_diff" in dispatcher.ui.send_message.call_args_list[0][0][1]
+
 

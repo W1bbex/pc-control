@@ -29,7 +29,7 @@ class StealthMixin:
 
     @staticmethod
     def minimize_all_windows():
-        """Minimize every app window with safe retries for windows opening late."""
+        """Minimize every open app window in a single pass."""
         com_initialized = False
         try:
             import pythoncom
@@ -39,15 +39,7 @@ class StealthMixin:
             com_initialized = True
             shell = win32com.client.Dispatch("Shell.Application")
 
-            LOG.info("Minimizing windows (Pass 1/3)...")
-            shell.MinimizeAll()
-
-            time.sleep(2.0)
-            LOG.info("Minimizing windows (Pass 2/3)...")
-            shell.MinimizeAll()
-
-            time.sleep(2.0)
-            LOG.info("Minimizing windows (Pass 3/3)...")
+            LOG.info("Minimizing all windows...")
             shell.MinimizeAll()
         except Exception as error:
             LOG.warning("Shell minimize failed, using Win+M fallback: %s", error)
@@ -56,13 +48,7 @@ class StealthMixin:
             prev_failsafe = getattr(pyautogui, "FAILSAFE", True)
             try:
                 pyautogui.FAILSAFE = False
-                LOG.info("Minimizing windows via Win+M fallback (Pass 1)...")
-                pyautogui.hotkey("win", "m")
-                time.sleep(2.0)
-                LOG.info("Minimizing windows via Win+M fallback (Pass 2)...")
-                pyautogui.hotkey("win", "m")
-                time.sleep(2.0)
-                LOG.info("Minimizing windows via Win+M fallback (Pass 3)...")
+                LOG.info("Minimizing windows via Win+M fallback...")
                 pyautogui.hotkey("win", "m")
             finally:
                 pyautogui.FAILSAFE = prev_failsafe
@@ -70,7 +56,7 @@ class StealthMixin:
             shell = None
             if com_initialized:
                 pythoncom.CoUninitialize()
-        LOG.info("Minimized all windows after workspace launch (completed 3 passes)")
+        LOG.info("Minimized all windows after workspace launch")
 
     @staticmethod
     def _send_monitor_command(lparam_val: int, timeout_ms: int = 2000) -> bool:
@@ -187,6 +173,10 @@ class StealthMixin:
                         self._stealth_is_active = False
                         self._prev_mute_state = None
 
+            if hasattr(self, "_get_state_lock") and isinstance(getattr(self, "last_telemetry", None), dict):
+                with self._get_state_lock():
+                    self.last_telemetry["stealth_mode"] = bool(activated)
+
             if not activated:
                 return {"stealth": "failed", "active": False, "error": "Failed to activate stealth mode"}
 
@@ -201,6 +191,9 @@ class StealthMixin:
             return {"stealth": "active", "active": True}
 
         self.stealth_mgr.deactivate()
+        if hasattr(self, "_get_state_lock") and isinstance(getattr(self, "last_telemetry", None), dict):
+            with self._get_state_lock():
+                self.last_telemetry["stealth_mode"] = False
 
         if self.stealth_mgr.mute_audio and prev_mute_snapshot is not None:
             try:

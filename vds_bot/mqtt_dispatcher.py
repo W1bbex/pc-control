@@ -98,11 +98,16 @@ class MqttDispatcherMixin:
 
         elif event_type == "telemetry":
             prev_stealth = bool(self.monitoring.latest_telemetry.get("stealth_mode")) if self.monitoring.latest_telemetry else False
-            new_stealth = bool(data.get("stealth_mode")) if isinstance(data, dict) else False
+            has_desktop_stealth = (
+                isinstance(data, dict)
+                and data.get("agent_mode", "desktop") == "desktop"
+                and "stealth_mode" in data
+            )
+            new_stealth = bool(data.get("stealth_mode")) if has_desktop_stealth else prev_stealth
             alerts = self.monitoring.process_telemetry(data)
             for alert_text in alerts:
                 self.ui.send_message(self.allowed_user_id, alert_text)
-            if prev_stealth and not new_stealth and getattr(self, "active_stealth_card", None):
+            if has_desktop_stealth and prev_stealth and not new_stealth and getattr(self, "active_stealth_card", None):
                 if time.time() - getattr(self, "last_stealth_exit_ts", 0.0) > 5.0:
                     self.on_stealth_exit({"reason": "telemetry_diff"})
             now = time.time()
