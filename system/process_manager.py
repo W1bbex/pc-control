@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import subprocess
 from pathlib import Path
@@ -59,6 +60,11 @@ class ProcessManagerMixin:
             target_ip = os.getenv("API_HOSTS_IP", self.config.get("api_hosts_ip", "")).strip()
             if not target_ip:
                 return
+            try:
+                target_ip = str(ipaddress.ip_address(target_ip))
+            except ValueError:
+                LOG.warning("Ignoring invalid API_HOSTS_IP value: %r", target_ip)
+                return
             sys_root = os.environ.get("SystemRoot", r"C:\Windows")
             hosts_path = Path(sys_root) / "System32" / "drivers" / "etc" / "hosts"
             if not hosts_path.exists():
@@ -70,7 +76,7 @@ class ProcessManagerMixin:
                 or os.getenv("MQTT_HOST")
                 or self.config.get("mqtt", {}).get("host", "")
             ).strip()
-            if not target_domain or target_domain == "mqtt.example.com":
+            if not target_domain or target_domain == "mqtt.example.com" or any(ch.isspace() for ch in target_domain):
                 return
 
             lines = content.splitlines()

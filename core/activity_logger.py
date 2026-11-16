@@ -151,20 +151,29 @@ class ActivityTracker:
     def _processes(self, previous=None):
         result = {}
         previous = previous or {}
-        for process in psutil.process_iter(["pid", "name"]):
+        for process in psutil.process_iter(["pid", "name", "create_time"]):
             try:
                 item = process.info
-                cached = previous.get(int(item["pid"]))
-                if cached is not None and cached.name == (item.get("name") or "unknown"):
+                pid = int(item["pid"])
+                proc_name = item.get("name") or "unknown"
+                create_time = item.get("create_time")
+                cached = previous.get(pid)
+                if (
+                    cached is not None
+                    and cached.name == proc_name
+                    and cached.create_time is not None
+                    and create_time is not None
+                    and cached.create_time == create_time
+                ):
                     result[cached.pid] = cached
                     continue
                 details = process.as_dict(attrs=["ppid", "exe", "create_time"])
                 info = ProcessInfo(
-                    pid=int(item["pid"]),
+                    pid=pid,
                     ppid=details.get("ppid"),
-                    name=item.get("name") or "unknown",
+                    name=proc_name,
                     exe=details.get("exe") if self.include_process_paths else None,
-                    create_time=details.get("create_time"),
+                    create_time=details.get("create_time") if details.get("create_time") is not None else create_time,
                 )
                 result[info.pid] = info
             except (psutil.Error, OSError, TypeError, ValueError):
@@ -300,7 +309,8 @@ class ActivityTracker:
                                 "process_start", **self._process_fields(info)
                             )
                     for pid, info in known.items():
-                        if pid not in current:
+                        cur = current.get(pid)
+                        if cur is None or cur.create_time != info.create_time:
                             fields = self._process_fields(info)
                             if info.create_time:
                                 fields["lifetime_seconds"] = max(

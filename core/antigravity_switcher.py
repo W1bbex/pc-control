@@ -523,9 +523,15 @@ class AntigravityAccountManager:
             except Exception:
                 pass
 
+        storage_backup = None
+        vscdb_backup = None
+        storage_modified = False
+        vscdb_modified = False
+
         if storage_path and storage_path.exists():
             # Backup
-            shutil.copy2(storage_path, storage_path.with_suffix(".json.backup"))
+            storage_backup = storage_path.with_suffix(".json.backup")
+            shutil.copy2(storage_path, storage_backup)
             try:
                 storage_data = json.loads(storage_path.read_text(encoding="utf-8"))
             except Exception:
@@ -544,108 +550,124 @@ class AntigravityAccountManager:
             tmp_storage = storage_path.with_name(f".{storage_path.name}.tmp")
             tmp_storage.write_text(json.dumps(storage_data, indent=2), encoding="utf-8")
             tmp_storage.replace(storage_path)
+            storage_modified = True
             LOG.info("Updated device fingerprint in %s", storage_path)
 
-        # 5. Inject tokens and auth into state.vscdb
-        if vscdb_path and vscdb_path.exists():
-            # Backup
-            shutil.copy2(vscdb_path, vscdb_path.with_suffix(".vscdb.backup"))
-            state_conn = sqlite3.connect(str(vscdb_path), timeout=5.0)
-            try:
-                s_cur = state_conn.cursor()
+        try:
+            # 5. Inject tokens and auth into state.vscdb
+            if vscdb_path and vscdb_path.exists():
+                # Backup
+                vscdb_backup = vscdb_path.with_suffix(".vscdb.backup")
+                shutil.copy2(vscdb_path, vscdb_backup)
+                state_conn = sqlite3.connect(str(vscdb_path), timeout=5.0)
+                try:
+                    s_cur = state_conn.cursor()
 
-                # A. antigravityAuthStatus
-                auth_status = json.dumps({
-                    "name": account_row.get("name") or email.split("@")[0],
-                    "email": email,
-                    "apiKey": access_token,
-                })
-                s_cur.execute(
-                    "INSERT INTO ItemTable (key, value) VALUES ('antigravityAuthStatus', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (auth_status,),
-                )
-                s_cur.execute(
-                    "INSERT INTO ItemTable (key, value) VALUES ('antigravityOnboarding', 'true') "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-                )
-
-                # B. storage.serviceMachineId
-                if dev_profile.get("devDeviceId"):
+                    # A. antigravityAuthStatus
+                    auth_status = json.dumps({
+                        "name": account_row.get("name") or email.split("@")[0],
+                        "email": email,
+                        "apiKey": access_token,
+                    })
                     s_cur.execute(
-                        "INSERT INTO ItemTable (key, value) VALUES ('storage.serviceMachineId', ?) "
+                        "INSERT INTO ItemTable (key, value) VALUES ('antigravityAuthStatus', ?) "
                         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (dev_profile["devDeviceId"],),
+                        (auth_status,),
+                    )
+                    s_cur.execute(
+                        "INSERT INTO ItemTable (key, value) VALUES ('antigravityOnboarding', 'true') "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
                     )
 
-                # C. antigravityUnifiedStateSync.userStatus
-                user_status_payload = self.proto.create_minimal_user_status_payload(email)
-                user_status_entry = self.proto.create_unified_state_entry("userStatusSentinelKey", user_status_payload)
-                s_cur.execute(
-                    "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.userStatus', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (user_status_entry,),
-                )
-
-                # D. antigravityUnifiedStateSync.oauthToken
-                oauth_payload = self.proto.create_oauth_info(
-                    access_token=access_token,
-                    refresh_token=refresh_token,
-                    expiry_timestamp=expiry,
-                    is_gcp_tos=False,
-                    id_token=id_token,
-                    email=email,
-                )
-                existing_oauth_row = s_cur.execute(
-                    "SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.oauthToken'"
-                ).fetchone()
-
-                if existing_oauth_row and existing_oauth_row[0]:
-                    try:
-                        existing_bytes = base64.b64decode(existing_oauth_row[0])
-                        merged = self.proto.replace_unified_topic_entry(
-                            existing_bytes, "oauthTokenInfoSentinelKey", oauth_payload
+                    # B. storage.serviceMachineId
+                    if dev_profile.get("devDeviceId"):
+                        s_cur.execute(
+                            "INSERT INTO ItemTable (key, value) VALUES ('storage.serviceMachineId', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            (dev_profile["devDeviceId"],),
                         )
-                        oauth_val = base64.b64encode(merged).decode("ascii")
-                    except Exception as e:
-                        LOG.warning("Failed to merge unified oauth state; creating new: %s", e)
+
+                    # C. antigravityUnifiedStateSync.userStatus
+                    user_status_payload = self.proto.create_minimal_user_status_payload(email)
+                    user_status_entry = self.proto.create_unified_state_entry("userStatusSentinelKey", user_status_payload)
+                    s_cur.execute(
+                        "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.userStatus', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (user_status_entry,),
+                    )
+
+                    # D. antigravityUnifiedStateSync.oauthToken
+                    oauth_payload = self.proto.create_oauth_info(
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        expiry_timestamp=expiry,
+                        is_gcp_tos=False,
+                        id_token=id_token,
+                        email=email,
+                    )
+                    existing_oauth_row = s_cur.execute(
+                        "SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.oauthToken'"
+                    ).fetchone()
+
+                    if existing_oauth_row and existing_oauth_row[0]:
+                        try:
+                            existing_bytes = base64.b64decode(existing_oauth_row[0])
+                            merged = self.proto.replace_unified_topic_entry(
+                                existing_bytes, "oauthTokenInfoSentinelKey", oauth_payload
+                            )
+                            oauth_val = base64.b64encode(merged).decode("ascii")
+                        except Exception as e:
+                            LOG.warning("Failed to merge unified oauth state; creating new: %s", e)
+                            oauth_val = self.proto.create_unified_state_entry("oauthTokenInfoSentinelKey", oauth_payload)
+                    else:
                         oauth_val = self.proto.create_unified_state_entry("oauthTokenInfoSentinelKey", oauth_payload)
-                else:
-                    oauth_val = self.proto.create_unified_state_entry("oauthTokenInfoSentinelKey", oauth_payload)
 
-                s_cur.execute(
-                    "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.oauthToken', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (oauth_val,),
+                    s_cur.execute(
+                        "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.oauthToken', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (oauth_val,),
+                    )
+
+                    # E. Cleanup old key
+                    s_cur.execute("DELETE FROM ItemTable WHERE key = 'jetskiStateSync.agentManagerInitState'")
+
+                    state_conn.commit()
+                    vscdb_modified = True
+                    LOG.info("Successfully injected OAuth tokens and auth status into state.vscdb")
+                finally:
+                    state_conn.close()
+
+            # 6. Update cloud_accounts.db (mark active)
+            now_ts = int(time.time())
+            db_conn = sqlite3.connect(str(db_path))
+            try:
+                db_conn.execute("UPDATE accounts SET is_active = 0")
+                db_conn.execute(
+                    "UPDATE accounts SET is_active = 1, last_used = ? WHERE id = ?",
+                    (now_ts, account_id),
                 )
-
-                # E. Cleanup old key
-                s_cur.execute("DELETE FROM ItemTable WHERE key = 'jetskiStateSync.agentManagerInitState'")
-
-                state_conn.commit()
-                LOG.info("Successfully injected OAuth tokens and auth status into state.vscdb")
+                # Update settings table
+                db_conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('active_cloud_account.classic', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (json.dumps(account_id),),
+                )
+                db_conn.commit()
+                LOG.info("Updated cloud_accounts.db active state")
             finally:
-                state_conn.close()
-
-        # 6. Update cloud_accounts.db (mark active)
-        now_ts = int(time.time())
-        db_conn = sqlite3.connect(str(db_path))
-        try:
-            db_conn.execute("UPDATE accounts SET is_active = 0")
-            db_conn.execute(
-                "UPDATE accounts SET is_active = 1, last_used = ? WHERE id = ?",
-                (now_ts, account_id),
-            )
-            # Update settings table
-            db_conn.execute(
-                "INSERT INTO settings (key, value) VALUES ('active_cloud_account.classic', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (json.dumps(account_id),),
-            )
-            db_conn.commit()
-            LOG.info("Updated cloud_accounts.db active state")
-        finally:
-            db_conn.close()
+                db_conn.close()
+        except Exception:
+            if vscdb_modified and vscdb_backup and vscdb_backup.exists() and vscdb_path:
+                try:
+                    shutil.copy2(vscdb_backup, vscdb_path)
+                except Exception:
+                    LOG.exception("Failed restoring state.vscdb backup during rollback")
+            if storage_modified and storage_backup and storage_backup.exists() and storage_path:
+                try:
+                    shutil.copy2(storage_backup, storage_path)
+                except Exception:
+                    LOG.exception("Failed restoring storage.json backup during rollback")
+            raise
 
         # 7. Relaunch IDE only if requested and it was already running
         restarted = False
@@ -716,7 +738,17 @@ class AntigravityAccountManager:
 
         if dest_path:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-            dest_path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp_dest = dest_path.with_name(f".{dest_path.name}.tmp")
+            tmp_dest.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                os.chmod(tmp_dest, 0o600)
+            except OSError:
+                pass
+            tmp_dest.replace(dest_path)
+            try:
+                os.chmod(dest_path, 0o600)
+            except OSError:
+                pass
             LOG.info("Exported %d accounts to %s", len(accounts_export), dest_path)
 
         return bundle
@@ -732,14 +764,8 @@ class AntigravityAccountManager:
         if not accounts:
             return 0
 
-        # If bundle has master_key_hex, ensure our crypto uses it
-        if bundle.get("master_key_hex"):
-            self.crypto = AntigravityCrypto(bundle["master_key_hex"])
-            # Save portable key file on non-Windows
-            if sys.platform != "win32":
-                p_key = Path.home() / ".antigravity-agent" / "master_key.hex"
-                p_key.parent.mkdir(parents=True, exist_ok=True)
-                p_key.write_text(bundle["master_key_hex"], encoding="utf-8")
+        master_key_hex = bundle.get("master_key_hex")
+        target_crypto = AntigravityCrypto(master_key_hex) if master_key_hex else self.crypto
 
         db_path = self.get_cloud_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -774,13 +800,13 @@ class AntigravityAccountManager:
             """)
 
             for a in accounts:
-                # Re-encrypt tokens with current key if needed
+                # Re-encrypt tokens with target key before updating instance state
                 token_json = a.get("token_json")
                 if a.get("token_decrypted"):
-                    token_json = self.crypto.encrypt_payload(a["token_decrypted"])
+                    token_json = target_crypto.encrypt_payload(a["token_decrypted"])
                 quota_json = a.get("quota_json")
                 if a.get("quota_decrypted"):
-                    quota_json = self.crypto.encrypt_payload(a["quota_decrypted"])
+                    quota_json = target_crypto.encrypt_payload(a["quota_decrypted"])
 
                 conn.execute("""
                     INSERT INTO accounts (
@@ -806,6 +832,23 @@ class AntigravityAccountManager:
             conn.commit()
         finally:
             conn.close()
+
+        if master_key_hex:
+            if sys.platform != "win32":
+                p_key = Path.home() / ".antigravity-agent" / "master_key.hex"
+                p_key.parent.mkdir(parents=True, exist_ok=True)
+                tmp_key = p_key.with_name(f".{p_key.name}.tmp")
+                tmp_key.write_text(master_key_hex, encoding="utf-8")
+                try:
+                    os.chmod(tmp_key, 0o600)
+                except OSError:
+                    pass
+                tmp_key.replace(p_key)
+                try:
+                    os.chmod(p_key, 0o600)
+                except OSError:
+                    pass
+            self.crypto = target_crypto
 
         LOG.info("Imported %d accounts into %s", imported_count, db_path)
         return imported_count

@@ -471,3 +471,229 @@ def test_windows_helpers_newest_snapshot_codex_v3_boot_retry_and_activity_db(tmp
         with pytest.raises(sqlite3.OperationalError):
             db.record_session("app.exe", "title", "C:\\app.exe", 1_700_000_000.0, 1_700_000_100.0)
     db.close()
+
+
+def test_duplicate_ignored_ack_preserves_pending_state(tmp_path):
+    from types import SimpleNamespace
+    from vds_bot.mqtt_dispatcher import MqttDispatcherMixin
+    from vds_bot.mqtt_gateway import MqttGateway
+    from vds_bot.physical_button import PhysicalButtonManager
+    from vds_bot.power_flow import PowerFlowManager, PowerFlowStage
+
+    gw = MqttGateway.__new__(MqttGateway)
+    gw.pending_lock = threading.Lock()
+    gw.pending_commands = {"cmd-dup": {"action": "shutdown", "expires": 9999999999}}
+    gw._handle_ack({"id": "cmd-dup", "result": "duplicate_ignored"})
+    assert "cmd-dup" in gw.pending_commands
+    gw._handle_ack({"id": "cmd-dup", "result": "executed"})
+    assert "cmd-dup" not in gw.pending_commands
+
+    class DummyApp(MqttDispatcherMixin):
+        def __init__(self):
+            self.allowed_user_id = 42
+            self.ui = MagicMock()
+            self.mqtt = MagicMock()
+            self.monitoring = MagicMock()
+            self.power_flow = PowerFlowManager(self.ui, self.mqtt)
+            self.physical_btn = PhysicalButtonManager(self.ui, self.mqtt)
+            self.pending_shutdown_cmd_id = "cmd-shut"
+            self.pending_shutdown_started_at = time.time()
+            self.shutdown_acknowledged = False
+            self.state_lock = threading.RLock()
+            self.save_state = MagicMock()
+            self._clear_pending_shutdown = MagicMock()
+
+        def _power_menu_markup(self):
+            return None
+
+    app = DummyApp()
+    app.power_flow.stage = PowerFlowStage.UNLOCKING
+    app.power_flow.pending_unlock_command_id = "cmd-unl"
+    app.physical_btn.pending_command_id = "cmd-esp"
+
+    app._on_mqtt_event("ack", {"id": "cmd-shut", "result": "duplicate_ignored"})
+    assert app.pending_shutdown_cmd_id == "cmd-shut"
+    app._clear_pending_shutdown.assert_not_called()
+    app.ui.send_message.assert_not_called()
+
+    app.power_flow.handle_ack({"id": "cmd-unl", "result": "duplicate_ignored"})
+    assert app.power_flow.pending_unlock_command_id == "cmd-unl"
+
+    app.physical_btn.handle_ack({"id": "cmd-esp", "result": "duplicate_ignored"}, 42)
+    assert app.physical_btn.pending_command_id == "cmd-esp"
+
+
+def test_power_flow_and_physical_button_concurrency_and_timeout_helpers():
+    from vds_bot.physical_button import PhysicalButtonManager
+    from vds_bot.power_flow import PowerFlowManager, PowerFlowStage
+
+    ui = MagicMock()
+    mqtt = MagicMock()
+    pf = PowerFlowManager(ui, mqtt)
+    pf.stage = PowerFlowStage.UNLOCKING
+    pf.pending_unlock_command_id = "cmd-timeout"
+    pf.chat_id = 123
+
+    lock_held_during_callback = []
+    pf.on_unlock_failed = lambda cid, reason: lock_held_during_callback.append(pf._lock.locked())
+    pf.handle_unlock_timeout("cmd-timeout", 999)
+    assert pf.pending_unlock_command_id is None
+    assert lock_held_during_callback == [False]
+
+    btn = PhysicalButtonManager(MagicMock(), MagicMock())
+    btn.physical_morse_unlock_eligible = True
+    btn.last_physical_morse_success_at = time.time()
+    triggered = []
+    barrier = threading.Barrier(4)
+    btn.on_trigger_unlock_cb = lambda cid: triggered.append(cid)
+
+    def worker():
+        barrier.wait(timeout=5)
+        btn._handle_unlock_gesture_triggered(42)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    assert len(triggered) == 1
+
+
+def test_bot_lock_access_denied_and_poll_updates_429_409(tmp_path, monkeypatch):
+    import psutil
+    import vds_bot.bot as bot_mod
+    from vds_bot.bot import PcControlBotApp
+
+    lock_file = tmp_path / "bot.lock"
+    lock_file.write_text("424242", encoding="utf-8")
+    monkeypatch.setattr(bot_mod, "LOCK_PATH", lock_file)
+
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    with patch("psutil.pid_exists", return_value=True), \
+         patch("psutil.Process", side_effect=psutil.AccessDenied(424242)):
+        with pytest.raises(SystemExit):
+            app._acquire_lock()
+    assert lock_file.read_text(encoding="utf-8") == "424242"
+
+    app.offset = 0
+    app.ui = MagicMock()
+    app.ui.sanitize_error = str
+    app.polling_session = MagicMock()
+
+    resp_429 = MagicMock(status_code=429)
+    resp_429.json.return_value = {"parameters": {"retry_after": 7}}
+    app.polling_session.post.return_value = resp_429
+    sleeps = []
+    with patch("vds_bot.bot.time.sleep", side_effect=sleeps.append):
+        app.poll_updates()
+    assert sleeps == [7.0]
+
+    resp_409 = MagicMock(status_code=409)
+    app.polling_session.post.return_value = resp_409
+    sleeps.clear()
+    with patch("vds_bot.bot.time.sleep", side_effect=sleeps.append):
+        app.poll_updates()
+    assert sleeps == [5]
+
+
+def test_activity_tracker_detects_same_name_pid_reuse(tmp_path):
+    from core.activity_logger import ActivityTracker, ProcessInfo
+
+    tracker = ActivityTracker(config={}, log_dir=tmp_path, stop_event=threading.Event())
+    previous = {
+        777: ProcessInfo(pid=777, ppid=10, name="chrome.exe", exe=None, create_time=1000.0),
+    }
+
+    fake_proc = MagicMock()
+    fake_proc.info = {"pid": 777, "name": "chrome.exe", "create_time": 2000.0}
+    fake_proc.as_dict.return_value = {"ppid": 20, "exe": None, "create_time": 2000.0}
+
+    with patch("core.activity_logger.psutil.process_iter", return_value=[fake_proc]):
+        current = tracker._processes(previous)
+
+    assert current[777].create_time == 2000.0
+    assert current[777].ppid == 20
+
+
+def test_antigravity_switcher_rollback_and_import_atomicity(tmp_path, monkeypatch):
+    import json
+    from core.antigravity_crypto import AntigravityCrypto
+    from core.antigravity_switcher import AntigravityAccountManager
+
+    original_crypto = AntigravityCrypto("00" * 32)
+    switcher = AntigravityAccountManager(crypto=original_crypto)
+
+    storage_path = tmp_path / "storage.json"
+    storage_path.write_text('{"telemetry.machineId": "old-id"}', encoding="utf-8")
+    vscdb_path = tmp_path / "state.vscdb"
+    conn = sqlite3.connect(str(vscdb_path))
+    conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO ItemTable (key, value) VALUES ('antigravityAuthStatus', 'old-auth')")
+    conn.commit()
+    conn.close()
+
+    cloud_db_path = tmp_path / "cloud_accounts.db"
+    c_conn = sqlite3.connect(str(cloud_db_path))
+    c_conn.execute("CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT, name TEXT, token_json TEXT, device_profile_json TEXT, is_active INTEGER, last_used INTEGER)")
+    c_conn.execute(
+        "INSERT INTO accounts (id, email, name, token_json, device_profile_json, is_active, last_used) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("acc-1", "user@example.com", "User", "{}", json.dumps({"profile": {"machineId": "new-id"}}), 0, 0),
+    )
+    c_conn.commit()
+    c_conn.close()
+
+    monkeypatch.setattr(switcher, "get_cloud_db_path", lambda: cloud_db_path)
+    monkeypatch.setattr(switcher, "get_ide_state_paths", lambda: (vscdb_path, storage_path))
+    monkeypatch.setattr(switcher, "refresh_token_if_needed", lambda row: {
+        "access_token": "tok",
+        "refresh_token": "ref",
+        "expiry_timestamp": int(time.time()) + 3600,
+    })
+    monkeypatch.setattr(switcher, "is_ide_running", lambda: False)
+
+    real_connect = sqlite3.connect
+    cloud_connects = [0]
+
+    def failing_connect(path, *args, **kwargs):
+        if Path(path) == cloud_db_path:
+            cloud_connects[0] += 1
+            if cloud_connects[0] >= 2:
+                raise sqlite3.OperationalError("simulated db failure")
+        return real_connect(path, *args, **kwargs)
+
+    with patch("core.antigravity_switcher.sqlite3.connect", side_effect=failing_connect):
+        with pytest.raises(sqlite3.OperationalError):
+            switcher.switch_account("acc-1")
+
+    assert json.loads(storage_path.read_text(encoding="utf-8"))["telemetry.machineId"] == "old-id"
+    check_conn = sqlite3.connect(str(vscdb_path))
+    val = check_conn.execute("SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus'").fetchone()[0]
+    check_conn.close()
+    assert val == "old-auth"
+
+    bad_bundle = {
+        "master_key_hex": AntigravityCrypto("11" * 32).get_master_key().hex(),
+        "accounts": [{"id": "a1", "email": "e@example.com"}],
+    }
+    with patch("core.antigravity_switcher.sqlite3.connect", side_effect=sqlite3.OperationalError("write failed")):
+        with pytest.raises(sqlite3.OperationalError):
+            switcher.import_accounts(bad_bundle)
+    assert switcher.crypto is original_crypto
+
+
+def test_process_manager_rejects_invalid_hosts_ip(tmp_path, monkeypatch):
+    from system.process_manager import ProcessManagerMixin
+
+    hosts_dir = tmp_path / "System32" / "drivers" / "etc"
+    hosts_dir.mkdir(parents=True)
+    hosts_file = hosts_dir / "hosts"
+    hosts_file.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    monkeypatch.setenv("API_HOSTS_IP", "127.0.0.1\nevil.com")
+    monkeypatch.setenv("API_HOSTS_DOMAIN", "mqtt.myhost.test")
+
+    pm = ProcessManagerMixin()
+    pm.config = {}
+    pm._ensure_hosts_mapping()
+    assert hosts_file.read_text(encoding="utf-8") == "127.0.0.1 localhost\n"
