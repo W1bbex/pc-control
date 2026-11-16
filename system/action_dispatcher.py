@@ -81,9 +81,6 @@ class ActionDispatcherMixin:
                     )
                 return
             if action == "shutdown":
-                self._turn_off_led_esp()
-                self.acknowledge(command_id, "executed")
-                time.sleep(1)
                 subprocess.Popen(
                     [
                         "shutdown.exe",
@@ -94,11 +91,10 @@ class ActionDispatcherMixin:
                         "PC CONTROL: remote system shutdown",
                     ]
                 )
-                return
-            if action == "restart":
                 self._turn_off_led_esp()
                 self.acknowledge(command_id, "executed")
-                time.sleep(1)
+                return
+            if action == "restart":
                 subprocess.Popen(
                     [
                         "shutdown.exe",
@@ -109,15 +105,19 @@ class ActionDispatcherMixin:
                         "PC CONTROL: remote system restart",
                     ]
                 )
+                self._turn_off_led_esp()
+                self.acknowledge(command_id, "executed")
                 return
             if action == "sleep":
                 self._turn_off_led_esp()
+                # Send ACK before SetSuspendState because sleep freezes the OS immediately.
                 self.acknowledge(command_id, "executed")
                 time.sleep(1)
                 ctypes.windll.powrprof.SetSuspendState(False, False, False)
                 return
             if action == "hibernate":
                 self._turn_off_led_esp()
+                # Send ACK before shutdown /h because hibernation tears down networking immediately.
                 self.acknowledge(command_id, "executed")
                 time.sleep(1)
                 subprocess.Popen(["shutdown.exe", "/h"])

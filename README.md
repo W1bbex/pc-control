@@ -7,7 +7,7 @@
 [![Version](https://img.shields.io/badge/Version-2.0-8B5CF6?style=for-the-badge)](./core/runtime_config.py)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Firmware](https://img.shields.io/badge/ESP8266-Bare--Metal%20C%2B%2B-00979D?style=for-the-badge&logo=espressif&logoColor=white)](./hardware/esp8266/pc_remote_mqtt/pc_remote_mqtt.ino)
-[![Tests](https://img.shields.io/badge/tests-608%20passed-22C55E?style=for-the-badge)](#-тестирование)
+[![Tests](https://img.shields.io/badge/tests-616%20passed-22C55E?style=for-the-badge)](#-тестирование)
 [![Docs](https://img.shields.io/badge/Обзор%20проекта-w1bbex.ru-0F172A?style=for-the-badge)](https://w1bbex.ru/ru/pc-control/)
 
 </div>
@@ -76,7 +76,7 @@ pc-control/
 │   └── sensors/                  # Сборщик телеметрии (.NET + LibreHardwareMonitorLib)
 ├── scripts/                      # Скрипты установки служб, ввода Winlogon и VDS-деплоя
 ├── resources/                    # Маппинг кастомных эмодзи и ресурсов UI
-└── tests/                        # Набор из 608 модульных и интеграционных тестов (pytest)
+└── tests/                        # Набор из 616 модульных и интеграционных тестов (pytest)
 ```
 
 ---
@@ -134,7 +134,7 @@ pc-control/
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-- Суммарный набор: **608** автоматических тестов (FSM питания, `health_engine`, протоколы агентов, WTS/Win32-адаптеры, маршрутизаторы Telegram UI, модель логики ESP8266 и регрессионные проверки).
+- Суммарный набор: **616** автоматических тестов (FSM питания, `health_engine`, протоколы агентов, WTS/Win32-адаптеры, маршрутизаторы Telegram UI, модель логики ESP8266 и регрессионные проверки).
 - Тесты запускаются с моками системных/сетевых вызовов; прошивка C++ и живой интерактивный вход на реальный `Winlogon` проверяются отдельно на целевом стенде.
 
 ---
@@ -143,4 +143,5 @@ pc-control/
 
 - Все каналы между ESP8266, Windows-агентами и брокером защищены TLS; физический ввод на кнопке защищён лимитом попыток с сохранением состояния блокировки в EEPROM.
 - Удалённая разблокировка **не отключает** стандартную аутентификацию Windows — используется настроенный пароль учётной записи, а скрипт ввода прерывается до нажатия `Enter` при невозможности корректного маппинга символов или отсутствии целевого стола `Winlogon`.
+- **Режим скрытности ([`core/stealth_guard.py`](./core/stealth_guard.py))** предназначен только для локальной киоск-блокировки ввода/экрана во время удалённой сессии владельца: отключён по умолчанию, не прописывается в автозагрузку реестра, поддерживает аварийный локальный выход (`5× Escape` за 2 секунды) и проверяет доступность сети (`check_network_connectivity`) для автоматического выхода при потере связи с брокером.
 - Репозиторий не содержит реальных токенов, паролей, ключей и приватных конфигураций: все файлы `.env`, `secrets.h`, `data/`, `logs/` и `*.db` исключены через [`.gitignore`](./.gitignore).

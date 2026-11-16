@@ -1969,6 +1969,97 @@ def test_import_vds_bot_package_clean_resolution():
     assert hasattr(vds_bot.bot, "PcControlBotApp")
 
 
+def test_desktop_and_system_power_ack_only_after_launch_succeeds():
+    """Verify shutdown, restart, and lock acknowledge failed rather than executed when launch fails."""
+    from desktop.action_dispatcher import ActionDispatcherMixin as DesktopDispatcher
+    from system.action_dispatcher import ActionDispatcherMixin as SystemDispatcher
+
+    d = DesktopDispatcher()
+    d.mqtt = MagicMock()
+    d.acknowledge = MagicMock()
+
+    with patch("desktop.action_dispatcher.subprocess.Popen", side_effect=OSError("missing shutdown.exe")):
+        d.execute_action("cmd-shut", "shutdown", {})
+    assert d.acknowledge.call_args[0][1] == "failed"
+
+    d.acknowledge.reset_mock()
+    with patch("desktop.action_dispatcher.ctypes.windll.user32.LockWorkStation", return_value=0):
+        d.execute_action("cmd-lock", "lock", {})
+    assert d.acknowledge.call_args[0][1] == "failed"
+
+    d.acknowledge.reset_mock()
+    call_order = []
+
+    def fake_popen(*args, **kwargs):
+        call_order.append("popen")
+        return MagicMock()
+
+    def fake_ack(*args, **kwargs):
+        call_order.append(("ack", args[1]))
+
+    d.acknowledge = fake_ack
+    with patch("desktop.action_dispatcher.subprocess.Popen", side_effect=fake_popen):
+        d.execute_action("cmd-rst-ok", "restart", {})
+    assert call_order == ["popen", ("ack", "executed")]
+
+    s = SystemDispatcher()
+    s.config = {}
+    s.acknowledge = MagicMock()
+    s._turn_off_led_esp = MagicMock()
+    with patch("system.action_dispatcher.subprocess.Popen", side_effect=OSError("spawn failed")):
+        s.execute_action("sys-shut", "shutdown", {})
+    assert s.acknowledge.call_args[0][1] == "failed"
+    s._turn_off_led_esp.assert_not_called()
+
+
+def test_agent_command_dispatch_uses_bounded_executors_and_queues():
+    """Verify desktop and system agents use bounded ThreadPoolExecutors and handle full queues."""
+    import concurrent.futures
+    import queue as py_queue
+    import agent as desktop_agent_mod
+    import boot_agent
+
+    d = desktop_agent_mod.PCControlAgent.__new__(desktop_agent_mod.PCControlAgent)
+    d.command_queue = py_queue.Queue(maxsize=1)
+    d.remember_command = MagicMock(return_value=True)
+    d.acknowledge = MagicMock()
+    d.execute_action = MagicMock()
+    d.media_manager = MagicMock()
+    d.mqtt = MagicMock()
+
+    fut_expire = int(time.time()) + 60
+    d.process_command({"id": "c1", "action": "telemetry", "expires": fut_expire, "args": {}})
+    d.process_command({"id": "c2", "action": "telemetry", "expires": fut_expire, "args": {}})
+    exec_desktop = d._get_action_executor()
+    assert isinstance(exec_desktop, concurrent.futures.ThreadPoolExecutor)
+    d._shutdown_action_executor()
+    assert d._action_executor is None
+
+    msg_cmd_1 = MagicMock(topic=desktop_agent_mod.TOPIC_COMMAND, payload=b'{"id":"q1"}')
+    msg_cmd_2 = MagicMock(topic=desktop_agent_mod.TOPIC_COMMAND, payload=b'{"id":"q2"}')
+    d.on_message(None, None, msg_cmd_1)
+    d.on_message(None, None, msg_cmd_2)
+    assert d.command_queue.qsize() == 1
+
+    msg_media = MagicMock(topic=desktop_agent_mod.TOPIC_MEDIA_COMMAND, payload=b'{"action":"play_pause"}')
+    d.on_message(None, None, msg_media)
+    assert isinstance(d._get_aux_executor(), concurrent.futures.ThreadPoolExecutor)
+    d._shutdown_aux_executor()
+
+    sa = boot_agent.SystemAgent.__new__(boot_agent.SystemAgent)
+    sa.command_queue = py_queue.Queue(maxsize=1)
+    sa.remember_command = MagicMock(return_value=True)
+    sa.acknowledge = MagicMock()
+    sa.execute_action = MagicMock()
+    sa.process_command({"id": "s1", "action": "telemetry", "expires": fut_expire, "args": {}})
+    assert isinstance(sa._get_action_executor(), concurrent.futures.ThreadPoolExecutor)
+    sa._shutdown_action_executor()
+
+    sa.on_message(None, None, MagicMock(payload=b'{"id":"sq1"}'))
+    sa.on_message(None, None, MagicMock(payload=b'{"id":"sq2"}'))
+    assert sa.command_queue.qsize() == 1
+
+
 
 
 

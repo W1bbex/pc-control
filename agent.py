@@ -4,6 +4,7 @@
 Thin modular coordinator delegating to desktop mixins and services.
 """
 
+import concurrent.futures
 import ctypes
 from ctypes import wintypes
 import json
@@ -194,7 +195,7 @@ class PCControlAgent(
                 self.stop_event,
                 on_foreground_change=self._on_foreground_change,
             )
-        self.command_queue = queue.Queue()
+        self.command_queue = queue.Queue(maxsize=100)
         self.state_lock = threading.Lock()
         self._incy_lock = threading.RLock()
         self._net_state_lock = threading.Lock()
@@ -374,6 +375,22 @@ class PCControlAgent(
         self.mqtt_online = False
         LOG.warning("MQTT disconnected: %s", reason_code)
 
+    def _get_aux_executor(self):
+        executor = getattr(self, "_aux_executor", None)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix="desktop-aux",
+            )
+            self._aux_executor = executor
+        return executor
+
+    def _shutdown_aux_executor(self):
+        executor = getattr(self, "_aux_executor", None)
+        if executor is not None:
+            self._aux_executor = None
+            executor.shutdown(wait=False, cancel_futures=True)
+
     def on_message(self, client, userdata, message):
         topic = message.topic
         payload_str = message.payload.decode("utf-8", errors="replace")
@@ -389,7 +406,7 @@ class PCControlAgent(
                 except Exception:
                     LOG.exception("Failed executing media command")
 
-            threading.Thread(target=_run_media_cmd, name="mqtt-media-cmd", daemon=True).start()
+            self._get_aux_executor().submit(_run_media_cmd)
             return
 
         if topic == TOPIC_ACTIVITY_QUERY:
@@ -419,7 +436,7 @@ class PCControlAgent(
                     except Exception:
                         pass
 
-            threading.Thread(target=_run_activity_query, name="mqtt-activity-query", daemon=True).start()
+            self._get_aux_executor().submit(_run_activity_query)
             return
 
         try:
@@ -428,7 +445,10 @@ class PCControlAgent(
             LOG.warning("Invalid command payload")
             return
 
-        self.command_queue.put(command)
+        try:
+            self.command_queue.put_nowait(command)
+        except queue.Full:
+            LOG.warning("Desktop command queue full; dropping command %s", command.get("id") if isinstance(command, dict) else None)
 
     def acknowledge(self, command_id, result, data=None):
         payload = {
@@ -645,6 +665,8 @@ class PCControlAgent(
         if not self.connect_with_retry():
             self.sensor_helper.stop()
             self.media_manager.stop()
+            self._shutdown_action_executor()
+            self._shutdown_aux_executor()
             if self.activity_tracker:
                 self.activity_tracker.stop()
             return
@@ -741,6 +763,8 @@ class PCControlAgent(
             except Exception:
                 pass
             self.media_manager.stop()
+            self._shutdown_action_executor()
+            self._shutdown_aux_executor()
             try:
                 self.mqtt.loop_stop()
             except Exception:

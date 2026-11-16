@@ -1,5 +1,6 @@
 """Action execution and command validation mixin for desktop agent."""
 
+import concurrent.futures
 import ctypes
 import logging
 import os
@@ -48,8 +49,9 @@ class ActionDispatcherMixin:
                 return
 
             if action == "lock":
+                if not ctypes.windll.user32.LockWorkStation():
+                    raise RuntimeError("LockWorkStation() returned 0")
                 self.acknowledge(command_id, "executed")
-                ctypes.windll.user32.LockWorkStation()
                 return
 
             if action == "sleep":
@@ -57,6 +59,7 @@ class ActionDispatcherMixin:
                     self.mqtt.publish("pc/main/command", f"LED_OFF|agent-sleep-{int(time.time())}|{int(time.time())+30}", qos=1)
                 except Exception:
                     pass
+                # Send ACK before SetSuspendState because sleep freezes the OS and drops TCP immediately.
                 self.acknowledge(command_id, "executed")
                 time.sleep(1)
                 ctypes.windll.powrprof.SetSuspendState(False, False, False)
@@ -67,18 +70,13 @@ class ActionDispatcherMixin:
                     self.mqtt.publish("pc/main/command", f"LED_OFF|agent-hib-{int(time.time())}|{int(time.time())+30}", qos=1)
                 except Exception:
                     pass
+                # Send ACK before shutdown /h because hibernation tears down network interfaces immediately.
                 self.acknowledge(command_id, "executed")
                 time.sleep(1)
                 subprocess.Popen(["shutdown.exe", "/h"])
                 return
 
             if action == "shutdown":
-                try:
-                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-shut-{int(time.time())}|{int(time.time())+30}", qos=1)
-                except Exception:
-                    pass
-                self.acknowledge(command_id, "executed")
-                time.sleep(1)
                 subprocess.Popen(
                     [
                         "shutdown.exe",
@@ -89,15 +87,14 @@ class ActionDispatcherMixin:
                         "PC CONTROL: удалённое выключение",
                     ]
                 )
-                return
-
-            if action == "restart":
                 try:
-                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-rst-{int(time.time())}|{int(time.time())+30}", qos=1)
+                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-shut-{int(time.time())}|{int(time.time())+30}", qos=1)
                 except Exception:
                     pass
                 self.acknowledge(command_id, "executed")
-                time.sleep(1)
+                return
+
+            if action == "restart":
                 subprocess.Popen(
                     [
                         "shutdown.exe",
@@ -108,6 +105,11 @@ class ActionDispatcherMixin:
                         "PC CONTROL: удалённая перезагрузка",
                     ]
                 )
+                try:
+                    self.mqtt.publish("pc/main/command", f"LED_OFF|agent-rst-{int(time.time())}|{int(time.time())+30}", qos=1)
+                except Exception:
+                    pass
+                self.acknowledge(command_id, "executed")
                 return
 
             if action == "launch_app":
@@ -319,6 +321,22 @@ class ActionDispatcherMixin:
             LOG.exception("Action failed: %s", action)
             self.acknowledge(command_id, "failed", {"error": str(error)})
 
+    def _get_action_executor(self):
+        executor = getattr(self, "_action_executor", None)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=8,
+                thread_name_prefix="desktop-action",
+            )
+            self._action_executor = executor
+        return executor
+
+    def _shutdown_action_executor(self):
+        executor = getattr(self, "_action_executor", None)
+        if executor is not None:
+            self._action_executor = None
+            executor.shutdown(wait=False, cancel_futures=True)
+
     def process_command(self, command):
         if not isinstance(command, dict):
             LOG.warning("Ignoring non-object command payload")
@@ -351,9 +369,4 @@ class ActionDispatcherMixin:
             return
 
         LOG.info("Executing action=%s id=%s", action, command_id)
-        threading.Thread(
-            target=self.execute_action,
-            args=(command_id, action, args),
-            name=f"action-{action}",
-            daemon=True,
-        ).start()
+        self._get_action_executor().submit(self.execute_action, command_id, action, args)

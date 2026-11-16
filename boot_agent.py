@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
 import ctypes
 from ctypes import wintypes
 import json
@@ -88,7 +89,7 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             sys.exit(1)
 
         self.stop_event = threading.Event()
-        self.command_queue = queue.Queue()
+        self.command_queue = queue.Queue(maxsize=100)
         self.mqtt_online = False
         self.state_lock = threading.Lock()
         self.unlock_lock = threading.Lock()
@@ -278,7 +279,10 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
         except Exception:
             LOG.warning("Invalid system command payload")
             return
-        self.command_queue.put(command)
+        try:
+            self.command_queue.put_nowait(command)
+        except queue.Full:
+            LOG.warning("System command queue full; dropping command %s", command.get("id") if isinstance(command, dict) else None)
 
     def acknowledge(self, command_id, result, data=None):
         payload = {
@@ -298,6 +302,22 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             )
         except Exception as e:
             LOG.warning("Failed to publish ACK for %s: %s", command_id, e)
+
+    def _get_action_executor(self):
+        executor = getattr(self, "_action_executor", None)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=6,
+                thread_name_prefix="system-action",
+            )
+            self._action_executor = executor
+        return executor
+
+    def _shutdown_action_executor(self):
+        executor = getattr(self, "_action_executor", None)
+        if executor is not None:
+            self._action_executor = None
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def process_command(self, command):
         if not isinstance(command, dict):
@@ -328,12 +348,7 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
             self.acknowledge(command_id, "duplicate_ignored")
             return
         LOG.info("Executing system action=%s id=%s", action, command_id)
-        threading.Thread(
-            target=self.execute_action,
-            args=(command_id, action, args),
-            name=f"system-action-{action}",
-            daemon=True,
-        ).start()
+        self._get_action_executor().submit(self.execute_action, command_id, action, args)
 
     def connect_with_retry(self, max_attempts=None, timeout_per_attempt=20):
         retry_delay = 1
@@ -475,6 +490,7 @@ class SystemAgent(HardwareMonitorMixin, ProcessManagerMixin, ActionDispatcherMix
                     LOG.exception("System agent loop iteration failed")
                     self.stop_event.wait(2)
         finally:
+            self._shutdown_action_executor()
             self._turn_off_led_esp()
             try:
                 status_payload = {

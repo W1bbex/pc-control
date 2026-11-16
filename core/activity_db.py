@@ -5,7 +5,7 @@ Stores window foreground sessions, durations, and app timestamps with high-perfo
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import sqlite3
@@ -164,40 +164,78 @@ class ActivityDB:
             ).fetchone()
             return dict(row) if row else None
 
+    @staticmethod
+    def _day_bounds_ts(date_str: str) -> Optional[tuple[float, float]]:
+        try:
+            naive_start = datetime.strptime(date_str.strip(), "%Y-%m-%d")
+        except (ValueError, AttributeError):
+            return None
+        day_start = naive_start.astimezone()
+        day_end = (naive_start + timedelta(days=1)).astimezone()
+        return day_start.timestamp(), day_end.timestamp()
+
     def get_day_summary(self, date_str: str) -> List[Dict[str, Any]]:
-        """Get aggregate usage per app for a specific day."""
+        """Get aggregate usage per app clipped to the bounds of a specific local day."""
+        bounds = self._day_bounds_ts(date_str)
+        if bounds is None:
+            return []
+        day_start_ts, day_end_ts = bounds
         with self._lock:
             conn = self._get_connection()
             rows = conn.execute(
                 """
-                SELECT 
+                SELECT
                     app_name,
-                    ROUND(SUM(duration_sec), 1) as total_duration,
+                    ROUND(SUM(MAX(0.0, MIN(ended_at, ?) - MAX(started_at, ?))), 1) as total_duration,
                     COUNT(*) as sessions_count,
                     COALESCE(MAX(CASE WHEN emoji_id != '' THEN emoji_id END), '') as emoji_id
                 FROM app_sessions
-                WHERE date_str = ?
+                WHERE ended_at > ? AND started_at < ?
                 GROUP BY app_name
+                HAVING total_duration > 0
                 ORDER BY total_duration DESC
                 """,
-                (date_str,)
+                (day_end_ts, day_start_ts, day_start_ts, day_end_ts)
             ).fetchall()
             return [dict(r) for r in rows]
 
     def get_day_timeline(self, date_str: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get chronological list of window switches on a specific day."""
+        """Get chronological list of window switches clipped to a specific local day."""
+        bounds = self._day_bounds_ts(date_str)
+        if bounds is None:
+            return []
+        day_start_ts, day_end_ts = bounds
         with self._lock:
             conn = self._get_connection()
             rows = conn.execute(
                 """
                 SELECT * FROM app_sessions
-                WHERE date_str = ?
-                ORDER BY started_at DESC
+                WHERE ended_at > ? AND started_at < ?
+                ORDER BY MAX(started_at, ?) DESC
                 LIMIT ?
                 """,
-                (date_str, limit)
+                (day_start_ts, day_end_ts, day_start_ts, limit)
             ).fetchall()
-            return [dict(r) for r in rows]
+
+        results: List[Dict[str, Any]] = []
+        for r in rows:
+            item = dict(r)
+            clipped_start = max(float(item["started_at"]), day_start_ts)
+            clipped_end = min(float(item["ended_at"]), day_end_ts)
+            if clipped_end <= clipped_start:
+                continue
+            if clipped_start != item["started_at"] or clipped_end != item["ended_at"]:
+                s_dt = datetime.fromtimestamp(clipped_start).astimezone()
+                e_dt = datetime.fromtimestamp(clipped_end).astimezone()
+                item["started_at"] = clipped_start
+                item["ended_at"] = clipped_end
+                item["duration_sec"] = round(clipped_end - clipped_start, 2)
+                item["started_iso"] = s_dt.isoformat(timespec="seconds")
+                item["ended_iso"] = e_dt.isoformat(timespec="seconds")
+                item["date_str"] = s_dt.strftime("%Y-%m-%d")
+                item["time_str"] = s_dt.strftime("%H:%M:%S")
+            results.append(item)
+        return results
 
 
 # Global singleton instance
