@@ -486,19 +486,27 @@ class UiTemplatesMixin(UiMarkupsMixin):
         quotas = active.get("models_quota", {})
         if quotas:
             lines.append("<b>Остаток квот активного аккаунта:</b>")
-            # Highlight key models
-            model_keys = [
-                ("gemini-3.1-pro-high", "Gemini 3.1 Pro"),
-                ("gemini-3.7-flash-high", "Gemini 3.7 Flash"),
-                ("gemini-3.5-flash-low", "Gemini 3.5 Flash"),
-                ("gemini-3.1-flash-lite", "Flash Lite"),
+            # Highlight key models (modern Antigravity families + legacy fallbacks)
+            model_groups = [
+                (("gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium"), "Gemini 4 Hydrogen"),
+                (("gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"), "Gemini 4 Argon"),
+                (("claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-4-6-thinking"), "Claude Opus"),
+                (("claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-4-6"), "Claude Sonnet"),
+                (("gemini-3.8-flash-high", "gemini-3.8-flash-medium"), "Gemini 3.8 Flash"),
+                (("gemini-3.1-pro-high",), "Gemini 3.1 Pro"),
+                (("gemini-3.7-flash-high",), "Gemini 3.7 Flash"),
+                (("gemini-3.5-flash-low",), "Gemini 3.5 Flash"),
+                (("gemini-3.1-flash-lite",), "Flash Lite"),
             ]
             items = []
-            for k, label in model_keys:
-                if k in quotas:
-                    raw_pct = quotas[k].get("percentage")
+            for keys, label in model_groups:
+                matched_key = next((k for k in keys if k in quotas), None)
+                if matched_key is not None:
+                    raw_pct = quotas[matched_key].get("percentage")
                     pct = 0 if raw_pct is None else raw_pct
                     items.append((label, pct))
+                if len(items) >= 4:
+                    break
             if not items:
                 # Fallback to any models
                 for k, v in list(quotas.items())[:4]:
@@ -515,6 +523,31 @@ class UiTemplatesMixin(UiMarkupsMixin):
                 lines.append(f"{prefix} {bar} {html.escape(str(m_label))}: <b>{html.escape(str(pct))}%</b>")
             lines.append("")
 
+        quota_groups = active.get("quota_groups") or []
+        if quota_groups:
+            group_lines = []
+            for grp in quota_groups:
+                if not isinstance(grp, dict):
+                    continue
+                g_name = str(grp.get("display_name") or "").strip()
+                buckets = [b for b in (grp.get("buckets") or []) if isinstance(b, dict) and b.get("percentage") is not None]
+                if not buckets:
+                    continue
+                bucket_parts = []
+                min_grp_pct = min(float(b["percentage"]) for b in buckets)
+                for b in buckets:
+                    win = str(b.get("window") or b.get("bucket_id") or "").strip()
+                    win_suffix = f" ({win})" if win else ""
+                    bucket_parts.append(f"<b>{html.escape(str(b['percentage']))}%</b>{html.escape(win_suffix)}")
+                bar = "🟩" if min_grp_pct >= 50 else ("🟨" if min_grp_pct > 15 else "🟥")
+                group_lines.append((bar, g_name or "Группа", " • ".join(bucket_parts)))
+            if group_lines:
+                lines.append("<b>Лимиты групп:</b>")
+                for i, (bar, g_name, b_text) in enumerate(group_lines):
+                    prefix = "└" if i == len(group_lines) - 1 else "├"
+                    lines.append(f"{prefix} {bar} {html.escape(g_name)}: {b_text}")
+                lines.append("")
+
         # Other available accounts summary
         others = [a for a in accounts if not a.get("is_active")]
         if others:
@@ -524,12 +557,14 @@ class UiTemplatesMixin(UiMarkupsMixin):
             for i, o in enumerate(shown_others):
                 is_last = (i == len(shown_others) - 1) and len(others) <= max_others
                 prefix = "└" if is_last else "├"
-                raw_email = o.get("email") or ""
-                raw_name = o.get("name")
-                o_name = raw_name or (raw_email.split("@")[0] if "@" in raw_email else "Без имени")
-                raw_opct = o.get("min_quota")
-                o_pct = 0 if raw_opct is None else raw_opct
-                lines.append(f"{prefix} 👤 {html.escape(str(o_name))}: <b>{html.escape(str(o_pct))}%</b> квоты")
+                o_name = self.format_antigravity_account_label(o, accounts)
+                if o.get("has_quota_data") is False:
+                    quota_str = "<b>н/д</b>"
+                else:
+                    raw_opct = o.get("min_quota")
+                    o_pct = 0 if raw_opct is None else raw_opct
+                    quota_str = f"<b>{html.escape(str(o_pct))}%</b> квоты"
+                lines.append(f"{prefix} 👤 {html.escape(str(o_name))}: {quota_str}")
             if len(others) > max_others:
                 lines.append(f"└ <i>...и ещё {len(others) - max_others}</i>")
             lines.append("")

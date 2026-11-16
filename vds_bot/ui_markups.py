@@ -660,6 +660,28 @@ class UiMarkupsMixin:
             ]
         }
 
+    @staticmethod
+    def format_antigravity_account_label(acc: dict, accounts: list) -> str:
+        """Return account display name, appending email local-part when names collide."""
+        raw_email = str(acc.get("email") or "").strip()
+        raw_name = str(acc.get("name") or "").strip()
+        base_name = raw_name or (raw_email.split("@")[0] if "@" in raw_email else "Без имени")
+
+        norm_target = base_name.casefold()
+        same_name_count = 0
+        for other in accounts or []:
+            o_email = str(other.get("email") or "").strip()
+            o_name = str(other.get("name") or "").strip() or (o_email.split("@")[0] if "@" in o_email else "Без имени")
+            if o_name.casefold() == norm_target:
+                same_name_count += 1
+
+        if same_name_count > 1 and raw_email:
+            local_part = raw_email.split("@")[0]
+            if local_part and local_part.casefold() != norm_target:
+                return f"{base_name} ({local_part})"
+            return f"{base_name} ({raw_email})"
+        return base_name
+
     def antigravity_card_markup(self, data: dict) -> dict:
         accounts = data.get("accounts", [])
         rows = []
@@ -675,10 +697,11 @@ class UiMarkupsMixin:
         for acc in visible_accounts:
             is_active = acc.get("is_active", False)
             acc_id = str(acc.get("id", ""))
-            raw_email = acc.get("email") or ""
-            name = acc.get("name") or raw_email.split("@")[0]
+            name = self.format_antigravity_account_label(acc, accounts)
+            has_quota = acc.get("has_quota_data", True)
             pct = acc.get("min_quota")
             pct = 0 if pct is None else pct
+            pct_label = f"{pct}%" if has_quota else "н/д"
 
             cb_data = f"ag_switch:{acc_id}"
             if len(cb_data.encode("utf-8")) > 64:
@@ -695,7 +718,7 @@ class UiMarkupsMixin:
                     btn["icon_custom_emoji_id"] = check_icon
             else:
                 btn = {
-                    "text": f"{name} ({pct}%)",
+                    "text": f"{name} ({pct_label})",
                     "style": "primary",
                     "callback_data": cb_data,
                 }

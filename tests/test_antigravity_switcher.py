@@ -530,3 +530,139 @@ def test_list_accounts_corrupt_or_empty_quota_not_ranked_as_100(temp_environment
     best = mgr.find_best_account()
     assert best is not None
     assert best["id"] == "acc_good"
+
+
+def test_list_accounts_parses_nested_models_and_quota_groups(temp_environment):
+    mgr = temp_environment["mgr"]
+    crypto = temp_environment["crypto"]
+    cloud_db = temp_environment["cloud_db"]
+
+    tok = crypto.encrypt_payload({"access_token": "at", "refresh_token": "rt", "expiry_timestamp": 1900000000})
+    nested_quota_low = crypto.encrypt_payload({
+        "models": {
+            "gemini-4-hydrogen-xhigh": {"percentage": 100, "resetTime": "2026-11-16T02:33:59Z", "display_name": "Gemini 4 Hydrogen (XHigh)"},
+            "gemini-4-argon-high": {"percentage": 96, "resetTime": "2026-11-21T12:41:44Z", "display_name": "Gemini 4 Argon (High)"},
+        },
+        "quota_groups": [
+            {
+                "display_name": "Gemini Models",
+                "buckets": [
+                    {"bucket_id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.43, "reset_time": "2026-11-21T09:53:13Z"},
+                    {"bucket_id": "gemini-5h", "window": "5h", "remaining_fraction": 1.0, "reset_time": "2026-11-16T02:34:00Z"},
+                ],
+            }
+        ],
+        "subscription_tier": "Google AI Pro",
+        "is_forbidden": False,
+    })
+    nested_quota_high = crypto.encrypt_payload({
+        "models": {
+            "gemini-4-hydrogen-xhigh": {"percentage": 100, "resetTime": "2026-11-16T02:34:05Z"},
+        },
+        "quota_groups": [
+            {
+                "display_name": "Gemini Models",
+                "buckets": [
+                    {"bucket_id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.86, "reset_time": "2026-11-22T01:25:46Z"},
+                ],
+            }
+        ],
+        "is_forbidden": False,
+    })
+    forbidden_quota = crypto.encrypt_payload({
+        "models": {"gemini-4-hydrogen-xhigh": {"percentage": 100}},
+        "is_forbidden": True,
+    })
+
+    conn = sqlite3.connect(str(cloud_db))
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, ?, '{}', 1000, 1000, 'active', 1)",
+        ("acc_low", "low@gmail.com", "LowWeekly", tok, nested_quota_low),
+    )
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, ?, '{}', 1000, 900, 'active', 0)",
+        ("acc_high", "high@gmail.com", "HighWeekly", tok, nested_quota_high),
+    )
+    conn.execute(
+        "INSERT INTO accounts (id, provider, email, name, token_json, quota_json, device_profile_json, created_at, last_used, status, is_active) "
+        "VALUES (?, 'google', ?, ?, ?, ?, '{}', 1000, 800, 'active', 0)",
+        ("acc_forb", "forb@gmail.com", "Forbidden", tok, forbidden_quota),
+    )
+    conn.commit()
+    conn.close()
+
+    accounts = {a["id"]: a for a in mgr.list_accounts()}
+    assert accounts["acc_low"]["has_quota_data"] is True
+    assert accounts["acc_low"]["min_quota"] == 43
+    assert accounts["acc_low"]["reset_time"] == "2026-11-16T02:33:59Z"
+    assert accounts["acc_low"]["models_quota"]["gemini-4-hydrogen-xhigh"]["percentage"] == 100
+    assert accounts["acc_low"]["subscription_tier"] == "Google AI Pro"
+    assert accounts["acc_high"]["min_quota"] == 86
+
+    best = mgr.find_best_account()
+    assert best is not None
+    assert best["id"] == "acc_high"
+
+
+def test_telegram_ui_disambiguates_duplicate_account_names_and_renders_groups():
+    ui = TelegramBotApi("mock_token")
+    accounts = [
+        {
+            "id": "a1",
+            "email": "active@gmail.com",
+            "name": "ActiveUser",
+            "is_active": True,
+            "min_quota": 43,
+            "has_quota_data": True,
+            "reset_time": "2026-11-16T02:33:59Z",
+            "models_quota": {
+                "gemini-4-hydrogen-xhigh": {"percentage": 100},
+                "gemini-4-argon-high": {"percentage": 96},
+            },
+            "quota_groups": [
+                {
+                    "display_name": "Gemini Models",
+                    "buckets": [
+                        {"bucket_id": "gemini-weekly", "window": "weekly", "percentage": 43},
+                        {"bucket_id": "gemini-5h", "window": "5h", "percentage": 100},
+                    ],
+                }
+            ],
+        },
+        {
+            "id": "a2",
+            "email": "w1bbex69@gmail.com",
+            "name": "W1bbex",
+            "is_active": False,
+            "min_quota": 58,
+            "has_quota_data": True,
+            "models_quota": {},
+        },
+        {
+            "id": "a3",
+            "email": "w1bbex52@gmail.com",
+            "name": "W1bbex",
+            "is_active": False,
+            "min_quota": 86,
+            "has_quota_data": True,
+            "models_quota": {},
+        },
+    ]
+    data = {"accounts": accounts, "active": accounts[0], "is_running": True}
+
+    text = ui.antigravity_card_text(data)
+    assert "Gemini 4 Hydrogen" in text
+    assert "Gemini 4 Argon" in text
+    assert "Лимиты групп" in text
+    assert "W1bbex (w1bbex69)" in text
+    assert "W1bbex (w1bbex52)" in text
+    assert "58%" in text
+    assert "86%" in text
+
+    markup = ui.antigravity_card_markup(data)
+    btn_texts = [btn["text"] for row in markup["inline_keyboard"] for btn in row]
+    assert "W1bbex (w1bbex69) (58%)" in btn_texts
+    assert "W1bbex (w1bbex52) (86%)" in btn_texts
+

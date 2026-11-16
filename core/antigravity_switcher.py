@@ -13,6 +13,7 @@ Supports:
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -106,6 +107,123 @@ class AntigravityAccountManager:
 
     # --- Account & Quota Operations ---
 
+    @staticmethod
+    def _parse_iso_ts(value: Any) -> Optional[float]:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            raw = value.strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
+
+    @classmethod
+    def _parse_quota_payload(cls, quota_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse both nested AntigravityManager quota_json and legacy flat model maps."""
+        if not isinstance(quota_dict, dict):
+            return {
+                "models_quota": {},
+                "quota_groups": [],
+                "min_quota": 0,
+                "has_quota_data": False,
+                "reset_time": None,
+                "subscription_tier": None,
+                "is_forbidden": False,
+            }
+
+        models_source = quota_dict.get("models")
+        if not isinstance(models_source, dict):
+            # Legacy flat format: {model_id: {"percentage": ...}}
+            models_source = quota_dict
+
+        quotas: Dict[str, Dict[str, Any]] = {}
+        all_pcts: List[int] = []
+        reset_candidates: List[Tuple[float, str]] = []
+        fallback_reset: Optional[str] = None
+
+        def _record_reset(rt: Any) -> None:
+            nonlocal fallback_reset
+            if not isinstance(rt, str) or not rt.strip():
+                return
+            if fallback_reset is None:
+                fallback_reset = rt
+            ts = cls._parse_iso_ts(rt)
+            if ts is not None:
+                reset_candidates.append((ts, rt))
+
+        for m_key, m_val in models_source.items():
+            if not isinstance(m_val, dict) or "percentage" not in m_val:
+                continue
+            try:
+                pct = max(0, min(100, int(round(float(m_val["percentage"])))))
+            except (TypeError, ValueError):
+                continue
+            m_reset = m_val.get("resetTime") or m_val.get("reset_time")
+            quotas[m_key] = {
+                "percentage": pct,
+                "reset_time": m_reset,
+                "name": m_val.get("display_name") or m_key,
+            }
+            all_pcts.append(pct)
+            _record_reset(m_reset)
+
+        quota_groups: List[Dict[str, Any]] = []
+        raw_groups = quota_dict.get("quota_groups")
+        if isinstance(raw_groups, list):
+            for grp in raw_groups:
+                if not isinstance(grp, dict):
+                    continue
+                buckets_out: List[Dict[str, Any]] = []
+                for b in grp.get("buckets") or []:
+                    if not isinstance(b, dict):
+                        continue
+                    pct = None
+                    if b.get("remaining_fraction") is not None:
+                        try:
+                            pct = max(0, min(100, int(round(float(b["remaining_fraction"]) * 100))))
+                        except (TypeError, ValueError):
+                            pct = None
+                    elif b.get("percentage") is not None:
+                        try:
+                            pct = max(0, min(100, int(round(float(b["percentage"])))))
+                        except (TypeError, ValueError):
+                            pct = None
+                    if pct is not None:
+                        all_pcts.append(pct)
+                    b_reset = b.get("reset_time") or b.get("resetTime")
+                    _record_reset(b_reset)
+                    buckets_out.append({
+                        "bucket_id": b.get("bucket_id") or "",
+                        "window": b.get("window") or "",
+                        "percentage": pct,
+                        "reset_time": b_reset,
+                        "display_name": b.get("display_name") or "",
+                    })
+                if buckets_out:
+                    quota_groups.append({
+                        "display_name": grp.get("display_name") or "",
+                        "buckets": buckets_out,
+                    })
+
+        has_quota_data = bool(all_pcts)
+        min_quota = min(all_pcts) if all_pcts else 0
+        reset_time = min(reset_candidates, key=lambda item: item[0])[1] if reset_candidates else fallback_reset
+
+        return {
+            "models_quota": quotas,
+            "quota_groups": quota_groups,
+            "min_quota": min_quota,
+            "has_quota_data": has_quota_data,
+            "reset_time": reset_time,
+            "subscription_tier": quota_dict.get("subscription_tier"),
+            "is_forbidden": bool(quota_dict.get("is_forbidden", False)),
+        }
+
     def list_accounts(self) -> List[Dict[str, Any]]:
         """List all accounts with decrypted quotas and metadata."""
         db_path = self.get_cloud_db_path()
@@ -130,29 +248,19 @@ class AntigravityAccountManager:
 
                 # Decrypt quota
                 quota_raw = item.get("quota_json")
-                quotas = {}
-                min_quota = 0
-                has_quota_data = False
-                reset_time = None
+                parsed_quota = {
+                    "models_quota": {},
+                    "quota_groups": [],
+                    "min_quota": 0,
+                    "has_quota_data": False,
+                    "reset_time": None,
+                    "subscription_tier": None,
+                    "is_forbidden": False,
+                }
                 if quota_raw:
                     try:
                         quota_dict = self.crypto.decrypt_payload(quota_raw) or {}
-                        # Extract popular models
-                        found_pct = None
-                        for m_key, m_val in quota_dict.items():
-                            if isinstance(m_val, dict) and "percentage" in m_val:
-                                pct = int(m_val["percentage"])
-                                quotas[m_key] = {
-                                    "percentage": pct,
-                                    "reset_time": m_val.get("resetTime"),
-                                    "name": m_val.get("display_name", m_key),
-                                }
-                                found_pct = pct if found_pct is None else min(found_pct, pct)
-                                if not reset_time and m_val.get("resetTime"):
-                                    reset_time = m_val.get("resetTime")
-                        if found_pct is not None:
-                            min_quota = found_pct
-                            has_quota_data = True
+                        parsed_quota = self._parse_quota_payload(quota_dict)
                     except Exception as e:
                         LOG.debug("Could not decrypt quota for %s: %s", item.get("email"), e)
 
@@ -174,10 +282,13 @@ class AntigravityAccountManager:
                     "is_active": is_active,
                     "status": item.get("status", "active"),
                     "last_used": item.get("last_used") or 0,
-                    "min_quota": min_quota,
-                    "has_quota_data": has_quota_data,
-                    "reset_time": reset_time,
-                    "models_quota": quotas,
+                    "min_quota": parsed_quota["min_quota"],
+                    "has_quota_data": parsed_quota["has_quota_data"],
+                    "reset_time": parsed_quota["reset_time"],
+                    "models_quota": parsed_quota["models_quota"],
+                    "quota_groups": parsed_quota["quota_groups"],
+                    "subscription_tier": parsed_quota["subscription_tier"],
+                    "is_forbidden": parsed_quota["is_forbidden"],
                     "has_valid_token": has_valid_token,
                 })
         finally:
@@ -204,22 +315,42 @@ class AntigravityAccountManager:
         if not accounts:
             return None
 
-        # Filter out accounts with disabled status
-        candidates = [a for a in accounts if a["status"] == "active" and a["has_valid_token"]]
+        # Filter out accounts with disabled/forbidden status
+        candidates = [
+            a for a in accounts
+            if a["status"] == "active" and a["has_valid_token"] and not a.get("is_forbidden", False)
+        ]
         if not candidates:
             return None
+
+        primary_models = (
+            "gemini-4-hydrogen-xhigh",
+            "gemini-4-hydrogen-high",
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-high",
+            "gemini-4-argon-high",
+            "gemini-3.8-flash-high",
+            "gemini-3.1-pro-high",
+            "gemini-3.7-flash-high",
+        )
 
         def score_account(acc: Dict[str, Any]) -> float:
             score = 0.0
             quotas = acc.get("models_quota", {})
+            eff_min = acc.get("min_quota", 0) if acc.get("has_quota_data", True) else -100.0
             if preferred_model and preferred_model in quotas:
-                score += quotas[preferred_model]["percentage"] * 2.0
-            elif "gemini-3.1-pro-high" in quotas:
-                score += quotas["gemini-3.1-pro-high"]["percentage"] * 1.5
-            elif "gemini-3.7-flash-high" in quotas:
-                score += quotas["gemini-3.7-flash-high"]["percentage"]
+                score += quotas[preferred_model]["percentage"] * 2.0 + max(0.0, eff_min) * 0.5
             else:
-                score += acc.get("min_quota", 0) if acc.get("has_quota_data", True) else -100.0
+                model_pct = None
+                for key in primary_models:
+                    if key in quotas:
+                        model_pct = quotas[key]["percentage"]
+                        break
+                if model_pct is not None and acc.get("has_quota_data", True):
+                    # Combine flagship model quota with effective lower bound (weekly/group limits)
+                    score += min(model_pct, eff_min) * 1.5 + model_pct * 0.2
+                else:
+                    score += eff_min * 1.5
 
             # Prefer switching away from current active if looking for best fallback
             if acc["is_active"]:
@@ -238,13 +369,9 @@ class AntigravityAccountManager:
             quotas = acc.get("models_quota", {})
             if preferred_model and preferred_model in quotas:
                 return quotas[preferred_model].get("percentage", 0) > 0
-            if "gemini-3.1-pro-high" in quotas and quotas["gemini-3.1-pro-high"].get("percentage", 0) > 0:
+            if acc.get("min_quota", 0) > 0:
                 return True
-            if "gemini-3.7-flash-high" in quotas and quotas["gemini-3.7-flash-high"].get("percentage", 0) > 0:
-                return True
-            if any(m.get("percentage", 0) > 0 for m in quotas.values()):
-                return True
-            return acc.get("min_quota", 0) > 0
+            return any(m.get("percentage", 0) > 0 for m in quotas.values())
 
         viable = [acc for acc in candidates if is_viable(acc)]
         if not viable:
