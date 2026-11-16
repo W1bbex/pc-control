@@ -59,15 +59,16 @@ class PhysicalButtonManager:
             self.on_state_change_cb()
 
     def is_morse_unlock_eligible(self, now=None):
-        if not self.physical_morse_unlock_eligible:
-            return False, "Пароль включения на кнопке не вводился (или уже использован)."
-        ts = time.time() if now is None else float(now)
-        if self.last_physical_morse_success_at is None:
-            return False, "Пароль включения на кнопке не зафиксирован."
-        elapsed = ts - self.last_physical_morse_success_at
-        if elapsed > MORSE_UNLOCK_WINDOW_SECONDS:
-            return False, "Прошло более 5 минут с момента включения ПК кнопкой."
-        return True, ""
+        with self._lock:
+            if not self.physical_morse_unlock_eligible:
+                return False, "Пароль включения на кнопке не вводился (или уже использован)."
+            ts = time.time() if now is None else float(now)
+            if self.last_physical_morse_success_at is None:
+                return False, "Пароль включения на кнопке не зафиксирован."
+            elapsed = ts - self.last_physical_morse_success_at
+            if elapsed > MORSE_UNLOCK_WINDOW_SECONDS:
+                return False, "Прошло более 5 минут с момента включения ПК кнопкой."
+            return True, ""
 
     def format_password_display(self, password_str):
         if not password_str:
@@ -75,20 +76,26 @@ class PhysicalButtonManager:
         return " · ".join("CLICK" if c == "C" else "HOLD" for c in password_str)
 
     def physical_control_text(self):
+        with self._lock:
+            saved_password = self.saved_password
+            saved_unlock_pattern = self.saved_unlock_pattern
+            unlock_eligible = self.physical_morse_unlock_eligible
+            last_morse_success_at = self.last_physical_morse_success_at
+
         game_id = ICONS.get("game")
         game_tag = f'<tg-emoji emoji-id="{game_id}">🎮</tg-emoji> ' if game_id else ""
-        pwd_display = self.format_password_display(self.saved_password)
-        count_str = f" ({len(self.saved_password)} шагов)" if self.saved_password else ""
-        unlock_display = self.format_password_display(self.saved_unlock_pattern or "CC")
-        unlock_count = f" ({len(self.saved_unlock_pattern)} шага)" if self.saved_unlock_pattern else " (по умолчанию)"
-        ws_pattern = (self.saved_unlock_pattern or "CC") + "HH"
+        pwd_display = self.format_password_display(saved_password)
+        count_str = f" ({len(saved_password)} шагов)" if saved_password else ""
+        unlock_display = self.format_password_display(saved_unlock_pattern or "CC")
+        unlock_count = f" ({len(saved_unlock_pattern)} шага)" if saved_unlock_pattern else " (по умолчанию)"
+        ws_pattern = (saved_unlock_pattern or "CC") + "HH"
         ws_display = self.format_password_display(ws_pattern)
 
         pulse_green = ICONS.get("status_active") or "5345809221961167372"
         pulse_red = ICONS.get("status_inactive") or "5345825096160291312"
 
-        if self.physical_morse_unlock_eligible:
-            elapsed = int(time.time() - (self.last_physical_morse_success_at or 0))
+        if unlock_eligible:
+            elapsed = int(time.time() - (last_morse_success_at or 0))
             remaining = max(0, int(MORSE_UNLOCK_WINDOW_SECONDS - elapsed))
             if remaining > 0:
                 icon_tag = f'<tg-emoji emoji-id="{pulse_green}">🟢</tg-emoji> '
@@ -271,9 +278,22 @@ class PhysicalButtonManager:
         self.ui.send_message(chat_id, "⏳ Снимаю блокировку физической кнопки...", message_id=message_id)
         return cmd_id
 
+    def handle_command_timeout(self, cmd_id, chat_id):
+        """Clear pending ESP command ID under lock before notifying chat."""
+        matched = False
+        with self._lock:
+            if cmd_id and self.pending_command_id and cmd_id == self.pending_command_id:
+                self.pending_command_id = None
+                matched = True
+        if matched:
+            self.ui.send_message(chat_id, "❌ Таймаут ожидания ответа от ESP.")
+
     def handle_ack(self, ack_data, chat_id, on_state_change_cb=None):
         cmd_id = ack_data.get("id")
         result = ack_data.get("result")
+        if result == "duplicate_ignored":
+            LOG.debug("Ignoring duplicate_ignored ESP ACK for cmd_id=%s", cmd_id)
+            return
 
         with self._lock:
             if not (self.pending_command_id and cmd_id == self.pending_command_id):
@@ -302,7 +322,14 @@ class PhysicalButtonManager:
             self.ui.send_message(chat_id, f"❌ ESP не выполнила действие: {result}", reply_markup=self.physical_control_markup())
 
     def _handle_unlock_gesture_triggered(self, chat_id):
-        eligible, reason = self.is_morse_unlock_eligible()
+        with self._lock:
+            eligible, reason = self.is_morse_unlock_eligible()
+            if not eligible:
+                pass
+            else:
+                self.physical_morse_unlock_eligible = False
+                self.last_unlock_gesture_at = time.time()
+
         if not eligible:
             LOG.info("Unlock gesture rejected: %s", reason)
             self.ui.send_message(
@@ -311,9 +338,6 @@ class PhysicalButtonManager:
             )
             return
 
-        # Security passed!
-        self.physical_morse_unlock_eligible = False
-        self.last_unlock_gesture_at = time.time()
         if self.on_state_change_cb:
             self.on_state_change_cb()
         LOG.info("Unlock gesture validated! Triggering unlock flow.")
@@ -324,9 +348,15 @@ class PhysicalButtonManager:
             self.ui.send_message(chat_id, "🔓 <b>Жест разблокировки принят!</b>")
 
     def _handle_unlock_and_workspace_gesture_triggered(self, chat_id):
-        recent_unlock = (time.time() - getattr(self, "last_unlock_gesture_at", 0.0) <= 6.0)
-        eligible, reason = self.is_morse_unlock_eligible()
-        if not eligible and not recent_unlock:
+        with self._lock:
+            recent_unlock = (time.time() - getattr(self, "last_unlock_gesture_at", 0.0) <= 6.0)
+            eligible, reason = self.is_morse_unlock_eligible()
+            allowed = eligible or recent_unlock
+            if allowed:
+                self.physical_morse_unlock_eligible = False
+                self.last_unlock_gesture_at = time.time()
+
+        if not allowed:
             LOG.info("Unlock+Workspace gesture rejected: %s", reason)
             self.ui.send_message(
                 chat_id,
@@ -334,8 +364,6 @@ class PhysicalButtonManager:
             )
             return
 
-        self.physical_morse_unlock_eligible = False
-        self.last_unlock_gesture_at = time.time()
         if self.on_state_change_cb:
             self.on_state_change_cb()
         LOG.info("Unlock+Workspace gesture validated! Triggering combo flow.")

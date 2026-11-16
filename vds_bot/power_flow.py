@@ -701,10 +701,23 @@ class PowerFlowManager:
             with self._lock:
                 self._unlock_dispatch_in_flight = False
 
+    def handle_unlock_timeout(self, cmd_id, fallback_chat_id=0):
+        """Clear timed-out pending unlock command under lock before notifying user."""
+        cid = None
+        with self._lock:
+            if cmd_id and self.pending_unlock_command_id and cmd_id == self.pending_unlock_command_id:
+                self.pending_unlock_command_id = None
+                cid = self.chat_id or fallback_chat_id
+        if cid is not None:
+            self.on_unlock_failed(cid, "Таймаут ожидания ответа от агента при разблокировке.")
+
     def handle_ack(self, ack_data):
         cmd_id = ack_data.get("id")
         result = ack_data.get("result")
         data = ack_data.get("data") or {}
+        if result == "duplicate_ignored":
+            LOG.debug("Ignoring duplicate_ignored unlock ACK (cmd_id=%s)", cmd_id)
+            return
 
         matched = False
         attempts = 0

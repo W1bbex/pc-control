@@ -290,6 +290,8 @@ class MqttGateway:
                     t_val = entry.get("timeout")
                     timeout_sec = int(t_val) if t_val is not None else 30
                     entry["expires"] = int(time.time()) + timeout_sec
+                elif result == "duplicate_ignored":
+                    LOG.debug("Duplicate delivery ACK for cmd %s; keeping pending command entry", cmd_id)
                 else:
                     del self.pending_commands[cmd_id]
 

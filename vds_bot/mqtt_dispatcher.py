@@ -173,10 +173,14 @@ class MqttDispatcherMixin:
                     reply_markup=self._power_menu_markup(),
                 )
                 self._clear_pending_shutdown()
-            if getattr(self.power_flow, "pending_unlock_command_id", None) and cmd_id == self.power_flow.pending_unlock_command_id:
+            if hasattr(self.power_flow, "handle_unlock_timeout"):
+                self.power_flow.handle_unlock_timeout(cmd_id, target_user)
+            elif getattr(self.power_flow, "pending_unlock_command_id", None) and cmd_id == self.power_flow.pending_unlock_command_id:
                 self.power_flow.pending_unlock_command_id = None
                 self.power_flow.on_unlock_failed(self.power_flow.chat_id or target_user, "Таймаут ожидания ответа от агента при разблокировке.")
-            if getattr(self.physical_btn, "pending_command_id", None) and cmd_id == self.physical_btn.pending_command_id:
+            if hasattr(self.physical_btn, "handle_command_timeout"):
+                self.physical_btn.handle_command_timeout(cmd_id, target_user)
+            elif getattr(self.physical_btn, "pending_command_id", None) and cmd_id == self.physical_btn.pending_command_id:
                 self.physical_btn.pending_command_id = None
                 self.ui.send_message(target_user, "❌ Таймаут ожидания ответа от ESP.")
             pending_cmd = None
@@ -196,11 +200,14 @@ class MqttDispatcherMixin:
 
         elif event_type == "ack":
             LOG.debug("MQTT ACK received: %s", data)
+            cmd_id = data.get("id")
+            result = data.get("result")
+            if result == "duplicate_ignored":
+                LOG.debug("Ignoring duplicate_ignored ACK for cmd_id=%s while original execution completes", cmd_id)
+                return
             self.power_flow.handle_ack(data)
             self.physical_btn.handle_ack(data, target_user, self.save_state)
 
-            cmd_id = data.get("id")
-            result = data.get("result")
             raw_ack_data = data.get("data")
             ack_data = raw_ack_data if isinstance(raw_ack_data, dict) else {}
 
@@ -251,7 +258,7 @@ class MqttDispatcherMixin:
                         target_user,
                         "<b>✅ Windows приняла команду выключения.</b>\n\nОжидаю подтверждение, что ПК действительно перешёл в offline…",
                     )
-                elif result not in {"progress"}:
+                elif result not in {"progress", "duplicate_ignored"}:
                     self.ui.send_message(
                         target_user,
                         f"<b>❌ Выключение отклонено.</b>\n\nОтвет системного агента: <code>{html.escape(str(result))}</code>",

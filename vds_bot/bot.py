@@ -644,12 +644,33 @@ class PcControlBotApp(
         }
         try:
             res = self.polling_session.post(url, json=payload, timeout=25)
+            if res.status_code == 429:
+                retry_after = 5.0
+                try:
+                    retry_val = (res.json().get("parameters") or {}).get("retry_after")
+                    if retry_val is not None:
+                        retry_after = min(max(float(retry_val), 1.0), 60.0)
+                except Exception:
+                    pass
+                LOG.warning("Telegram getUpdates rate-limited (429); sleeping %.1fs", retry_after)
+                time.sleep(retry_after)
+                return
+            if res.status_code == 409:
+                LOG.error("Telegram getUpdates 409 Conflict (another poller active); backing off 5s")
+                time.sleep(5)
+                return
             if res.status_code != 200:
                 time.sleep(2)
                 return
             data = res.json()
             if not data.get("ok"):
-                time.sleep(2)
+                if data.get("error_code") == 429:
+                    retry_val = (data.get("parameters") or {}).get("retry_after", 5)
+                    retry_after = min(max(float(retry_val), 1.0), 60.0)
+                    LOG.warning("Telegram API 429; sleeping %.1fs", retry_after)
+                    time.sleep(retry_after)
+                else:
+                    time.sleep(2)
                 return
             updates = data.get("result", [])
             if updates:
@@ -697,8 +718,11 @@ class PcControlBotApp(
                             proc_name = proc.name().lower()
                             if "python" in proc_name or "pc-control" in cmdline_str or "bot.py" in cmdline_str:
                                 is_bot = True
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        except psutil.NoSuchProcess:
                             is_bot = False
+                        except psutil.AccessDenied:
+                            LOG.warning("AccessDenied inspecting PID %d from lockfile; treating lock as active.", old_pid)
+                            is_bot = True
 
                         if is_bot:
                             LOG.error("Another bot instance is already running (PID %d). Aborting to prevent 409 conflict.", old_pid)
@@ -716,8 +740,8 @@ class PcControlBotApp(
 
                     LOCK_PATH.unlink(missing_ok=True)
 
-            LOG.warning("Failed to exclusively create lockfile after retries; forcing lock write.")
-            LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+            LOG.error("Failed to exclusively acquire single-instance lock after 3 attempts at %s; aborting.", LOCK_PATH)
+            sys.exit(1)
         except SystemExit:
             raise
         except Exception as e:
