@@ -129,6 +129,15 @@ def route_monitoring_callback(app, data: str, chat_id: int, message_id: int, cal
             app.ui.answer_callback(callback_id, "Desktop-агент недоступен — скриншот сделать нельзя.", alert=True)
             return True
         app.ui.answer_callback(callback_id, "Делаю скриншот...")
+        gen_id = getattr(type(app.mqtt), "generate_command_id", None)
+        if callable(gen_id):
+            cmd_id = app.mqtt.generate_command_id("desk")
+            app.pending_screenshots[cmd_id] = {"chat_id": chat_id, "requested_at": time.time()}
+            sent_id = app.mqtt.publish_desktop_action("screenshot", timeout=35, command_id=cmd_id)
+            if not sent_id:
+                app.pending_screenshots.pop(cmd_id, None)
+                app.ui.send_message(chat_id, "❌ Не удалось отправить запрос скриншота: MQTT недоступен.")
+            return True
         try:
             cmd_id = app.mqtt.publish_desktop_action("screenshot", timeout=35)
         except TypeError:

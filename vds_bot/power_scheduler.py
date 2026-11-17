@@ -222,10 +222,11 @@ class PowerSchedulerMixin:
                 message_id=message_id,
             )
             return False
+        gen_id = getattr(type(self.mqtt), "generate_command_id", None)
         if self.mqtt.system_status == "online":
-            cmd_id = self.mqtt.publish_system_action("shutdown")
+            publish_target = "system"
         elif getattr(self.mqtt, "desktop_status", None) == "online":
-            cmd_id = self.mqtt.publish_desktop_action("shutdown")
+            publish_target = "desktop"
         else:
             self.ui.send_message(
                 chat_id,
@@ -234,21 +235,51 @@ class PowerSchedulerMixin:
                 message_id=message_id,
             )
             return False
-        if hasattr(self.mqtt, "publish_esp_action"):
-            self.mqtt.publish_esp_action("LED_OFF")
-        if not cmd_id:
-            self.ui.send_message(
-                chat_id,
-                "❌ MQTT недоступен. Выключение не отправлено.",
-                reply_markup=back_markup,
-                message_id=message_id,
-            )
-            return False
-        self.pending_shutdown_cmd_id = cmd_id
-        self.pending_shutdown_started_at = now
-        self.shutdown_acknowledged = False
-        self.shutdown_offline_detected_at = None
-        self.save_state()
+
+        if callable(gen_id):
+            cmd_id = self.mqtt.generate_command_id("sys" if publish_target == "system" else "desk")
+            self.pending_shutdown_cmd_id = cmd_id
+            self.pending_shutdown_started_at = now
+            self.shutdown_acknowledged = False
+            self.shutdown_offline_detected_at = None
+            if publish_target == "system":
+                sent_id = self.mqtt.publish_system_action("shutdown", command_id=cmd_id)
+            else:
+                sent_id = self.mqtt.publish_desktop_action("shutdown", command_id=cmd_id)
+            if hasattr(self.mqtt, "publish_esp_action"):
+                self.mqtt.publish_esp_action("LED_OFF")
+            if not sent_id:
+                if self.pending_shutdown_cmd_id == cmd_id:
+                    self._clear_pending_shutdown()
+                self.ui.send_message(
+                    chat_id,
+                    "❌ MQTT недоступен. Выключение не отправлено.",
+                    reply_markup=back_markup,
+                    message_id=message_id,
+                )
+                return False
+            if self.pending_shutdown_cmd_id == cmd_id:
+                self.save_state()
+        else:
+            if publish_target == "system":
+                cmd_id = self.mqtt.publish_system_action("shutdown")
+            else:
+                cmd_id = self.mqtt.publish_desktop_action("shutdown")
+            if hasattr(self.mqtt, "publish_esp_action"):
+                self.mqtt.publish_esp_action("LED_OFF")
+            if not cmd_id:
+                self.ui.send_message(
+                    chat_id,
+                    "❌ MQTT недоступен. Выключение не отправлено.",
+                    reply_markup=back_markup,
+                    message_id=message_id,
+                )
+                return False
+            self.pending_shutdown_cmd_id = cmd_id
+            self.pending_shutdown_started_at = now
+            self.shutdown_acknowledged = False
+            self.shutdown_offline_detected_at = None
+            self.save_state()
         label = "по таймеру" if source == "schedule" else "вручную"
         self.ui.send_message(
             chat_id,

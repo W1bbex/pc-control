@@ -53,19 +53,6 @@ class ConsoleServiceMixin:
         )
         status_msg_id = status_msg.get("message_id") if isinstance(status_msg, dict) else None
 
-        if target == "system":
-            cmd_id = self.mqtt.publish_system_action(action, args=args, timeout=timeout_s)
-        else:
-            cmd_id = self.mqtt.publish_desktop_action(action, args=args, timeout=timeout_s)
-
-        if not cmd_id:
-            msg_fail = "❌ Не удалось отправить команду в MQTT (брокер недоступен)."
-            if status_msg_id:
-                self.ui.send_message(chat_id, msg_fail, message_id=status_msg_id)
-            else:
-                self.ui.send_message(chat_id, msg_fail)
-            return
-
         pending_info = {
             "chat_id": chat_id,
             "message_id": status_msg_id,
@@ -74,6 +61,37 @@ class ConsoleServiceMixin:
             "shell": shell,
             "started_at": time.time(),
         }
+
+        def _send_publish_failed() -> None:
+            msg_fail = "❌ Не удалось отправить команду в MQTT (брокер недоступен)."
+            if status_msg_id:
+                self.ui.send_message(chat_id, msg_fail, message_id=status_msg_id)
+            else:
+                self.ui.send_message(chat_id, msg_fail)
+
+        gen_id = getattr(type(self.mqtt), "generate_command_id", None)
+        if callable(gen_id):
+            cmd_id = self.mqtt.generate_command_id("sys" if target == "system" else "desk")
+            with getattr(self, "state_lock", threading.RLock()):
+                self.pending_console_cmds[cmd_id] = pending_info
+            if target == "system":
+                sent_id = self.mqtt.publish_system_action(action, args=args, timeout=timeout_s, command_id=cmd_id)
+            else:
+                sent_id = self.mqtt.publish_desktop_action(action, args=args, timeout=timeout_s, command_id=cmd_id)
+            if not sent_id:
+                with getattr(self, "state_lock", threading.RLock()):
+                    self.pending_console_cmds.pop(cmd_id, None)
+                _send_publish_failed()
+            return
+
+        if target == "system":
+            cmd_id = self.mqtt.publish_system_action(action, args=args, timeout=timeout_s)
+        else:
+            cmd_id = self.mqtt.publish_desktop_action(action, args=args, timeout=timeout_s)
+
+        if not cmd_id:
+            _send_publish_failed()
+            return
 
         early_ack_data = None
         with getattr(self, "state_lock", threading.RLock()):

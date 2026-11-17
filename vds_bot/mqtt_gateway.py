@@ -389,13 +389,17 @@ class MqttGateway:
             
         return action_id
 
+    @staticmethod
+    def generate_command_id(prefix: str) -> str:
+        return f"{prefix}-{int(time.time()*1000)}-{secrets.token_hex(3)}"
+
     def publish_system_action(self, action, args=None, timeout=30, command_id=None):
         """
         Publishes to pc/main/windows/system/command (boot_agent.py).
         Actions: "unlock", "lock", "sleep", "restart", "shutdown"
         Payload schema: {"id": "...", "action": "...", "expires": <unix_ts>, "args": {...}}
         """
-        action_id = command_id or f"sys-{int(time.time()*1000)}-{secrets.token_hex(3)}"
+        action_id = command_id or self.generate_command_id("sys")
         timeout_sec = int(timeout) if timeout is not None else 30
         expires = int(time.time()) + timeout_sec
         payload_data = {
@@ -424,7 +428,7 @@ class MqttGateway:
         """
         if action.lower() == "screenshot" and (timeout == 30 or timeout is None):
             timeout = 35
-        action_id = command_id or f"desk-{int(time.time()*1000)}-{secrets.token_hex(3)}"
+        action_id = command_id or self.generate_command_id("desk")
         timeout_sec = int(timeout) if timeout is not None else 30
         expires = int(time.time()) + timeout_sec
         payload_data = {
