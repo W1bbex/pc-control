@@ -37,7 +37,10 @@ def test_bot_single_instance_lock_creates_and_releases_file(tmp_path, monkeypatc
     assert lock_file.read_text(encoding="utf-8").strip() == str(os.getpid())
 
     app._release_lock()
-    assert not lock_file.exists()
+    app2 = PcControlBotApp.__new__(PcControlBotApp)
+    app2._acquire_lock()
+    assert lock_file.read_text(encoding="utf-8").strip() == str(os.getpid())
+    app2._release_lock()
 
 
 def test_bot_acquire_lock_overwrites_pid_owned_by_unrelated_process(tmp_path, monkeypatch):

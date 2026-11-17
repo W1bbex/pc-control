@@ -93,12 +93,14 @@ except ImportError:
 
 try:
     from .mqtt_gateway import MqttGateway
+    from .instance_lock import AlreadyRunningError, ProcessInstanceLock
     from .power_flow import PowerFlowManager, PowerFlowStage
     from .physical_button import PhysicalButtonManager
     from .monitoring import MonitoringManager
     from .health_engine import PCState
 except ImportError:
     from mqtt_gateway import MqttGateway
+    from instance_lock import AlreadyRunningError, ProcessInstanceLock
     from power_flow import PowerFlowManager, PowerFlowStage
     from physical_button import PhysicalButtonManager
     from monitoring import MonitoringManager
@@ -690,71 +692,27 @@ class PcControlBotApp(
             time.sleep(3)
 
     def _acquire_lock(self):
+        lock = ProcessInstanceLock(LOCK_PATH)
         try:
-            LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-            for _attempt in range(3):
-                try:
-                    fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                    try:
-                        os.write(fd, str(os.getpid()).encode("utf-8"))
-                    finally:
-                        os.close(fd)
-                    LOG.info("Acquired single-instance lock (PID %d) at %s", os.getpid(), LOCK_PATH)
-                    return
-                except FileExistsError:
-                    try:
-                        content = LOCK_PATH.read_text(encoding="utf-8").strip()
-                    except FileNotFoundError:
-                        continue
-                    old_pid = int(content) if content.isdigit() else None
-                    if old_pid == os.getpid():
-                        LOG.warning("Lockfile holds our own PID %d (PID reuse after restart). Reclaiming lock.", old_pid)
-                    elif old_pid and psutil.pid_exists(old_pid):
-                        is_bot = False
-                        proc = None
-                        try:
-                            proc = psutil.Process(old_pid)
-                            cmdline_str = " ".join(proc.cmdline()).lower()
-                            proc_name = proc.name().lower()
-                            if "python" in proc_name or "pc-control" in cmdline_str or "bot.py" in cmdline_str:
-                                is_bot = True
-                        except psutil.NoSuchProcess:
-                            is_bot = False
-                        except psutil.AccessDenied:
-                            LOG.warning("AccessDenied inspecting PID %d from lockfile; treating lock as active.", old_pid)
-                            is_bot = True
-
-                        if is_bot:
-                            LOG.error("Another bot instance is already running (PID %d). Aborting to prevent 409 conflict.", old_pid)
-                            sys.exit(0)
-                            return
-                        proc_name_str = "unknown"
-                        if proc is not None:
-                            try:
-                                proc_name_str = proc.name()
-                            except Exception:
-                                pass
-                        LOG.warning("Lockfile PID %d belongs to unrelated process (%s). Overwriting stale lock.", old_pid, proc_name_str)
-                    else:
-                        LOG.warning("Found stale lockfile from PID %s. Overwriting.", content)
-
-                    LOCK_PATH.unlink(missing_ok=True)
-
-            LOG.error("Failed to exclusively acquire single-instance lock after 3 attempts at %s; aborting.", LOCK_PATH)
-            sys.exit(1)
-        except SystemExit:
-            raise
-        except Exception as e:
+            lock.acquire()
+        except AlreadyRunningError as error:
+            LOG.error("Another bot instance is already running (PID %s). Aborting to prevent 409 conflict.", error.pid or "unknown")
+            sys.exit(0)
+            return
+        except OSError as e:
             LOG.error("Fatal: Could not acquire single-instance lock at %s: %s", LOCK_PATH, e)
             sys.exit(1)
+            return
+        self._instance_lock = lock
+        LOG.info("Acquired single-instance lock (PID %d) at %s", os.getpid(), LOCK_PATH)
 
     def _release_lock(self):
+        lock = getattr(self, "_instance_lock", None)
+        self._instance_lock = None
         try:
-            if LOCK_PATH.exists():
-                content = LOCK_PATH.read_text(encoding="utf-8").strip()
-                if content == str(os.getpid()):
-                    LOCK_PATH.unlink(missing_ok=True)
-                    LOG.info("Released single-instance lock (PID %d)", os.getpid())
+            if lock is not None:
+                lock.release()
+                LOG.info("Released single-instance lock (PID %d)", os.getpid())
         except Exception as e:
             LOG.warning("Could not release single-instance lock: %s", e)
 

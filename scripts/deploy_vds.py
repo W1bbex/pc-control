@@ -36,6 +36,7 @@ MANIFEST_FILES = [
     "console_service.py",
     "health_engine.py",
     "history.py",
+    "instance_lock.py",
     "monitoring.py",
     "mqtt_dispatcher.py",
     "mqtt_gateway.py",

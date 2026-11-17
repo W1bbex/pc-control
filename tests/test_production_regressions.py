@@ -264,13 +264,17 @@ def test_bot_state_and_pid_lock_resilience(tmp_path):
     app.antigravity_accounts_cache = None
 
     with patch.object(bot_mod, "LOCK_PATH", lock_path), patch.object(bot_mod, "STATE_PATH", state_path):
-        app._acquire_lock()
-        assert lock_path.read_text(encoding="utf-8") == str(os.getpid())
-        # Same PID re-acquire must reclaim cleanly rather than exiting
-        app._acquire_lock()
-        assert lock_path.read_text(encoding="utf-8") == str(os.getpid())
         # Stale/dead PID is replaced safely
         lock_path.write_text("99999999", encoding="utf-8")
+        app._acquire_lock()
+        assert lock_path.read_text(encoding="utf-8") == str(os.getpid())
+        # Contending instance must exit cleanly while lock is held
+        contender = PcControlBotApp.__new__(PcControlBotApp)
+        with pytest.raises(SystemExit) as exc:
+            contender._acquire_lock()
+        assert exc.value.code == 0
+        # After release, lock can be acquired again
+        app._release_lock()
         app._acquire_lock()
         assert lock_path.read_text(encoding="utf-8") == str(os.getpid())
         app._release_lock()
@@ -560,20 +564,21 @@ def test_power_flow_and_physical_button_concurrency_and_timeout_helpers():
 
 
 def test_bot_lock_access_denied_and_poll_updates_429_409(tmp_path, monkeypatch):
-    import psutil
     import vds_bot.bot as bot_mod
     from vds_bot.bot import PcControlBotApp
 
     lock_file = tmp_path / "bot.lock"
-    lock_file.write_text("424242", encoding="utf-8")
     monkeypatch.setattr(bot_mod, "LOCK_PATH", lock_file)
 
-    app = PcControlBotApp.__new__(PcControlBotApp)
-    with patch("psutil.pid_exists", return_value=True), \
-         patch("psutil.Process", side_effect=psutil.AccessDenied(424242)):
+    holder = PcControlBotApp.__new__(PcControlBotApp)
+    holder._acquire_lock()
+    try:
+        app = PcControlBotApp.__new__(PcControlBotApp)
         with pytest.raises(SystemExit):
             app._acquire_lock()
-    assert lock_file.read_text(encoding="utf-8") == "424242"
+        assert lock_file.read_text(encoding="utf-8").strip() == str(os.getpid())
+    finally:
+        holder._release_lock()
 
     app.offset = 0
     app.ui = MagicMock()
