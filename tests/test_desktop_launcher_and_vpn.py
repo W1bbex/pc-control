@@ -406,22 +406,28 @@ def test_antigravity_find_best_account_rejects_zero_quota():
         assert best["id"] == "acc3"
 
 
-def test_antigravity_switch_account_skips_ide_launch_when_not_running():
+def test_antigravity_switch_account_skips_ide_launch_when_not_running(tmp_path):
+    import sqlite3
+
+    vscdb = tmp_path / "state.vscdb"
+    with sqlite3.connect(vscdb) as conn:
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+    cloud_db = tmp_path / "accounts.db"
+    with sqlite3.connect(cloud_db) as conn:
+        conn.execute("CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT, name TEXT, token_json TEXT, device_profile_json TEXT, is_active INTEGER, last_used INTEGER)")
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO accounts VALUES ('acc1', 'test@test.com', 'test', '{}', NULL, 0, 0)")
+        conn.commit()
+
     mgr = AntigravityAccountManager()
     mgr.is_ide_running = MagicMock(return_value=False)
     mgr.launch_ide = MagicMock(return_value=True)
     mgr.refresh_token_if_needed = MagicMock(return_value={"access_token": "tok"})
-    mgr.get_ide_state_paths = MagicMock(return_value=(None, None))
+    mgr.get_ide_state_paths = MagicMock(return_value=(vscdb, tmp_path / "storage.json"))
+    mgr.get_cloud_db_path = MagicMock(return_value=cloud_db)
 
-    mock_row = {"id": "acc1", "email": "test@test.com", "name": "test", "device_profile_json": None}
-    with patch("sqlite3.connect") as mock_conn:
-        cur = MagicMock()
-        cur.execute.return_value.fetchone.return_value = mock_row
-        mock_conn.return_value.cursor.return_value = cur
-
-        with patch.object(mgr, "get_cloud_db_path") as mock_db_path:
-            mock_db_path.return_value.exists.return_value = True
-            res = mgr.switch_account("acc1", restart_ide=True)
+    res = mgr.switch_account("acc1", restart_ide=True)
 
     assert not mgr.launch_ide.called
     assert res["restarted_ide"] is False

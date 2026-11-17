@@ -7,7 +7,7 @@
 [![Version](https://img.shields.io/badge/Version-2.0-8B5CF6?style=for-the-badge)](./core/runtime_config.py)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Firmware](https://img.shields.io/badge/ESP8266-Bare--Metal%20C%2B%2B-00979D?style=for-the-badge&logo=espressif&logoColor=white)](./hardware/esp8266/pc_remote_mqtt/pc_remote_mqtt.ino)
-[![Tests](https://img.shields.io/badge/tests-622%20passed-22C55E?style=for-the-badge)](#-тестирование)
+[![Tests](https://img.shields.io/badge/tests-636%20passed-22C55E?style=for-the-badge)](#-тестирование)
 [![Docs](https://img.shields.io/badge/Обзор%20проекта-w1bbex.ru-0F172A?style=for-the-badge)](https://w1bbex.ru/ru/pc-control/)
 
 </div>
@@ -76,7 +76,7 @@ pc-control/
 │   └── sensors/                  # Сборщик телеметрии (.NET + LibreHardwareMonitorLib)
 ├── scripts/                      # Скрипты установки служб, ввода Winlogon и VDS-деплоя
 ├── resources/                    # Маппинг кастомных эмодзи и ресурсов UI
-└── tests/                        # Набор из 622 модульных и интеграционных тестов (pytest)
+└── tests/                        # Набор из 636 модульных и интеграционных тестов (pytest)
 ```
 
 ---
@@ -134,7 +134,7 @@ pc-control/
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-- Суммарный набор: **622** автоматических тестов (FSM питания, `health_engine`, протоколы агентов, WTS/Win32-адаптеры, маршрутизаторы Telegram UI, модель логики ESP8266 и регрессионные проверки).
+- Суммарный набор: **636** автоматических тестов (FSM питания, `health_engine`, протоколы агентов, WTS/Win32-адаптеры, маршрутизаторы Telegram UI, модель логики ESP8266 и регрессионные проверки).
 - Тесты запускаются с моками системных/сетевых вызовов; прошивка C++ и живой интерактивный вход на реальный `Winlogon` проверяются отдельно на целевом стенде.
 
 ---

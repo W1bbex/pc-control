@@ -27,6 +27,7 @@ import urllib.parse
 import urllib.request
 
 from core.antigravity_crypto import AntigravityCrypto, ProtobufHelper, ENC_PREFIX
+from core.private_files import write_private_json
 from core.antigravity_process import (
     IDE_PROCESS_NAMES,
     is_ide_running,
@@ -493,6 +494,9 @@ class AntigravityAccountManager:
 
         email = account_row["email"]
         account_id = account_row["id"]
+        vscdb_path, storage_path = self.get_ide_state_paths()
+        if vscdb_path is None or not vscdb_path.is_file():
+            raise FileNotFoundError("Antigravity IDE state database (state.vscdb) not found")
         LOG.info("Switching Antigravity account to %s (%s)...", email, account_id)
 
         # 1. Refresh OAuth token if necessary
@@ -508,11 +512,6 @@ class AntigravityAccountManager:
         was_running = self.is_ide_running()
         if was_running:
             self.kill_ide()
-
-        # 3. Locate IDE state files
-        vscdb_path, storage_path = self.get_ide_state_paths()
-        if vscdb_path and not vscdb_path.exists():
-            raise FileNotFoundError(f"Antigravity IDE state database (state.vscdb) not found at {vscdb_path}")
 
         # 4. Apply device profile (fingerprint) to storage.json
         dev_profile = {}
@@ -737,18 +736,7 @@ class AntigravityAccountManager:
         }
 
         if dest_path:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_dest = dest_path.with_name(f".{dest_path.name}.tmp")
-            tmp_dest.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
-            try:
-                os.chmod(tmp_dest, 0o600)
-            except OSError:
-                pass
-            tmp_dest.replace(dest_path)
-            try:
-                os.chmod(dest_path, 0o600)
-            except OSError:
-                pass
+            write_private_json(dest_path, bundle)
             LOG.info("Exported %d accounts to %s", len(accounts_export), dest_path)
 
         return bundle

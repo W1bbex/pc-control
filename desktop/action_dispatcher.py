@@ -9,8 +9,10 @@ import threading
 import time
 from core.process_utils import run_shell_command
 from desktop.codex_launch import diagnose_codex_launch
+from desktop.constants import BASE_DIR
 
 LOG = logging.getLogger("pc-control-agent")
+EXPORT_PATH = BASE_DIR / "data" / "exports" / "antigravity-accounts.json"
 
 
 class ActionDispatcherMixin:
@@ -304,11 +306,11 @@ class ActionDispatcherMixin:
                 return
 
             if action == "antigravity_export":
-                bundle = self.antigravity_manager.export_accounts()
+                bundle = self.antigravity_manager.export_accounts(dest_path=EXPORT_PATH)
                 self.acknowledge(
                     command_id,
                     "executed",
-                    {"accounts_count": len(bundle.get("accounts", [])), "exported_at": bundle.get("exported_at")},
+                    {"accounts_count": len(bundle.get("accounts", [])), "exported_at": bundle.get("exported_at"), "export_path": str(EXPORT_PATH)},
                 )
                 return
 

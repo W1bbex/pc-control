@@ -409,7 +409,11 @@ class MqttDispatcherMixin:
                 elif action_kind == "export":
                     if result == "executed" and isinstance(ack_data, dict):
                         cnt = ack_data.get("accounts_count", 0)
-                        self.ui.send_message(req_chat_id, f"📦 <b>Экспорт выполнен успешно:</b> {cnt} аккаунтов сохранены в портативный формат.")
+                        path = html.escape(str(ack_data.get("export_path") or ""))
+                        self.ui.send_message(req_chat_id, f"<b>Экспорт сохранён локально на ПК.</b>\nАккаунтов: {cnt}\nФайл: <code>{path}</code>")
+                    else:
+                        error = html.escape(str(ack_data.get("error") or result or "Неизвестная ошибка"))
+                        self.ui.send_message(req_chat_id, f"Не удалось сохранить экспорт: <code>{error}</code>")
                 elif action_kind in ("heal", "fix"):
                     if result == "executed" and isinstance(ack_data, dict):
                         srv = html.escape(str(ack_data.get("server", "—")))
