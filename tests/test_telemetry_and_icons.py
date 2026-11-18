@@ -74,6 +74,40 @@ def test_app_emoji_manager_and_icon_extractor_handle_none_path():
     assert mgr.get_or_create_emoji_id(None, "dummy.exe") is None
 
 
+def test_app_emoji_sync_creates_pack_with_authenticated_bot_username(tmp_path, monkeypatch):
+    executable = tmp_path / "AyuGram_Fix.exe"
+    executable.touch()
+    monkeypatch.setattr("core.app_emoji_manager.CACHE_FILE", tmp_path / "app_icon_cache.json")
+    monkeypatch.setattr("core.app_emoji_manager.DEFAULT_PACK_NAME", "pc_apps_pack")
+    manager = AppEmojiManager(token="token", user_id=123)
+
+    def response(payload):
+        result = MagicMock()
+        result.json.return_value = payload
+        return result
+
+    with patch("core.app_emoji_manager.extract_app_icon_png", return_value=b"icon"), \
+         patch("requests.get", side_effect=[
+             response({"ok": True, "result": {"username": "PcControlBot"}}),
+             response({"ok": True, "result": {"stickers": [{"custom_emoji_id": "123456"}]}}),
+         ]) as get, \
+         patch("requests.post", side_effect=[
+             response({"ok": False, "description": "Bad Request: invalid sticker set name is specified"}),
+             response({"ok": True, "result": True}),
+         ]) as post:
+        assert manager.notify_app_opened(str(executable), executable.name) == "123456"
+
+    pack_name = "pc_apps_pack_by_pccontrolbot"
+    assert [call.args[0].rsplit("/", 1)[1] for call in get.call_args_list] == ["getMe", "getStickerSet"]
+    assert get.call_args.kwargs["params"] == {"name": pack_name}
+    add, create = post.call_args_list
+    assert add.args[0].endswith("/addStickerToSet")
+    assert create.args[0].endswith("/createNewStickerSet")
+    assert add.kwargs["data"]["name"] == create.kwargs["data"]["name"] == pack_name
+    assert create.kwargs["data"]["sticker_type"] == "custom_emoji"
+    assert AppEmojiManager(token="token", user_id=123).get_cached_emoji_id(executable.name) == "123456"
+
+
 def test_app_emoji_manager_redacts_bot_token_in_error_logs():
     mgr = AppEmojiManager(token="SECRET_BOT_TOKEN_12345", user_id=100)
     with patch(

@@ -88,9 +88,10 @@ def test_app_emoji_manager_returns_none_when_token_or_user_id_missing():
         mock_post.assert_not_called()
 
 
-def test_app_emoji_manager_locks_sticker_set_operations():
+def test_app_emoji_manager_locks_sticker_set_operations(tmp_path, monkeypatch):
     """Verify sticker upload and getStickerSet execute under _sticker_set_lock."""
-    mgr = AppEmojiManager(token="fake_token", user_id=12345)
+    monkeypatch.setattr("core.app_emoji_manager.CACHE_FILE", tmp_path / "app_icon_cache.json")
+    mgr = AppEmojiManager(token="fake_token", user_id=12345, pack_name="pc_apps_pack_by_test_bot")
     mgr.cache = {}
     lock_used = []
 
@@ -107,6 +108,10 @@ def test_app_emoji_manager_locks_sticker_set_operations():
         emoji_id = mgr.get_or_create_emoji_id("C:\\Tools\\unique_test_proc.exe", "unique_test_proc.exe")
         assert emoji_id == "999"
         assert lock_used == [True]
+        mock_get.assert_called_once_with(
+            "https://api.telegram.org/botfake_token/getStickerSet",
+            params={"name": "pc_apps_pack_by_test_bot"}, timeout=5,
+        )
 
 
 def test_media_manager_sync_likes_skipped_when_credentials_missing():

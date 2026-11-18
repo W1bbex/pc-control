@@ -277,12 +277,12 @@ class MonitoringManager:
         status_icon, session_duration = self._session_lines(telemetry)
         active_app_raw = telemetry.get("active_application")
         active_title = telemetry.get("active_window_title")
+        telegram_clients = ("telegram", "ayugram", "kotatogram", "64gram", "unigram")
+        is_telegram_app = any(client in str(active_app_raw).lower() for client in telegram_clients)
         if not active_app_raw:
             active_application = "Рабочий стол"
         else:
-            app_lower = str(active_app_raw).lower()
-            telegram_clients = ("telegram", "ayugram", "kotatogram", "64gram", "unigram")
-            if any(c in app_lower for c in telegram_clients) and active_title:
+            if is_telegram_app and active_title:
                 import re
                 clean = active_title.strip()
                 if "@" in clean or re.match(r"^\(\d+\)", clean):
@@ -346,10 +346,9 @@ class MonitoringManager:
             )
 
         active_emoji_id = telemetry.get("active_application_emoji_id")
-        if active_emoji_id:
-            app_emoji = f'<tg-emoji emoji-id="{active_emoji_id}">🪟</tg-emoji>'
-        else:
-            app_emoji = f'<tg-emoji emoji-id="{EMOJI_DEFAULT_APP}">🪟</tg-emoji>'
+        if not active_emoji_id and is_telegram_app:
+            active_emoji_id = ICONS.get("app_telegram") or ICONS.get("telegram")
+        app_emoji = f'<tg-emoji emoji-id="{active_emoji_id or EMOJI_DEFAULT_APP}">🪟</tg-emoji>'
 
         # Current media playback line
         if media_state is None:

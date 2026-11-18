@@ -292,6 +292,22 @@ def test_dashboard_formats_telegram_chat_title():
     assert "Telegram — PC Control" in text
 
 
+def test_dashboard_uses_telegram_icon_until_ayugram_icon_syncs(tmp_path):
+    from vds_bot.monitoring import ICONS
+
+    manager = MonitoringManager(None, FakeMqtt(), history_db_path=tmp_path / "history.db")
+    telemetry = {
+        "agent_mode": "desktop",
+        "active_application": "AyuGram_Fix.exe",
+        "active_window_title": "PC Control @ Test! (123)",
+    }
+    manager.process_telemetry(telemetry)
+    assert f'emoji-id="{ICONS["app_telegram"]}">🪟</tg-emoji> Telegram — PC Control' in manager.dashboard_text()
+
+    manager.process_telemetry({**telemetry, "active_application_emoji_id": "123456"})
+    assert 'emoji-id="123456">🪟</tg-emoji> Telegram — PC Control' in manager.dashboard_text()
+
+
 def test_dashboard_auto_refresh_every_5s_in_pc_control_chat():
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.mqtt = MagicMock()

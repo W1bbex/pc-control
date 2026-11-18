@@ -73,6 +73,7 @@ class AppEmojiManager:
         self.last_notified_time = 0.0
         self.upload_lock = threading.Lock()
         self._sticker_set_lock = threading.Lock()
+        self._resolved_pack_name = None
         self._inflight = {}
         self._cache_epoch = 0
 
@@ -89,6 +90,18 @@ class AppEmojiManager:
             inflight = {}
             self._inflight = inflight
         return inflight
+
+    def _resolve_pack_name(self):
+        if not self._resolved_pack_name:
+            if "_by_" in self.pack_name.lower():
+                self._resolved_pack_name = self.pack_name
+            else:
+                data = requests.get(f"https://api.telegram.org/bot{self.token}/getMe", timeout=5).json()
+                username = data.get("result", {}).get("username")
+                if not data.get("ok") or not username:
+                    raise ValueError("Could not resolve the Telegram bot username for the app icon pack")
+                self._resolved_pack_name = f"{self.pack_name}_by_{username.lower()}"
+        return self._resolved_pack_name
 
     def get_cached_emoji_id(self, key: str):
         normalized = (key or "").lower()
@@ -169,6 +182,7 @@ class AppEmojiManager:
             else:
                 with self._get_sticker_set_lock():
                     try:
+                        pack_name = self._resolve_pack_name()
                         # Upload to Telegram Sticker Pack outside upload_lock
                         files = {"sticker": (f"{key}.png", png_bytes, "image/png")}
                         stickers_data = {
@@ -180,7 +194,7 @@ class AppEmojiManager:
                             f"https://api.telegram.org/bot{self.token}/addStickerToSet",
                             data={
                                 "user_id": self.user_id,
-                                "name": self.pack_name,
+                                "name": pack_name,
                                 "sticker": json.dumps(stickers_data)
                             },
                             files=files,
@@ -189,13 +203,14 @@ class AppEmojiManager:
                         data = res.json()
                         if not data.get("ok"):
                             desc = data.get("description", "")
-                            if "STICKERSET_INVALID" in desc:
+                            if ("STICKERSET_INVALID" in desc.upper()
+                                    or "invalid sticker set name" in desc.lower()):
                                 LOG.info("Sticker set invalid/missing, recreating set via createNewStickerSet...")
                                 c_res = requests.post(
                                     f"https://api.telegram.org/bot{self.token}/createNewStickerSet",
                                     data={
                                         "user_id": self.user_id,
-                                        "name": self.pack_name,
+                                        "name": pack_name,
                                         "title": "PC Control App Icons",
                                         "sticker_type": "custom_emoji",
                                         "stickers": json.dumps([stickers_data])
@@ -213,7 +228,7 @@ class AppEmojiManager:
                             # Get sticker set to find newest custom_emoji_id
                             set_res = requests.get(
                                 f"https://api.telegram.org/bot{self.token}/getStickerSet",
-                                params={"name": self.pack_name},
+                                params={"name": pack_name},
                                 timeout=5
                             ).json()
 

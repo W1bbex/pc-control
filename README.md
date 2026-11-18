@@ -105,6 +105,8 @@ pc-control/
    ```
 3. Установите зависимости в виртуальное окружение и при необходимости зарегистрируйте агенты через скрипты в [`scripts/install/`](./scripts/install/).
 
+Десктоп-агент автоматически загружает иконку приложения в Telegram, когда впервые видит его активное окно. По умолчанию он использует отдельный набор `pc_apps_pack_by_<username бота>` и сохраняет соответствия в `data/app_icon_cache.json`. Пока иконка AyuGram загружается, дашборд показывает иконку Telegram.
+
 ### 2. Координатор на Linux VDS
 
 1. Скопируйте шаблоны окружения и сервиса: [`vds_bot/pc-control-bot.env.example`](./vds_bot/pc-control-bot.env.example) и [`vds_bot/pc-control-bot.service`](./vds_bot/pc-control-bot.service).
