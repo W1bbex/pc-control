@@ -5,6 +5,7 @@ import pytest
 
 from desktop import codex_launch
 from desktop.action_dispatcher import ActionDispatcherMixin
+from desktop.launcher import LauncherMixin
 from vds_bot.routers.workspace_router import route_workspace_callback
 from vds_bot.mqtt_dispatcher import MqttDispatcherMixin
 
@@ -60,6 +61,41 @@ def test_router_exposes_three_options_and_sends_selected_variant():
     assert {"codex_test:1", "codex_test:2", "codex_test:3"} <= callbacks
     assert route_workspace_callback(app, "codex_test:2", 1, 2, "cb2")
     app.mqtt.publish_desktop_action.assert_called_once_with("diagnose_codex_launch", {"variant": "2"}, timeout=40)
+
+
+@pytest.mark.parametrize("remaining_windows, expected", [([101, None], True), ([101] * 5, False)])
+def test_workspace_verifies_codex_minimization_before_reporting_result(remaining_windows, expected):
+    launcher = LauncherMixin()
+    launcher.config = {"apps": {"workspace": {"steps": [{"id": "chatgpt", "command": ["chatgpt-desktop.exe"]}],
+                                              "minimize_after": True}}}
+    windows = MagicMock()
+    launcher.minimize_all_windows = windows.minimize_all
+    launcher._find_visible_window = windows.find_window
+    windows.find_window.side_effect = remaining_windows
+    cancel_event = MagicMock()
+    cancel_event.wait.return_value = False
+    cancel_event.is_set.return_value = False
+    with patch("desktop.launcher.diagnose_codex_launch", return_value={"state": "window_visible"}), \
+         patch("desktop.launcher.threading.Event", return_value=cancel_event), \
+         patch("desktop.launcher.ctypes.windll.user32", windows.user32):
+        result = launcher.launch_app("workspace", workspace_id="ws-1")
+
+    assert result["success"] is True
+    assert result["desktop_minimized"] is expected
+    assert [call.args for call in cancel_event.wait.call_args_list[:2]] == [(2.0,), (2.0,)]
+    assert [call[0] for call in windows.mock_calls[:3]] == ["minimize_all", "find_window", "user32.ShowWindowAsync"]
+    windows.find_window.assert_called_with(["chatgpt.exe"], exclude_minimized=True)
+    windows.user32.ShowWindowAsync.assert_called_with(101, 6)
+
+
+def test_desktop_minimize_fallback_reports_unminimized_codex():
+    app = ActionDispatcherMixin()
+    app.minimize_workspace_windows = MagicMock(return_value=False)
+    app.acknowledge = MagicMock()
+
+    app.execute_action("cmd", "minimize_all", {"verify_codex": True})
+
+    app.acknowledge.assert_called_once_with("cmd", "failed", {"reason": "codex_not_minimized"})
 
 
 def test_diagnostic_errors_reported_with_variant():

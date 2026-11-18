@@ -42,12 +42,12 @@ def test_chatgpt_alias_waits_for_delayed_real_process():
          patch("desktop.codex_launch.subprocess.Popen") as start, \
          patch("desktop.codex_launch.time.monotonic", side_effect=lambda: clock[0]), \
          patch("desktop.codex_launch.time.sleep", side_effect=sleep), \
-         patch.object(launcher, "_has_visible_window", return_value=True):
+         patch.object(launcher, "_find_visible_window", side_effect=lambda _: 101 if clock[0] < 5 else 102):
         result = launcher.launch_app("test")
 
     assert result["success"] is True
     assert result["verified_steps"] == ["chatgpt"]
-    assert clock[0] >= 5.0
+    assert clock[0] >= 7.0
     assert start.call_args.args[0][0].lower().endswith("explorer.exe")
     assert "codex.exe" not in step["verification"]["targets"]
 

@@ -143,7 +143,12 @@ class ActionDispatcherMixin:
 
             if action == "minimize_all":
                 try:
-                    self.minimize_all_windows()
+                    if args.get("verify_codex"):
+                        if not self.minimize_workspace_windows():
+                            self.acknowledge(command_id, "failed", {"reason": "codex_not_minimized"})
+                            return
+                    else:
+                        self.minimize_all_windows()
                     self.acknowledge(command_id, "executed")
                 except Exception as error:
                     LOG.exception("minimize_all failed")

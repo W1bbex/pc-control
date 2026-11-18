@@ -78,7 +78,11 @@ class LauncherMixin:
 
     @staticmethod
     def _has_visible_window(target_names):
-        """Check if any process matching target_names has at least one visible top-level window."""
+        return bool(LauncherMixin._find_visible_window(target_names))
+
+    @staticmethod
+    def _find_visible_window(target_names, *, exclude_minimized=False):
+        """Return a visible top-level HWND owned by one of the target processes."""
         hdesk = None
         orig_desk = None
         user32 = None
@@ -100,6 +104,8 @@ class LauncherMixin:
             user32.CloseDesktop.restype = wintypes.BOOL
             user32.IsWindowVisible.argtypes = [wintypes.HWND]
             user32.IsWindowVisible.restype = wintypes.BOOL
+            user32.IsIconic.argtypes = [wintypes.HWND]
+            user32.IsIconic.restype = wintypes.BOOL
             user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
             user32.GetWindowTextLengthW.restype = ctypes.c_int
             user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -121,19 +127,21 @@ class LauncherMixin:
                     matching_pids.add(p.info["pid"])
 
             if not matching_pids:
-                return False
+                return None
 
-            has_window = False
+            window = None
 
             def enum_cb(hwnd, lparam):
-                nonlocal has_window
+                nonlocal window
                 if user32.IsWindowVisible(hwnd):
+                    if exclude_minimized and user32.IsIconic(hwnd):
+                        return True
                     length = user32.GetWindowTextLengthW(hwnd)
                     if length > 0:
                         pid = wintypes.DWORD()
                         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                         if pid.value in matching_pids:
-                            has_window = True
+                            window = hwnd
                             return False
                 return True
 
@@ -141,10 +149,12 @@ class LauncherMixin:
             user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
             user32.EnumWindows.restype = wintypes.BOOL
             user32.EnumWindows(EnumWindowsProc(enum_cb), 0)
-            return has_window
+            return window
         except Exception as err:
+            if exclude_minimized:
+                raise
             LOG.warning("Failed checking visible window: %s", err)
-            return False
+            return None
         finally:
             if hdesk and user32:
                 try:
@@ -156,6 +166,34 @@ class LauncherMixin:
                     user32.CloseDesktop(hdesk)
                 except Exception:
                     pass
+
+    def minimize_workspace_windows(self, cancel_event=None):
+        """Minimize the workspace and check for a Codex window restored during startup."""
+        if cancel_event is None:
+            cancel_event = threading.Event()
+        if cancel_event.wait(2.0):
+            return False
+        self.minimize_all_windows()
+        if cancel_event.wait(2.0):
+            return False
+
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindowAsync.restype = wintypes.BOOL
+        for _ in range(4):
+            hwnd = self._find_visible_window(["chatgpt.exe"], exclude_minimized=True)
+            if not hwnd:
+                return True
+            user32.ShowWindowAsync(hwnd, 6)  # SW_MINIMIZE
+            if cancel_event.wait(0.5):
+                return False
+
+        minimized = not self._find_visible_window(["chatgpt.exe"], exclude_minimized=True)
+        if not minimized:
+            LOG.warning("A Codex window remained open after workspace minimization")
+        return minimized
 
     def launch_app(self, app_key, workspace_id=None, progress_callback=None, vpn=None, connect_vpn=True):
         app_config = self.config.get("apps", {}).get(app_key)
@@ -225,6 +263,7 @@ class LauncherMixin:
 
         launched = []
         verified_steps = []
+        codex_verified = False
         try:
             for idx, step in enumerate(normalized_steps):
                 if cancel_event and cancel_event.is_set():
@@ -260,7 +299,7 @@ class LauncherMixin:
                         progress_callback({"step_id": step_id, "app": label, "state": "starting"})
                     try:
                         result = diagnose_codex_launch(
-                            "2", executable, self._has_visible_window,
+                            "2", executable, self._find_visible_window,
                             timeout=float(verification.get("timeout", 20.0)) if isinstance(verification, dict) else 20.0,
                             allow_existing=True, cancel_event=cancel_event,
                         )
@@ -280,6 +319,7 @@ class LauncherMixin:
                                     "failed_step": step_id, "success": False,
                                     "reason": f"step_{step_id}_failed_verification", "desktop_minimized": False}
                     else:
+                        codex_verified = True
                         launched.append(label)
                         verified_steps.append(step_id)
                         if progress_callback:
@@ -543,15 +583,24 @@ class LauncherMixin:
                 if idx < len(normalized_steps) - 1:
                     time.sleep(inter_app_delay)
 
-            if minimize_after:
-                self.minimize_all_windows()
+            desktop_minimized = False
+            if minimize_after and not (cancel_event and cancel_event.is_set()):
+                if codex_verified:
+                    desktop_minimized = self.minimize_workspace_windows(cancel_event)
+                else:
+                    self.minimize_all_windows()
+                    desktop_minimized = True
+
+            if cancel_event and cancel_event.is_set():
+                return {"app": app_key, "launched": launched, "verified_steps": verified_steps,
+                        "cancelled": True, "success": False, "desktop_minimized": desktop_minimized}
 
             return {
                 "app": app_key,
                 "launched": launched,
                 "verified_steps": verified_steps,
                 "success": True,
-                "desktop_minimized": minimize_after,
+                "desktop_minimized": desktop_minimized,
             }
         finally:
             if cancel_event and workspace_id:

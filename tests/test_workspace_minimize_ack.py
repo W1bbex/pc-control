@@ -54,6 +54,7 @@ def test_workspace_uses_minimize_result_from_execution_ack(minimized):
                     break
                 threading.Event().wait(0.01)
             assert app.pending_minimize_cmd_id == "minimize-1"
+            app.mqtt.publish_desktop_action.assert_called_with("minimize_all", {"verify_codex": True})
             app._on_mqtt_event("ack", {"id": "minimize-1", "result": "executed", "data": {}})
         runner.join(timeout=2)
         assert not runner.is_alive()

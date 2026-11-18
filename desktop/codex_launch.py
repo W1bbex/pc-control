@@ -50,20 +50,23 @@ def diagnose_codex_launch(variant, alias, has_visible_window, timeout=15, allow_
         )
         deadline = time.monotonic() + timeout
         seen = False
+        last_window = None
         visible_since = None
         while time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 return {"codex_diagnostic": True, "variant": variant, "state": "cancelled"}
             pids = _codex_processes()
             seen = seen or bool(pids)
-            if pids and has_visible_window(["chatgpt.exe"]):
-                if visible_since is None:
+            window = has_visible_window(["chatgpt.exe"]) if pids else None
+            if window:
+                if window != last_window:
                     visible_since = time.monotonic()
                 elif time.monotonic() - visible_since >= 2:
                     LOG.info("Codex diagnostic variant %s: visible window, pids=%s", variant, pids)
                     return {"codex_diagnostic": True, "variant": variant, "state": "window_visible", "pids": pids}
             else:
                 visible_since = None
+            last_window = window
             time.sleep(0.5)
         pids = _codex_processes()
         exit_code = process.poll()

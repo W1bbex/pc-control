@@ -444,7 +444,7 @@ class WorkspaceRunnerMixin:
             # 4. Standalone minimize_all and wait for ACK (only if not already minimized by agent)
             already_minimized = self.workspace_execution_data.get("desktop_minimized") is True
             if not already_minimized:
-                min_cmd_id = self.mqtt.publish_desktop_action("minimize_all")
+                min_cmd_id = self.mqtt.publish_desktop_action("minimize_all", {"verify_codex": True})
                 self.pending_minimize_cmd_id = min_cmd_id
                 min_ack_received = self._wait_event_or_cancel(self.minimize_ack_event, 10.0) if min_cmd_id else False
 
