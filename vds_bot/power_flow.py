@@ -385,9 +385,11 @@ class PowerFlowManager:
             self.reset_flow()
             return
 
-        if choice in {"flow_unlock_yes", "flow_unlock_and_workspace", "flow_unlock_and_game"}:
+        if choice in {"flow_unlock_yes", "flow_unlock_and_workspace", "flow_unlock_and_game", "flow_unlock_retry"}:
             now = time.time()
             with self._lock:
+                if choice == "flow_unlock_retry" and self.stage != PowerFlowStage.UNLOCK_FAILED:
+                    return
                 if not self.flow_id:
                     self.flow_id = str(uuid.uuid4())
                 if not self.created_at:
@@ -936,10 +938,7 @@ class PowerFlowManager:
         self.ui.send_message(chat_id, text, reply_markup=markup, message_id=mid)
 
     def handle_unlock_retry(self, chat_id):
-        with self._lock:
-            self.unlock_attempts = 0
-            self.pending_unlock_command_id = None
-        self.handle_unlock_decision("flow_unlock_yes", chat_id)
+        self.handle_unlock_decision("flow_unlock_retry", chat_id)
 
     def handle_unlock_cancel(self, chat_id):
         with self._lock:

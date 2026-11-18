@@ -60,6 +60,28 @@ def test_power_flow_unlock_executed_ack_awaits_unlocked_session():
     assert not flow.on_unlock_success.called
 
 
+def test_unlock_retry_launches_persisted_workspace_with_selected_vpn():
+    ui = MagicMock()
+    mqtt = MagicMock(system_status="online", system_session="login_screen")
+    mqtt.publish_system_action.side_effect = ["unlock-1", "unlock-2"]
+    flow = PowerFlowManager(ui, mqtt)
+    flow.set_auto_launch_workspace(vpn="happ", chat_id=123, message_id=456)
+    flow.on_unlock_failed(123, "Разблокировка прервана")
+
+    flow = PowerFlowManager(ui, mqtt)
+    flow.on_workspace_start_cb = MagicMock()
+    app = MagicMock(ui=ui, power_flow=flow)
+    assert route_workspace_callback(app, "flow_unlock_retry", 123, 456, "callback-1")
+    assert route_workspace_callback(app, "flow_unlock_retry", 123, 456, "callback-2")
+    assert mqtt.publish_system_action.call_count == 2
+
+    flow.on_system_session_update("unlocked", 123)
+    assert flow.stage == PowerFlowStage.WORKSPACE_RUNNING
+    flow.on_workspace_start_cb.assert_called_once_with(
+        123, card_message_id=456, workspace_id=flow.active_workspace_id, vpn="happ",
+    )
+
+
 def test_power_flow_check_timeout_ignores_waiting_workspace_decision():
     flow = PowerFlowManager(telegram_ui=MagicMock(), mqtt_gateway=MagicMock())
     flow.stage = PowerFlowStage.WAITING_WORKSPACE_DECISION
