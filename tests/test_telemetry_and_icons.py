@@ -439,7 +439,8 @@ def test_fast_foreground_watcher_does_not_label_inaccessible_window_as_explorer(
         fake_kernel32 = MagicMock()
         fake_kernel32.OpenProcess.return_value = 0
 
-        with patch("agent.ctypes.windll") as mock_windll, \
+        with patch("desktop.os_events._WIN32_SIGS_INITIALIZED", False), \
+             patch("agent.ctypes.windll") as mock_windll, \
              patch("agent.psutil.Process", side_effect=psutil.AccessDenied(4321)):
             mock_windll.user32 = fake_user32
             mock_windll.kernel32 = fake_kernel32
