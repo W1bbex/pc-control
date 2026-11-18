@@ -26,6 +26,16 @@ def build_flow_btn(text: str, style: str, callback_data: str, icon: Optional[str
     return btn
 
 
+def get_rebooting_card(unlock: bool, workspace_vpn_label: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+    text = "<b>Перезагрузка ПК</b>\n\nКоманда отправлена. Жду перезапуска Windows."
+    if workspace_vpn_label:
+        text += f"\nПосле входа запущу рабочий сетап с {html.escape(workspace_vpn_label)}."
+    elif unlock:
+        text += "\nКогда появится экран входа, разблокирую Windows."
+    cancel = build_flow_btn("Отменить ожидание", "danger", "flow_reboot_cancel", ICONS.get("cross"))
+    return text, {"inline_keyboard": [[cancel]]}
+
+
 def resolve_target_mode_info(
     auto_launch_workspace: bool,
     auto_launch_game: bool,

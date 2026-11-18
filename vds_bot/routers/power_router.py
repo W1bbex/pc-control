@@ -33,7 +33,7 @@ def _send_confirm_card(app, chat_id: int, message_id: int, text: str, confirm_bt
     app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
 
 
-def _trigger_reboot(app, chat_id: int, message_id: int, callback_id: str, *, unlock: bool) -> None:
+def _trigger_reboot(app, chat_id: int, message_id: int, callback_id: str, *, unlock: bool, workspace_vpn=None) -> None:
     if not _is_pc_agent_online(app):
         app.ui.answer_callback(callback_id, "ПК не в сети. Перезагрузка невозможна.", alert=True)
         return
@@ -49,7 +49,7 @@ def _trigger_reboot(app, chat_id: int, message_id: int, callback_id: str, *, unl
     app.ui.answer_callback(callback_id, toast)
     if hasattr(app.mqtt, "publish_esp_action"):
         app.mqtt.publish_esp_action("LED_OFF")
-    app.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=unlock)
+    app.power_flow.start_reboot_flow(chat_id, message_id=message_id, unlock=unlock, workspace_vpn=workspace_vpn)
 
 
 def route_power_callback(app, data: str, chat_id: int, message_id: int, callback_id: str) -> bool:
@@ -203,7 +203,7 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
         app.ui.send_message(
             chat_id,
             "<b>🔄 Перезагрузка ПК</b>\n\nВыберите тип перезагрузки:\n\n"
-            "• <b>Перезагрузка + Разблок</b> — ПК перезагрузится, дождётся экрана входа, введёт пароль и предложит рабочий сетап.\n"
+            "• <b>Перезагрузка + Разблок</b> — бот войдёт в Windows после перезагрузки. VPN для рабочего сетапа можно выбрать заранее.\n"
             "• <b>Только перезагрузка</b> — обычный рестарт без авторазблокировки.",
             reply_markup=app.ui.reboot_menu_markup(),
             message_id=message_id,
@@ -216,13 +216,12 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             return True
         app.ui.answer_callback(callback_id)
         if data == "reboot_ask:unlock":
-            _send_confirm_card(
-                app,
+            app.ui.send_message(
                 chat_id,
-                message_id,
-                "<b>🔄 Перезагрузка + Разблок</b>\n\nПК перезагрузится и автоматически введёт пароль на экране входа.\n\nВы уверены?",
-                confirm_btn={"text": "Да, перезагрузить + разблок", "style": "success", "callback_data": "reboot_unlock"},
-                cancel_target="reboot_pc",
+                "<b>Перезагрузка с авторазблокировкой</b>\n\n"
+                "Выберите VPN для рабочего сетапа или отложите выбор до входа. Нажатие подтвердит перезагрузку.",
+                reply_markup=app.ui.reboot_unlock_confirmation_markup(),
+                message_id=message_id,
             )
         else:
             _send_confirm_card(
@@ -235,8 +234,9 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             )
         return True
 
-    if data == "reboot_unlock":
-        _trigger_reboot(app, chat_id, message_id, callback_id, unlock=True)
+    if data in ("reboot_unlock", "reboot_unlock:incy", "reboot_unlock:happ"):
+        _, _, vpn = data.partition(":")
+        _trigger_reboot(app, chat_id, message_id, callback_id, unlock=True, workspace_vpn=vpn or None)
         return True
 
     if data == "reboot_confirm":

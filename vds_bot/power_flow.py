@@ -22,6 +22,7 @@ try:
     )
     from .power_ui import (
         build_flow_btn,
+        get_rebooting_card,
         get_unlock_failed_markup,
         get_unlock_success_markup,
         get_unlocking_markup,
@@ -39,6 +40,7 @@ except ImportError:
     )
     from power_ui import (
         build_flow_btn,
+        get_rebooting_card,
         get_unlock_failed_markup,
         get_unlock_success_markup,
         get_unlocking_markup,
@@ -533,7 +535,7 @@ class PowerFlowManager:
         self.save_state()
         return ws_id
 
-    def start_reboot_flow(self, chat_id, message_id=None, unlock=True):
+    def start_reboot_flow(self, chat_id, message_id=None, unlock=True, *, workspace_vpn=None):
         with self._lock:
             self.flow_id = str(uuid.uuid4())
             self.chat_id = chat_id
@@ -547,22 +549,15 @@ class PowerFlowManager:
             self.unlock_attempts = 0
             self.pending_unlock_command_id = None
             self.workspace_cancelled = False
-            self.auto_launch_workspace = False
+            self.selecting_mode = False
+            self.target_workspace_vpn = workspace_vpn if unlock else None
+            self.auto_launch_workspace = bool(self.target_workspace_vpn)
+            self.auto_launch_game = False
+            _, workspace_vpn_label, _ = self._get_target_mode_info()
 
         self.save_state()
 
-        detail_text = (
-            "⏳ Ожидаю выключения и повторной загрузки Windows для авторазблокировки..."
-            if unlock
-            else "⏳ Ожидаю завершения перезагрузки..."
-        )
-        text = (
-            "<b>🔄 Перезагрузка ПК...</b>\n\n"
-            "Команда на перезагрузку отправлена.\n"
-            f"{detail_text}"
-        )
-        cancel_btn = self._btn("✖ Отмена ожидания", "danger", "flow_reboot_cancel", ICONS.get("cross"))
-        markup = {"inline_keyboard": [[cancel_btn]]}
+        text, markup = get_rebooting_card(unlock, workspace_vpn_label)
         res = self.ui.send_message(chat_id, text, reply_markup=markup, message_id=self.message_id)
         if res and res.get("message_id"):
             with self._lock:

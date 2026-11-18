@@ -297,6 +297,15 @@ class UiMarkupsMixin:
             ]
         }
 
+    def reboot_unlock_confirmation_markup(self):
+        vpn_buttons = self.workspace_vpn_choice_markup(prefix="reboot_unlock")["inline_keyboard"][0]
+        return {"inline_keyboard": [
+            vpn_buttons,
+            [{"text": "Выбрать сетап после входа", "style": "primary",
+              "icon_custom_emoji_id": ICONS.get("lock"), "callback_data": "reboot_unlock"}],
+            self.back_button("reboot_pc"),
+        ]}
+
     def apps_menu_markup(self):
         return {
             "inline_keyboard": [

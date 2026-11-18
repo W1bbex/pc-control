@@ -359,6 +359,50 @@ def test_reboot_unlock_flow_lifecycle():
     assert "Выберите VPN" in sent_text
 
 
+@pytest.mark.parametrize("vpn", ["incy", "happ"])
+def test_reboot_with_preselected_vpn_starts_workspace_after_new_login(vpn):
+    ui = MagicMock(spec=TelegramBotApi)
+    ui.send_message.return_value = {"message_id": 777}
+    mqtt = MagicMock(system_status="online", system_session="unlocked", desktop_status="online")
+    mqtt.publish_system_action.side_effect = ["cmd-restart", "cmd-unlock"]
+    app = PcControlBotApp.__new__(PcControlBotApp)
+    app.ui = ui
+    app.mqtt = mqtt
+    app.power_flow = PowerFlowManager(ui, mqtt)
+
+    app.handle_callback({
+        "id": "cb-reboot-vpn",
+        "data": f"reboot_unlock:{vpn}",
+        "from": {"id": ALLOWED_USER_ID},
+        "message": {"message_id": 777, "chat": {"id": ALLOWED_USER_ID}},
+    })
+    mqtt.publish_system_action.assert_called_once_with("restart")
+    assert vpn in ui.send_message.call_args.args[1].lower()
+
+    flow = PowerFlowManager(ui, mqtt)
+    assert flow.stage == PowerFlowStage.REBOOTING
+    assert flow.target_workspace_vpn == vpn
+    flow.on_workspace_start_cb = MagicMock()
+    flow.on_system_session_update("unlocked", ALLOWED_USER_ID)
+    flow.on_workspace_start_cb.assert_not_called()
+
+    mqtt.system_status = "offline"
+    flow.on_system_session_update("unknown", ALLOWED_USER_ID)
+    mqtt.system_status = "online"
+    mqtt.system_session = "login_screen"
+    flow.on_system_session_update("login_screen", ALLOWED_USER_ID)
+    mqtt.publish_system_action.assert_called_with("unlock")
+    flow.on_workspace_start_cb.assert_not_called()
+
+    mqtt.system_session = "unlocked"
+    flow.on_system_session_update("unlocked", ALLOWED_USER_ID)
+    flow.on_system_session_update("unlocked", ALLOWED_USER_ID)
+    assert flow.stage == PowerFlowStage.WORKSPACE_RUNNING
+    flow.on_workspace_start_cb.assert_called_once_with(
+        ALLOWED_USER_ID, card_message_id=777, workspace_id=flow.active_workspace_id, vpn=vpn,
+    )
+
+
 def test_reboot_plain_flow_lifecycle():
     ui = MagicMock()
     mqtt = MagicMock()

@@ -101,9 +101,12 @@ def test_reboot_ask_shows_confirmation_and_guards_offline():
 
     assert route_power_callback(app, "reboot_ask:unlock", chat_id=101, message_id=77, callback_id="cb-r1")
     app.mqtt.publish_system_action.assert_not_called()
-    _, _, markup_unlock, msg_id_unlock = ui.sent[-1]
+    _, text_unlock, markup_unlock, msg_id_unlock = ui.sent[-1]
     assert msg_id_unlock == 77
-    assert [b["callback_data"] for r in markup_unlock["inline_keyboard"] for b in r] == ["reboot_unlock", "reboot_pc"]
+    assert "Выберите VPN" in text_unlock
+    assert [b["callback_data"] for r in markup_unlock["inline_keyboard"] for b in r] == [
+        "reboot_unlock:incy", "reboot_unlock:happ", "reboot_unlock", "reboot_pc",
+    ]
 
     assert route_power_callback(app, "reboot_ask:plain", chat_id=101, message_id=78, callback_id="cb-r2")
     app.mqtt.publish_system_action.assert_not_called()
@@ -116,6 +119,10 @@ def test_reboot_ask_shows_confirmation_and_guards_offline():
     assert route_power_callback(app, "reboot_ask:plain", chat_id=101, message_id=79, callback_id="cb-r3")
     assert len(ui.sent) == sent_before
     assert ui.callbacks[-1][2] is True
+
+    assert route_power_callback(app, "reboot_unlock:happ", chat_id=101, message_id=77, callback_id="cb-r4")
+    app.mqtt.publish_system_action.assert_not_called()
+    app.power_flow.start_reboot_flow.assert_not_called()
 
 
 def test_sleep_pc_and_sleep_confirm_update_card_and_check_online():
