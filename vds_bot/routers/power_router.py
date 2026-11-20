@@ -4,6 +4,8 @@
 from datetime import datetime, timedelta
 import logging
 
+from .workspace_router import GAME_INFO
+
 try:
     from zoneinfo import ZoneInfo
     MOSCOW = ZoneInfo("Europe/Moscow")
@@ -76,9 +78,20 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
         return True
 
     # 2. Power On
-    if data == "power_on":
+    if data == "power_on" or data.startswith(("power_start:", "power_start_game:")):
+        game = None
+        vpn = None
+        if data.startswith("power_start_game:"):
+            _, _, selection = data.partition(":")
+            game, _, vpn = selection.partition(":")
+            if game not in GAME_INFO or vpn not in {"incy", "happ"}:
+                return False
+        elif data != "power_on":
+            vpn = data.split(":", 1)[1]
+            if vpn not in {"incy", "happ", "plain"}:
+                return False
         stage = getattr(getattr(app, "power_flow", None), "stage", None)
-        if stage == "POWERING_ON":
+        if stage in ("POWERING_ON", "REBOOTING", "UNLOCKING"):
             app.ui.answer_callback(callback_id, "Компьютер уже запускается...", alert=True)
             return True
 
@@ -96,20 +109,36 @@ def route_power_callback(app, data: str, chat_id: int, message_id: int, callback
             app.ui.answer_callback(callback_id, "❌ Модуль питания (ESP8266) не в сети!", alert=True)
             return True
 
+        if data == "power_on":
+            app.current_menu_view = "power_menu"
+            app.ui.answer_callback(callback_id)
+            app.ui.send_message(chat_id, "<b>Включение ПК</b>\n\nВыберите VPN для рабочего сетапа, игру или только включение.",
+                                reply_markup=app.ui.startup_options_markup(power_on=True), message_id=message_id)
+            return True
+
         app.physical_btn.revoke_morse_eligibility()
         app.save_state()
         app.ui.answer_callback(callback_id, "Запускаю ПК...")
-        app.power_flow.start_power_on(chat_id, message_id=message_id)
+        plan = {"vpn": vpn, "game": game} if vpn != "plain" else {}
+        app.power_flow.start_power_on(chat_id, message_id=message_id, **plan)
         return True
 
     # 3. Manual Actions (Lock / Unlock / Screen / Minimize)
-    if data == "unlock_windows_manual":
+    if data in {"unlock_windows_manual", "unlock_start:incy", "unlock_start:happ", "unlock_start:plain"}:
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
         if pc_state.state in ("SHUTDOWN_OBSERVED", "UNREACHABLE") or app.mqtt.system_status != "online":
             app.ui.answer_callback(callback_id, "ПК недоступен. Сначала включи его.", alert=True)
             return True
+        if data == "unlock_windows_manual":
+            app.current_menu_view = "power_menu"
+            app.ui.answer_callback(callback_id)
+            app.ui.send_message(chat_id, "<b>Разблокировка Windows</b>\n\nВыберите VPN для рабочего сетапа, игру или только разблокировку.",
+                                reply_markup=app.ui.startup_options_markup(power_on=False), message_id=message_id)
+            return True
+        vpn = data.split(":", 1)[1]
         app.ui.answer_callback(callback_id, "Разблокирую...")
-        app.power_flow.start_manual_unlock(chat_id, message_id=message_id)
+        plan = {} if vpn == "plain" else {"auto_launch_workspace": True, "workspace_vpn": vpn}
+        app.power_flow.start_manual_unlock(chat_id, message_id=message_id, **plan)
         return True
 
     if data == "lock_windows":

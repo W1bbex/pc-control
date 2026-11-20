@@ -53,6 +53,8 @@ class MqttDispatcherMixin:
 
         if event_type in {"system_status", "health_update"}:
             session = data.get("session") or data.get("system_session")
+            if session == "unlocked":
+                session = self.mqtt.system_session
             LOG.info("_on_mqtt_event %s: system_session=%s (system_status=%s)", event_type, session, data.get("system_status"))
             self.power_flow.on_system_session_update(session, target_user)
             if self._check_shutdown_confirmation(time.time()):

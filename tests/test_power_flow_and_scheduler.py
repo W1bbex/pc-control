@@ -90,7 +90,7 @@ def test_power_flow_check_timeout_ignores_waiting_workspace_decision():
 
 
 def test_power_flow_auto_launch_workspace_returns_without_waiting_decision():
-    mgr = PowerFlowManager(telegram_ui=MagicMock(), mqtt_gateway=MagicMock())
+    mgr = PowerFlowManager(telegram_ui=MagicMock(), mqtt_gateway=MagicMock(system_status="online"))
     mgr.stage = PowerFlowStage.UNLOCKING
     mgr.auto_launch_workspace = True
     mgr.on_workspace_start_cb = None
@@ -98,6 +98,26 @@ def test_power_flow_auto_launch_workspace_returns_without_waiting_decision():
     mgr.on_system_session_update("unlocked", 123)
     assert mgr.stage == PowerFlowStage.WORKSPACE_RUNNING
     assert mgr.auto_launch_workspace is False
+
+
+def test_power_on_reserves_selected_workspace_before_windows_is_online():
+    mqtt = MagicMock(system_status="offline", system_session="unknown", desktop_status="offline", esp_status="online")
+    mqtt.health.evaluate_pc_state.return_value = MagicMock(state="SHUTDOWN_OBSERVED")
+    flow = PowerFlowManager(MagicMock(), mqtt)
+    flow.on_workspace_start_cb = MagicMock()
+    flow.start_power_on(123, message_id=456, vpn="happ")
+    assert flow.stage == PowerFlowStage.UNLOCKING
+    assert flow.target_workspace_vpn == "happ"
+    assert mqtt.publish_esp_action.call_args_list[0].args == ("PRESS",)
+    mqtt.publish_system_action.assert_not_called()
+    flow.on_workspace_start_cb.assert_not_called()
+
+    mqtt.system_status = "online"
+    mqtt.system_session = "unlocked"
+    flow.on_system_session_update("unlocked", 123)
+    flow.on_workspace_start_cb.assert_called_once_with(
+        123, card_message_id=456, workspace_id=flow.active_workspace_id, vpn="happ",
+    )
 
 
 def test_power_flow_workspace_callback_exception_invoked_once():
@@ -339,7 +359,7 @@ def test_power_scheduler_evicts_stale_telemetry_and_antigravity_cmd_ids():
 
 def test_unlock_failed_recovers_to_waiting_workspace_decision():
     with patch.object(PowerFlowManager, "load_state"), patch.object(PowerFlowManager, "save_state"):
-        flow = PowerFlowManager(MagicMock(), MagicMock())
+        flow = PowerFlowManager(MagicMock(), MagicMock(system_status="online"))
         flow.stage = PowerFlowStage.UNLOCK_FAILED
         flow.chat_id = 12345
         flow.on_system_session_update("unlocked", 12345)

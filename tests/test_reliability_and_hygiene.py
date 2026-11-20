@@ -174,7 +174,7 @@ def test_power_router_passes_message_id_to_start_power_on():
     app.ui = SimpleNamespace(answer_callback=MagicMock())
     app.power_flow = SimpleNamespace(start_power_on=MagicMock())
 
-    handled = route_power_callback(app, data="power_on", chat_id=123, message_id=777, callback_id="cb1")
+    handled = route_power_callback(app, data="power_start:plain", chat_id=123, message_id=777, callback_id="cb1")
     assert handled is True
     app.power_flow.start_power_on.assert_called_once_with(123, message_id=777)
 
@@ -1038,6 +1038,8 @@ def test_workspace_runner_resets_cmd_ids_on_publish_failure():
             self.ui = MagicMock()
             self.mqtt = SimpleNamespace(
                 desktop_status="online",
+                system_status="online",
+                system_session="unlocked",
                 publish_desktop_action=MagicMock(return_value=None),  # MQTT failure
             )
             self.power_flow = SimpleNamespace(reset_flow=MagicMock())

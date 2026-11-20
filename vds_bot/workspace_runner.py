@@ -190,6 +190,20 @@ class WorkspaceRunnerMixin:
     Mixin for PcControlBotApp providing asynchronous workspace and gaming setup execution.
     """
 
+    def _stop_workspace_if_locked(self, chat_id, message_id):
+        if self.mqtt.system_status == "online" and self.mqtt.system_session == "unlocked":
+            return False
+        LOG.warning("Workspace cannot continue without a confirmed unlocked Windows session")
+        button = {"text": "Разблокировать Windows", "style": "primary", "callback_data": "unlock_windows_manual"}
+        if ICONS.get("lock"):
+            button["icon_custom_emoji_id"] = ICONS["lock"]
+        self.ui.send_message(
+            chat_id, "<b>Сетап не подтверждён</b>\n\nБот потерял подтверждение, что Windows разблокирована.",
+            reply_markup={"inline_keyboard": [[button]]}, message_id=message_id,
+        )
+        self.power_flow.reset_flow()
+        return True
+
     def _wait_event_or_cancel(self, event, timeout):
         start = time.time()
         while time.time() - start < timeout:
@@ -335,6 +349,9 @@ class WorkspaceRunnerMixin:
                 self.power_flow.reset_flow()
                 return
 
+            if self._stop_workspace_if_locked(chat_id, msg_id):
+                return
+
             # Issue launch_app command to agent.py
             ws_id = workspace_id or f"desk-ws-{int(time.time())}"
             cmd_id = self.mqtt.publish_desktop_action(
@@ -441,6 +458,9 @@ class WorkspaceRunnerMixin:
                 self.power_flow.reset_flow()
                 return
 
+            if self._stop_workspace_if_locked(chat_id, msg_id):
+                return
+
             # 4. Standalone minimize_all and wait for ACK (only if not already minimized by agent)
             already_minimized = self.workspace_execution_data.get("desktop_minimized") is True
             if not already_minimized:
@@ -468,6 +488,9 @@ class WorkspaceRunnerMixin:
                     self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
                     self.power_flow.reset_flow()
                     return
+
+            if self._stop_workspace_if_locked(chat_id, msg_id):
+                return
 
             # 5. Final Success (Only when minimize_all ACK executed!)
             final_text = render_checklist() + "\n\n<b>✅ Рабочий сетап успешно запущен!</b>\nВсе приложения открыты, VPN активен, окна свернуты."
@@ -585,6 +608,9 @@ class WorkspaceRunnerMixin:
                 self.power_flow.reset_flow()
                 return
 
+            if self._stop_workspace_if_locked(chat_id, msg_id):
+                return
+
             # 1. Issue launch_app command to agent.py
             ws_id = workspace_id or f"game-ws-{int(time.time())}"
             cmd_id = self.mqtt.publish_desktop_action(
@@ -689,6 +715,9 @@ class WorkspaceRunnerMixin:
                 }
                 self.ui.send_message(chat_id, notice_text, reply_markup=notice_markup, message_id=msg_id)
                 self.power_flow.reset_flow()
+                return
+
+            if self._stop_workspace_if_locked(chat_id, msg_id):
                 return
 
             # 5. Final Success!

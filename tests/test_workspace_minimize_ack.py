@@ -6,12 +6,12 @@ import pytest
 from vds_bot.bot import PcControlBotApp
 
 
-@pytest.mark.parametrize("minimized", [True, False, None])
-def test_workspace_uses_minimize_result_from_execution_ack(minimized):
+@pytest.mark.parametrize("minimized, relocked", [(True, False), (False, False), (None, False), (True, True)])
+def test_workspace_uses_minimize_and_session_status_to_report_success(minimized, relocked):
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.ui = MagicMock()
     app.ui.send_message.return_value = {"message_id": 1}
-    app.mqtt = MagicMock()
+    app.mqtt = MagicMock(system_status="online", system_session="unlocked")
     app.mqtt.desktop_status = "online"
     app.mqtt.publish_desktop_action.side_effect = ["workspace-1", "minimize-1"]
     app.power_flow = MagicMock()
@@ -47,6 +47,8 @@ def test_workspace_uses_minimize_result_from_execution_ack(minimized):
         for step in app.current_workspace_steps:
             app._on_mqtt_event("ack", {"id": "workspace-1", "result": "progress", "data": {"step_id": step["id"], "state": "verified"}})
         data = {} if minimized is None else {"desktop_minimized": minimized}
+        if relocked:
+            app.mqtt.system_session = "locked"
         app._on_mqtt_event("ack", {"id": "workspace-1", "result": "executed", "data": data})
         if minimized is not True:
             for _ in range(200):
@@ -60,7 +62,10 @@ def test_workspace_uses_minimize_result_from_execution_ack(minimized):
         assert not runner.is_alive()
         actions = [call.args[0] for call in app.mqtt.publish_desktop_action.call_args_list]
         assert actions == (["launch_app"] if minimized is True else ["launch_app", "minimize_all"])
-        assert any("Рабочий сетап успешно запущен" in call.args[1] for call in app.ui.send_message.call_args_list)
+        texts = [call.args[1] for call in app.ui.send_message.call_args_list]
+        assert any("Рабочий сетап успешно запущен" in text for text in texts) is not relocked
+        if relocked:
+            assert "Сетап не подтверждён" in texts[-1]
     finally:
         app.workspace_cancel_event.set()
         runner.join(timeout=2)

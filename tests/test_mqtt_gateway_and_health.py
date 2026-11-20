@@ -15,11 +15,42 @@ from vds_bot.mqtt_dispatcher import MqttDispatcherMixin
 from vds_bot.mqtt_gateway import (
     TOPIC_DESKTOP_ACK,
     TOPIC_PHYSICAL_INPUT,
+    TOPIC_SYSTEM_STATUS,
     TOPIC_TELEMETRY,
     MqttGateway,
 )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def test_gateway_requires_stable_live_console_unlock(monkeypatch):
+    gateway = MqttGateway("test", "test")
+    clock = [100.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def report(session, *, retained=False, ts=None, source=None):
+        message = MagicMock(topic=TOPIC_SYSTEM_STATUS, retain=retained)
+        message.payload = json.dumps({
+            "state": "online", "session": session, "ts": ts if ts is not None else clock[0],
+            "boot_id": "boot-1", "session_source": source or f"wts_session_flags_{session}",
+        }).encode()
+        gateway._on_message(None, None, message)
+        return gateway.system_session
+
+    assert report("unlocked", retained=True) == "unknown"
+    clock[0] += 5
+    assert report("unlocked") == "unknown"
+    clock[0] += 2
+    assert report("locked") == "locked"
+    clock[0] += 5
+    assert report("unlocked", source="input_desktop_accessible") == "unknown"
+    clock[0] += 5
+    assert report("unlocked") == "unknown"
+    clock[0] += 5
+    assert report("unlocked", ts=clock[0] - 5) == "unknown"
+    assert report("unlocked") == "unlocked"
+    assert report("locked") == "locked"
 
 
 def test_health_engine_keeps_shutdown_observed_when_agents_stale():

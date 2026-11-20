@@ -84,7 +84,7 @@ class MockMqttGateway:
     def __init__(self):
         self.published_messages = []
         self.system_status = "online"
-        self.system_session = "locked"
+        self.system_session = "unlocked"
         self.esp_status = "online"
         self.desktop_status = "online"
         self.mqtt_online = True
@@ -92,7 +92,7 @@ class MockMqttGateway:
         self.health.update("mqtt_broker", "online")
         self.health.update("windows_system", "online", ts=time.time())
         self.health.update("windows_desktop", "online", ts=time.time())
-        self.health.update("windows_session", "locked", ts=time.time())
+        self.health.update("windows_session", "unlocked", ts=time.time())
         self.health.update("telemetry", "fresh", ts=time.time())
 
     def publish_esp_action(self, action, value=None):
@@ -521,7 +521,7 @@ def test_manual_unlock_online_locked_pc_updates_card_and_dispatches_unlock(tmp_p
     callback = {
         "id": "cb4",
         "message": {"chat": {"id": 12345}, "message_id": 777},
-        "data": "unlock_windows_manual",
+        "data": "unlock_start:plain",
     }
     app.handle_callback(callback)
 
@@ -540,6 +540,10 @@ def test_manual_unlock_online_locked_pc_updates_card_and_dispatches_unlock(tmp_p
         "result": "executed",
         "data": {"session": "unlocked"},
     })
+
+    assert app.power_flow.stage == PowerFlowStage.UNLOCKING
+    mqtt.system_session = "unlocked"
+    app.power_flow.on_system_session_update("unlocked", 12345)
 
     assert app.power_flow.stage == PowerFlowStage.WAITING_WORKSPACE_DECISION
     assert len(ui.edited_messages) >= 1

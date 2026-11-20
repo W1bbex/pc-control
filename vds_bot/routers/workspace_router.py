@@ -7,6 +7,11 @@ import time
 
 LOG = logging.getLogger("pc-control-bot.routers.workspace")
 
+try:
+    from ..workspace_runner import GAME_INFO
+except ImportError:
+    from workspace_runner import GAME_INFO
+
 
 def route_workspace_callback(app, data: str, chat_id: int, message_id: int, callback_id: str) -> bool:
     """Handle workspace, game, and app callback queries. Returns True if handled, False otherwise."""
@@ -14,12 +19,10 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         from vds_bot.power_flow import PowerFlowStage
         from vds_bot.health_engine import PCState
         from vds_bot.telegram_ui import ICONS
-        from vds_bot.workspace_runner import GAME_INFO
     except ImportError:
         from power_flow import PowerFlowStage
         from health_engine import PCState
         from telegram_ui import ICONS
-        from workspace_runner import GAME_INFO
 
     # 1. Apps Menu Navigation
     if data == "apps_menu":
@@ -36,6 +39,23 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
 
     if data == "noop":
         app.ui.answer_callback(callback_id)
+        return True
+
+    if data == "power_game":
+        app.current_menu_view = "game_menu"
+        app.ui.answer_callback(callback_id)
+        app.ui.send_message(chat_id, "<b>Игра после включения ПК</b>\n\nВыберите игру, затем VPN.",
+                            reply_markup=app.ui.game_choice_markup("power_game"), message_id=message_id)
+        return True
+
+    if data.startswith("power_game:"):
+        game = data.split(":", 1)[1]
+        if game not in GAME_INFO:
+            return False
+        app.ui.answer_callback(callback_id)
+        game_name = html.escape(GAME_INFO[game]["name"])
+        app.ui.send_message(chat_id, f"<b>{game_name}</b>\n\nВыберите VPN. ПК включится, а игра запустится после входа в Windows.",
+                            reply_markup=app.ui.game_vpn_choice_markup(game, "power_start_game"), message_id=message_id)
         return True
 
     # 3. Unlock Flow Decisions
@@ -125,14 +145,14 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
     if data == "game_start_direct":
         app.current_menu_view = "game_menu"
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
-        if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
+        if pc_state.session_status == "unlocked":
             app.ui.answer_callback(callback_id)
             game_icon = ICONS.get("game")
             game_tag = f'<tg-emoji emoji-id="{game_icon}">🎮</tg-emoji> ' if game_icon else ""
             text = f"<b>{game_tag}Запуск игрового сетапа</b>\n\nВыберите игру для запуска:"
             markup = app.ui.game_choice_markup("direct_game")
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-        elif pc_state.state == "LOCKED":
+        elif pc_state.state in (PCState.LOCKED, PCState.BOOTING, PCState.DEGRADED):
             app.ui.answer_callback(callback_id)
             text = "<b>Windows не разблокирована.</b>\n\nРазблокировать сейчас?"
             markup = {
@@ -160,13 +180,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
             app.ui.answer_callback(callback_id)
             safe_label = html.escape(str(pc_state.label or ""))
             safe_reason = html.escape(str(pc_state.reason or ""))
-            text = f"<b>{safe_label}</b>\n\n{safe_reason}\n\nВключить ПК сейчас?"
-            markup = {
-                "inline_keyboard": [
-                    [{"text": "Включить ПК", "style": "success", "callback_data": "power_on"}],
-                    app.ui.back_button("menu"),
-                ]
-            }
+            text = f"<b>{safe_label}</b>\n\n{safe_reason}\n\nВыберите игру для запуска после включения ПК."
+            markup = app.ui.game_choice_markup("power_game")
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
 
@@ -185,7 +200,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
         game_key = parts[1] if len(parts) > 1 else "gta5"
         selected_vpn = parts[2] if len(parts) > 2 else "incy"
         sess_status = getattr(app.mqtt, "system_session", None)
-        if not sess_status or sess_status in ("locked", "login_screen", "no_console"):
+        if sess_status != "unlocked":
             app.ui.answer_callback(callback_id, "🔒 Windows заблокирована. Сначала разблокируйте ПК.", alert=True)
             return True
         if getattr(app.power_flow, "stage", None) == PowerFlowStage.WORKSPACE_RUNNING:
@@ -214,7 +229,7 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
     if data in {"workspace_vpn:incy", "workspace_vpn:happ"}:
         selected_vpn = data.split(":", 1)[1]
         sess_status = getattr(app.mqtt, "system_session", None)
-        if not sess_status or sess_status in ("locked", "login_screen", "no_console"):
+        if sess_status != "unlocked":
             app.ui.answer_callback(callback_id, "🔒 Windows заблокирована. Сначала разблокируйте ПК.", alert=True)
             return True
         if getattr(app.power_flow, "stage", None) == PowerFlowStage.WORKSPACE_RUNNING:
@@ -237,14 +252,14 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
     if data == "workspace_start_direct":
         app.current_menu_view = "workspace_menu"
         pc_state = app.mqtt.health.evaluate_pc_state(app.monitoring.telemetry_age())
-        if pc_state.session_status == "unlocked" or getattr(pc_state, "state", None) in (PCState.READY, PCState.DEGRADED):
+        if pc_state.session_status == "unlocked":
             app.ui.answer_callback(callback_id)
             text = app.ui.workspace_vpn_choice_text() if hasattr(app.ui, "workspace_vpn_choice_text") else ""
             if not isinstance(text, str) or not text:
                 text = "<b>Запуск рабочего сетапа</b>\n\nВыберите VPN для подключения:"
             markup = app.ui.workspace_vpn_choice_markup(active_vpn=getattr(app, "chosen_vpn", "incy"))
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
-        elif pc_state.state == "LOCKED":
+        elif pc_state.state in (PCState.LOCKED, PCState.BOOTING, PCState.DEGRADED):
             app.ui.answer_callback(callback_id)
             text = "<b>Windows не разблокирована.</b>\n\nРазблокировать сейчас?"
             markup = {
@@ -272,27 +287,8 @@ def route_workspace_callback(app, data: str, chat_id: int, message_id: int, call
             app.ui.answer_callback(callback_id)
             safe_label = html.escape(str(pc_state.label or ""))
             safe_reason = html.escape(str(pc_state.reason or ""))
-            text = f"<b>{safe_label}</b>\n\n{safe_reason}\n\nВключить ПК сейчас?"
-            markup = {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "Включить ПК",
-                            "style": "success",
-                            "icon_custom_emoji_id": ICONS.get("power"),
-                            "callback_data": "power_on",
-                        },
-                    ],
-                    [
-                        {
-                            "text": "Отмена",
-                            "style": "danger",
-                            "icon_custom_emoji_id": ICONS.get("cross"),
-                            "callback_data": "menu",
-                        },
-                    ]
-                ]
-            }
+            text = f"<b>{safe_label}</b>\n\n{safe_reason}\n\nВыберите VPN. ПК включится, а сетап запустится после входа в Windows."
+            markup = app.ui.workspace_vpn_choice_markup(prefix="power_start")
             app.ui.send_message(chat_id, text, reply_markup=markup, message_id=message_id)
         return True
 

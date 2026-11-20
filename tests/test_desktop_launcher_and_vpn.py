@@ -600,7 +600,7 @@ def test_codex_absent_from_workspace_steps_but_available_in_apps_menu():
 
 def test_workspace_runner_reports_partial_warning_when_step_unverified():
     ui = MagicMock()
-    mqtt = MagicMock()
+    mqtt = MagicMock(system_status="online", system_session="unlocked")
     mqtt.publish_desktop_action.return_value = "cmd-ws-test"
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.ui = ui

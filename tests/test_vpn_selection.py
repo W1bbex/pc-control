@@ -211,7 +211,7 @@ def test_bot_workspace_start_direct_prompts_vpn_choice():
 
 def test_bot_workspace_vpn_selection_starts_runner():
     ui = MagicMock()
-    mqtt = MagicMock()
+    mqtt = MagicMock(system_session="unlocked")
     app = PcControlBotApp.__new__(PcControlBotApp)
     app.ui = ui
     app.mqtt = mqtt
@@ -236,7 +236,7 @@ def test_bot_workspace_vpn_selection_starts_runner():
 
 def test_bot_runner_waits_for_chosen_vpn():
     ui = MagicMock()
-    mqtt = MagicMock()
+    mqtt = MagicMock(system_status="online", system_session="unlocked")
     mqtt.desktop_status = "online"
     mqtt.publish_desktop_action.side_effect = lambda action, *args, **kwargs: f"cmd-{action}"
 

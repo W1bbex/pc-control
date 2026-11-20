@@ -3,8 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from vds_bot.power_scheduler import PowerSchedulerMixin
 from vds_bot.routers.power_router import route_power_callback
+from vds_bot.routers.workspace_router import route_workspace_callback
 from vds_bot.ui_markups import UiMarkupsMixin
 
 
@@ -123,6 +126,54 @@ def test_reboot_ask_shows_confirmation_and_guards_offline():
     assert route_power_callback(app, "reboot_unlock:happ", chat_id=101, message_id=77, callback_id="cb-r4")
     app.mqtt.publish_system_action.assert_not_called()
     app.power_flow.start_reboot_flow.assert_not_called()
+
+
+@pytest.mark.parametrize("entry, confirmation, online", [
+    ("power_on", "power_start:happ", False),
+    ("unlock_windows_manual", "unlock_start:happ", True),
+])
+def test_startup_entry_selects_vpn_before_dispatch(entry, confirmation, online):
+    ui = DummyUi()
+    app = DummySchedulerApp(ui)
+    app.power_flow = MagicMock()
+    app.physical_btn = MagicMock()
+    status = "online" if online else "offline"
+    app.mqtt.system_status = app.mqtt.desktop_status = status
+    app.mqtt.esp_status = "online"
+    app.mqtt.health.evaluate_pc_state = lambda age: SimpleNamespace(state="LOCKED" if online else "SHUTDOWN_OBSERVED")
+
+    assert route_power_callback(app, entry, chat_id=101, message_id=77, callback_id="choose")
+    assert confirmation in {btn["callback_data"] for row in ui.sent[-1][2]["inline_keyboard"] for btn in row}
+    app.power_flow.start_power_on.assert_not_called()
+    app.power_flow.start_manual_unlock.assert_not_called()
+
+    assert route_power_callback(app, confirmation, chat_id=101, message_id=77, callback_id="start")
+    if online:
+        app.power_flow.start_manual_unlock.assert_called_once_with(101, message_id=77, auto_launch_workspace=True, workspace_vpn="happ")
+    else:
+        app.power_flow.start_power_on.assert_called_once_with(101, message_id=77, vpn="happ", game=None)
+
+
+def test_offline_game_menu_keeps_game_and_vpn_until_power_on_confirmation():
+    ui = DummyUi()
+    app = DummySchedulerApp(ui)
+    app.power_flow = MagicMock()
+    app.physical_btn = MagicMock()
+    app.mqtt.system_status = app.mqtt.desktop_status = "offline"
+    app.mqtt.esp_status = "online"
+    app.mqtt.health.evaluate_pc_state = lambda age: SimpleNamespace(
+        state="SHUTDOWN_OBSERVED", session_status="unknown", label="Выключен", reason="ПК выключен",
+    )
+
+    assert route_workspace_callback(app, "game_start_direct", 101, 77, "games")
+    assert ui.sent[-1][2]["inline_keyboard"][0][0]["callback_data"] == "power_game:minecraft"
+    assert route_workspace_callback(app, "power_game:minecraft", 101, 77, "game")
+    callback = ui.sent[-1][2]["inline_keyboard"][0][1]["callback_data"]
+    assert callback == "power_start_game:minecraft:happ"
+    app.power_flow.start_power_on.assert_not_called()
+
+    assert route_power_callback(app, callback, 101, 77, "confirm")
+    app.power_flow.start_power_on.assert_called_once_with(101, message_id=77, vpn="happ", game="minecraft")
 
 
 def test_sleep_pc_and_sleep_confirm_update_card_and_check_online():

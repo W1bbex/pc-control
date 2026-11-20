@@ -9,11 +9,12 @@ import threading
 import paho.mqtt.client as mqtt
 
 try:
-    from .health_engine import HealthEngine
+    from .health_engine import HealthEngine, _parse_ts
 except ImportError:
-    from health_engine import HealthEngine
+    from health_engine import HealthEngine, _parse_ts
 
 LOG = logging.getLogger("pc-control-bot.mqtt_gateway")
+UNLOCK_CONFIRM_SECONDS = 3.0
 
 # ESP Topics
 TOPIC_ESP_COMMAND = "pc/main/command"
@@ -52,6 +53,7 @@ class MqttGateway:
 
         self.mqtt_online = False
         self.health = HealthEngine()
+        self._unlock_candidate = None
         self.health.update("telegram", "unknown")
         
         self.pending_commands = {}
@@ -147,11 +149,33 @@ class MqttGateway:
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         LOG.warning("MQTT disconnected: %s", reason_code)
         self.mqtt_online = False
+        self._unlock_candidate = None
         self.health.update("mqtt_broker", "unknown")
         
         # When broker drops, MQTT statuses become unknown
         self.health.set_all_unknown(exclude=["telegram"])
         self._emit_health_state()
+
+    def _record_windows_session(self, session, current, boot_id, ts, retained, source):
+        component = self.health.components["windows_session"]
+        sample_ts = _parse_ts(ts)
+        candidate = None
+        if session == "unlocked":
+            session = "unknown"
+            if (current == "online" and not retained and sample_ts and sample_ts > 0
+                    and abs(time.time() - sample_ts) <= component.stale_threshold
+                    and source not in ("input_desktop_accessible", "logonui_not_running")):
+                now = time.monotonic()
+                previous = getattr(self, "_unlock_candidate", None)
+                if previous and previous[0] == boot_id and component.status != "stale":
+                    candidate = previous
+                else:
+                    candidate = (boot_id, sample_ts, now)
+                if min(sample_ts - candidate[1], now - candidate[2]) >= UNLOCK_CONFIRM_SECONDS:
+                    session = "unlocked"
+
+        if self.health.update("windows_session", session, boot_id=boot_id, ts=ts, is_retained=retained):
+            self._unlock_candidate = candidate
 
     def _on_message(self, client, userdata, message):
         topic = message.topic
@@ -217,7 +241,7 @@ class MqttGateway:
                     elif data.get("event") == "stealth_exit":
                         self._emit("stealth_exit", data)
                 self.health.update("windows_system", current, boot_id=boot_id, ts=ts, is_retained=message.retain)
-                self.health.update("windows_session", session, boot_id=boot_id, ts=ts, is_retained=message.retain)
+                self._record_windows_session(session, current, boot_id, ts, message.retain, data.get("session_source"))
                 self._emit_health_state()
             except Exception as e:
                 LOG.warning("Failed to update windows_system/session health: %s", e)

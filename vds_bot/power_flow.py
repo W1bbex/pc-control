@@ -192,10 +192,10 @@ class PowerFlowManager:
             self.selecting_mode = False
         clear_persisted_flow_state(FLOW_STATE_PATH)
 
-    def start_power_on(self, chat_id, message_id=None):
+    def start_power_on(self, chat_id, message_id=None, *, vpn=None, game=None):
         with self._lock:
-            if self.stage == PowerFlowStage.POWERING_ON or getattr(self, "_starting_power_on", False):
-                LOG.warning("start_power_on ignored: already in POWERING_ON stage")
+            if self.stage in (PowerFlowStage.POWERING_ON, PowerFlowStage.REBOOTING, PowerFlowStage.UNLOCKING) or getattr(self, "_starting_power_on", False):
+                LOG.warning("start_power_on ignored: a power or unlock flow is active")
                 return
             self._starting_power_on = True
             if message_id:
@@ -255,7 +255,12 @@ class PowerFlowManager:
             with self._lock:
                 self.flow_id = str(uuid.uuid4())
                 self.chat_id = chat_id
-                self.stage = PowerFlowStage.POWERING_ON
+                self.stage = PowerFlowStage.UNLOCKING if vpn else PowerFlowStage.POWERING_ON
+                self.auto_launch_workspace = bool(vpn and not game)
+                self.auto_launch_game = bool(vpn and game)
+                self.target_workspace_vpn = vpn if self.auto_launch_workspace else None
+                self.target_game, self.target_game_vpn = (game, vpn) if self.auto_launch_game else (None, None)
+                self.selecting_mode = False
                 self.created_at = time.time()
                 self.expires_at = self.created_at + FLOW_TTL_SECONDS
                 self.unlock_attempts = 0
@@ -564,13 +569,15 @@ class PowerFlowManager:
                 self.message_id = res["message_id"]
             self.save_state()
 
-    def start_manual_unlock(self, chat_id, message_id=None, auto_launch_workspace=False):
+    def start_manual_unlock(self, chat_id, message_id=None, auto_launch_workspace=False, *, workspace_vpn=None):
         already_in_flight = False
         with self._lock:
             if self.stage == PowerFlowStage.UNLOCKING and self.pending_unlock_command_id:
                 already_in_flight = True
                 if auto_launch_workspace:
                     self.auto_launch_workspace = True
+                    self.auto_launch_game = False
+                    self.target_workspace_vpn = workspace_vpn or self.target_workspace_vpn
             else:
                 self.flow_id = str(uuid.uuid4())
                 self.chat_id = chat_id
@@ -582,6 +589,8 @@ class PowerFlowManager:
                 self.pending_unlock_command_id = None
                 self.workspace_cancelled = False
                 self.auto_launch_workspace = bool(auto_launch_workspace)
+                self.auto_launch_game = self.selecting_mode = False
+                self.target_workspace_vpn = workspace_vpn if auto_launch_workspace else None
 
         if already_in_flight:
             LOG.info("Manual unlock requested while an unlock command is already in-flight. Ignoring duplicate trigger.")
@@ -626,7 +635,7 @@ class PowerFlowManager:
         if stage != PowerFlowStage.UNLOCKING:
             return
 
-        if session == "unlocked":
+        if system_online and session == "unlocked":
             # Session is already unlocked!
             self.on_unlock_success(chat_id)
             return
@@ -735,7 +744,7 @@ class PowerFlowManager:
         if matched:
             sess = data.get("session") or self.mqtt.system_session
             if result == "executed":
-                if sess == "unlocked":
+                if sess == "unlocked" and self.mqtt.system_session == "unlocked" and self.mqtt.system_status == "online":
                     self.on_unlock_success(cid)
                 else:
                     LOG.info(
@@ -763,7 +772,8 @@ class PowerFlowManager:
         """
         now = time.time()
         sys_status = getattr(self.mqtt, "system_status", "unknown")
-        desk_status = getattr(self.mqtt, "desktop_status", None)
+        if session == "unlocked" and sys_status != "online":
+            return
 
         action = None
         save_needed = False
@@ -881,6 +891,7 @@ class PowerFlowManager:
         with self._lock:
             if self.stage in (PowerFlowStage.WORKSPACE_RUNNING, PowerFlowStage.WAITING_WORKSPACE_DECISION):
                 return
+            self.pending_unlock_command_id = None
             mid = self.message_id
             if getattr(self, "auto_launch_game", False) and getattr(self, "target_game", None):
                 mode = "game"

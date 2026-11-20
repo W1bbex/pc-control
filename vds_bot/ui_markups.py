@@ -306,6 +306,17 @@ class UiMarkupsMixin:
             self.back_button("reboot_pc"),
         ]}
 
+    def startup_options_markup(self, *, power_on):
+        prefix = "power_start" if power_on else "unlock_start"
+        rows = self.workspace_vpn_choice_markup(prefix=prefix)["inline_keyboard"]
+        rows[1:1] = [
+            [{"text": "Запустить игру", "style": "primary", "icon_custom_emoji_id": ICONS.get("game"),
+              "callback_data": "power_game" if power_on else "flow_unlock_and_game"}],
+            [{"text": "Только включить" if power_on else "Только разблокировать", "style": "primary",
+              "icon_custom_emoji_id": ICONS.get("power" if power_on else "lock"), "callback_data": f"{prefix}:plain"}],
+        ]
+        return {"inline_keyboard": rows}
+
     def apps_menu_markup(self):
         return {
             "inline_keyboard": [

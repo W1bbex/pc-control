@@ -503,7 +503,7 @@ def test_reboot_menu_markup_returns_valid_2d_keyboard():
 def test_workspace_router_offline_fallback_returns_2d_keyboard():
     app = MagicMock()
     app.mqtt.health.evaluate_pc_state.return_value = MagicMock(state="OFFLINE", label="Выключен", reason="ПК выключен")
-    app.ui.back_button = TelegramBotApi("123:test_token").back_button
+    app.ui.workspace_vpn_choice_markup = TelegramBotApi("123:test_token").workspace_vpn_choice_markup
 
     route_workspace_callback(
         app=app,
@@ -517,6 +517,7 @@ def test_workspace_router_offline_fallback_returns_2d_keyboard():
     markup = sent_kwargs.get("reply_markup") or sent_args[2]
     keyboard = markup.get("inline_keyboard", [])
     assert len(keyboard) == 2
+    assert [button["callback_data"] for button in keyboard[0]] == ["power_start:incy", "power_start:happ"]
     for row in keyboard:
         assert isinstance(row, list)
         for btn in row:
